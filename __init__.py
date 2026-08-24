@@ -50,6 +50,10 @@ def register():
     from .source.model.material import texture
     texture.register()
 
+    # Register the texture baking panel (COL/NOR/PRM from node graphs + nutexb compile)
+    from .source import bake_texs
+    bake_texs.register()
+
     # Register updater components
     from .source import updater
     updater.register()
@@ -97,6 +101,10 @@ def unregister():
     
     # Unregister texture conversion tools
     texture.unregister()
+
+    # Unregister the texture baking panel
+    from .source import bake_texs
+    bake_texs.unregister()
 
     # Unregister updater components
     from .source import updater

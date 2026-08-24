@@ -1,4 +1,5 @@
 from . import anim
+from . import bake_texs
 from . import exo
 from . import extras
 from . import model

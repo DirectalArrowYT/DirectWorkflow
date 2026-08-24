@@ -318,6 +318,13 @@ classes = [
     source.model.material.shader_nodes.custom_sampler_node.SUB_CSN_ultimate_sampler,
     source.model.material.shader_nodes.custom_uv_transform_node.SUB_CSN_ultimate_uv_transform,
     source.model.material.shader_nodes.custom_sprite_sheet_params_node.SUB_CSN_ultimate_sprite_sheet_params,
+    source.bake_texs.properties.SUB_PG_bake_texs_settings,
+    source.bake_texs.operators.SUB_OP_bake_texs_run,
+    source.bake_texs.operators.SUB_OP_bake_texs_compile_only,
+    source.bake_texs.operators.SUB_OP_bake_texs_pick_output,
+    source.bake_texs.ui.SUB_PT_bake_texs,
+    source.bake_texs.ui.SUB_PT_bake_texs_channels,
+    source.bake_texs.ui.SUB_PT_bake_texs_output,
 ]
 
 def register():
