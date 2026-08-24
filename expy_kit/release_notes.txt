@@ -1,0 +1,96 @@
+version 0.6
+
+- "Bind to Armature" checks for bones with the same name
+- "Bind to Armature" can disable or delete existing constraints
+- "Bind to Armature" can retarget IK rolls
+- "Bind to Armature" can retarget to the current pose (retarget different rigs animation)
+- "Bind to Armature" can retarget to World Space (retarget to same rig with a different bind pose)
+- "Bind to Armature" can rescale target Armature
+- "Bind to Armature" accounts for namespaces with columns (:) when using presets
+- "Bind to Armature" can skip unselected bones
+- "Bind to Armature" can be used on already bound rigs
+- "Bind to Armature" Object space transform now is a checkbox to combine with other retarget spaces
+
+- "Action Rename" panel is now in the View 3D "N" panel
+- "Action Rename" panel has button to scroll through candidate actions
+- "Action Rename" panel has button to remove rename data
+
+- "Bake Actions" doesn't require selecting driving Armature anymore
+- "Bake Actions" can bake deform bones too
+- "Bake Actions" doesn't freeze when baking two similar rigs
+- "Rename from fbx" applies a name starts with or contains logic
+
+- "Transfer Root Motion" can animate at object level
+- "Extract Metarig" supports extra bones through rigify attributes
+- "Transfer Root Motion" is faster and more accurate
+
+- Retarget panel is faster
+- Retarget panel button for setting slot to active bone
+- Retarget panel button for mirroring bones to the other side
+- Retargeting panel now displays "Spine2" as "Chest"
+
+- "Convert Bone Names" renames conflicting existing names to "{name}.001"
+- "Convert Bone Names" accepts custom separator characters
+
+- "Select Constrained controls" is not overridden by "Select Animated controls"
+- "Select Constrained controls" ignoring deform bones and bones with no shape was made optional
+- "Action Range to Scene" always fits the Timeline view
+- Presets dir can be copied to the clipboard from the preferences
+
+- Jaw bone for Mixamo mapping
+- Three segments limbs mapping
+- New mapping preset: Mocap Online (Motus Digital)
+- New mapping preset: Unreal Mannequin 5.0
+
+- Fix "Clear All" button breaking mirror and set operators
+- Fix IK occasionally overriding def bones
+- Fix extracted metarig copying IK bones
+- Fix missing eyes in extracted metarig
+- Fix occasional glitch in baked animations
+- Fix renaming from Current Settings
+- Fix blender 4.0 bone collections
+
+
+version 0.52
+
+ - Bind Source and Bind Target are always displayed, deafaulted to 'Current' if settings are found
+ - Allow to turn off Location/Rotation constraints when Binding
+ - Extract Metarig is disabled if rigify is not found
+ - Enable/Disable/Remove constraints can target specific types
+ - Option to Disable/Remove existing constraints when binding
+ - Fix Rigify presets for blender 3.2
+ - Fix extracted metarig heel orientation
+ - Fix option for No-Finger Location constraints
+
+
+version 0.51
+
+- Convert Game Friendly working on new rigify face
+- Convert Game Friendly rearranges rigify twist hierarchy
+- Including Actor Core Preset
+
+
+version 0.5
+
+- Rig Mapping panel for Custom Bone Names
+
+
+version 0.4
+
+- blender 3.1 fixes
+- Extract Metarig from incomplete characters
+
+
+version 0.2
+
+- Root Motion Binding
+- Root Motion Extraction
+- Genesis 8 bone mapping
+- Rigify Mapping for Unreal Engine
+- Scale with Offset operator
+- Name Conversion also converts animations
+- Select animated controls
+- Unified Rigify IK and FK control maps
+- Grouped Menu entries
+- GameFriendly also renames the metarig target
+- Enforce Mesh Vertex Group updates in Blender 3.0
