@@ -133,18 +133,32 @@ NOR_FLIP_GREEN = False
 # ---- nutexb compile ----------------------------------------------------------
 COMPILE_NUTEXB   = True
 
+# Confirmed against the shipped assets: 79 _col files are BC7RgbaUnormSrgb,
+# 81 _nor and 66 _prm are BC7RgbaUnorm. COL holds colour so it needs the sRGB
+# variant; NOR and PRM hold data and must stay linear.
 NUTEXB_FORMATS = {
-    "_col": "BC7Srgb",
-    "_nor": "BC7Unorm",
-    "_prm": "BC7Unorm",
+    "_col": "BC7RgbaUnormSrgb",
+    "_nor": "BC7RgbaUnorm",
+    "_prm": "BC7RgbaUnorm",
 }
-# The bundled ultimate_tex_cli (0.2.2) panics on an unrecognised --format
-# value (exit 101) rather than silently substituting one, so an unlisted or
-# misspelled format is caught immediately rather than shipping a washed-out
-# COL or a broken NOR/PRM.
-NUTEXB_VALID_FORMATS = {"BC7Srgb", "BC7Unorm"}
+
+# The bundled ultimate_tex_cli (0.3.1) accepts an unknown --format silently:
+# it exits 0 and quietly writes BC7RgbaUnorm instead - confirmed directly,
+# a deliberately bogus format name still produced a file (format id 1248).
+# Every name is checked against this list first, and the format actually
+# written into each file is read back afterwards (NUTEXB_FORMAT_IDS) to
+# confirm it took, since a silent wrong-format write is otherwise invisible.
+NUTEXB_VALID_FORMATS = {
+    "Rgba8Unorm", "Rgba8UnormSrgb", "Bgra8Unorm", "Bgra8UnormSrgb",
+    "Rgba16Float", "Rgba32Float",
+    "BC1RgbaUnorm", "BC1RgbaUnormSrgb", "BC2RgbaUnorm", "BC2RgbaUnormSrgb",
+    "BC3RgbaUnorm", "BC3RgbaUnormSrgb", "BC4RUnorm", "BC4RSnorm",
+    "BC5RgUnorm", "BC5RgSnorm", "BC6hRgbUfloat", "BC6hRgbSfloat",
+    "BC7RgbaUnorm", "BC7RgbaUnormSrgb",
+}
 NUTEXB_FORMAT_IDS = {          # value stored in the nutexb footer, for verifying
-    1248: "BC7Unorm", 1253: "BC7Srgb",
+    1024: "Rgba8Unorm", 1029: "Rgba8UnormSrgb",
+    1157: "BC1RgbaUnormSrgb", 1248: "BC7RgbaUnorm", 1253: "BC7RgbaUnormSrgb",
 }
 NUTEXB_MIPMAPS = True
 
@@ -918,8 +932,14 @@ def bake_coverage_mask(scene, objects, mats, size, scratch, name):
             nt.links.new(emission.outputs["Emission"], out_node.inputs["Surface"])
             setups.append((nt, out_node, stored, emission))
         targets = set_bake_targets(objects, mats, mask, "Non-Color", scratch)
-        # Margin 0: the mask must mark real coverage, not the bleed around it.
-        run_bake(scene, 'EMIT', 1, margin=0)
+        # Same margin as the real channel bakes below, not 0. The mask feeds
+        # apply_coverage_default(), which flood-fills every texel outside it
+        # with a flat default - at margin 0 that region is exactly the UV
+        # island's own edge pixels, so it would immediately overwrite the
+        # bleed COL/NOR/PRM just extended into and the "EXTEND" margin would
+        # have no visible effect. Matching the margin here means only texels
+        # genuinely beyond the bleed (dead atlas space) get defaulted.
+        run_bake(scene, 'EMIT', 1, margin=BAKE_MARGIN)
     finally:
         clear_bake_targets(targets)
         for nt, out_node, stored, emission in setups:
