@@ -84,6 +84,99 @@ class SUB_OP_bake_texs_compile_only(Operator):
         return {'FINISHED'}
 
 
+def _find_texture_slot(material, param_id_name):
+    """The existing sub_matl_data.textures entry for a param, or None."""
+    sub_matl_data = getattr(material, 'sub_matl_data', None)
+    if sub_matl_data is None:
+        return None
+    for texture in sub_matl_data.textures:
+        if texture.param_id_name == param_id_name:
+            return texture
+    return None
+
+
+def _load_or_refresh_image(filepath, name, colorspace):
+    """Load a baked PNG as an Image named exactly `name` (no extension).
+
+    Reuses the existing datablock of that name on a re-apply (pointing it at
+    the file and reloading), rather than piling up Body_col.001, .002, ... on
+    every re-bake.
+    """
+    existing = bpy.data.images.get(name)
+    if existing is not None:
+        existing.filepath = filepath
+        existing.source = 'FILE'
+        try:
+            existing.reload()
+        except Exception:
+            pass
+        core.set_colorspace(existing, colorspace)
+        return existing
+    img = bpy.data.images.load(filepath, check_existing=False)
+    img.name = name
+    core.set_colorspace(img, colorspace)
+    return img
+
+
+class SUB_OP_bake_texs_apply_to_materials(Operator):
+    """Point each baked group's base material at its freshly baked textures"""
+    bl_idname = 'sub.bake_texs_apply_to_materials'
+    bl_label = 'Apply Baked Textures to Materials'
+    bl_description = (
+        'Load the baked COL/NOR/PRM PNGs and assign them onto each baked material\'s '
+        'own texture slots (Texture0/4/6), so Export Model actually picks them up. '
+        'Only touches the base material of a bundled group (e.g. Body, not BodyShiny) - '
+        'export already points BodyShiny at Body\'s textures on its own. '
+        'This never happens automatically when you bake - run it explicitly whenever '
+        'you actually want the bake to become the live material'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(bpy.data.filepath) and context.selected_objects
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        props = context.scene.sub_bake_texs_properties
+        core.apply_settings(props)
+
+        try:
+            groups, _ = core.collect_targets()
+        except Exception as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        applied = 0
+        notes = []
+        for group_name, group in groups.items():
+            base_material = group['materials'][0]
+            stem = core.make_stem(group['objects'][0], base_material)
+
+            for suffix, param_id_name, colorspace in (
+                ('_col', 'Texture0', 'sRGB'),
+                ('_nor', 'Texture4', 'Non-Color'),
+                ('_prm', 'Texture6', 'Non-Color'),
+            ):
+                png_path = os.path.join(core.BAKE_DIR, f'{stem}{suffix}.png')
+                if not os.path.isfile(png_path):
+                    continue
+                slot = _find_texture_slot(base_material, param_id_name)
+                if slot is None:
+                    notes.append(f'{base_material.name}: no {param_id_name} slot for {stem}{suffix} - skipped')
+                    continue
+                slot.image = _load_or_refresh_image(png_path, f'{stem}{suffix}', colorspace)
+                applied += 1
+
+        msg = f'Applied {applied} texture(s) to material slots.'
+        if notes:
+            msg += ' ' + '; '.join(notes)
+        self.report({'INFO' if not notes else 'WARNING'}, msg)
+        return {'FINISHED'}
+
+
 class SUB_OP_bake_texs_pick_output(Operator):
     """Choose the model folder that .nutexb files are written to"""
     bl_idname = 'baketexs.pick_output'

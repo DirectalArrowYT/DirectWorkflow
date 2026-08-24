@@ -321,6 +321,7 @@ classes = [
     source.bake_texs.properties.SUB_PG_bake_texs_settings,
     source.bake_texs.operators.SUB_OP_bake_texs_run,
     source.bake_texs.operators.SUB_OP_bake_texs_compile_only,
+    source.bake_texs.operators.SUB_OP_bake_texs_apply_to_materials,
     source.bake_texs.operators.SUB_OP_bake_texs_pick_output,
     source.bake_texs.ui.SUB_PT_bake_texs,
     source.bake_texs.ui.SUB_PT_bake_texs_channels,

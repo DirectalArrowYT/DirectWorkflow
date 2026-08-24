@@ -6,20 +6,39 @@ from subprocess import run, CalledProcessError
 from .convert_nutexb_to_png import get_ultimate_tex_path
 from ..create_matl_from_blender_materials import has_sub_matl_data, get_linked_materials
 from .default_textures import generated_default_texture_name_value
+from ....material_grouping import group_key_for
 from ...export_model import would_trimmed_names_be_unique, get_problematic_names, trim_name
 
 def export_nutexb_from_blender_materials(operator: bpy.types.Operator, materials: set[bpy.types.Material], export_dir: Path):
     images: set[bpy.types.Image] = set()
-    
-    linked_materials = get_linked_materials(materials)
 
-    for material in materials | linked_materials:
-        if has_sub_matl_data(material):
-            for texture in material.sub_matl_data.textures:
-                if texture.image.name in generated_default_texture_name_value:
-                    operator.report({'INFO'}, f'Not exporting {texture.image.name}, as it is a default texture.')
-                    continue
-                images.add(texture.image)
+    linked_materials = get_linked_materials(materials)
+    all_materials = materials | linked_materials
+    materials_by_name = {m.name: m for m in all_materials}
+
+    for material in all_materials:
+        if not has_sub_matl_data(material):
+            continue
+
+        # A Shiny-style bundled material (see source/material_grouping.py) has
+        # its matl texture params pointed at the base material's images
+        # (create_matl_from_blender_materials.py), so its own images - if any
+        # are even still assigned - are no longer referenced by anything and
+        # would just be an orphaned file in the output folder. Skip them here;
+        # the base material's own pass through this loop exports the shared
+        # set. Falls back to exporting this material's own images when the
+        # base isn't present in this export, matching the same fallback in
+        # create_matl_from_blender_materials.get_texture_overrides_for_bundle().
+        group_key = group_key_for(material.name, set(materials_by_name))
+        base_material = materials_by_name.get(group_key)
+        if group_key != material.name and base_material is not None and has_sub_matl_data(base_material):
+            continue
+
+        for texture in material.sub_matl_data.textures:
+            if texture.image.name in generated_default_texture_name_value:
+                operator.report({'INFO'}, f'Not exporting {texture.image.name}, as it is a default texture.')
+                continue
+            images.add(texture.image)
 
     texture_names = {image.name for image in images}
 

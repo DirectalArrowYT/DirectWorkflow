@@ -2,6 +2,7 @@ import bpy
 import re
 
 from ....dependencies import ssbh_data_py
+from ...material_grouping import group_key_for
 from .sub_matl_data import *
 
 def get_blend_state(sub_matl_blend_state: SUB_PG_matl_blend_state) -> ssbh_data_py.matl_data.BlendStateParam:
@@ -77,14 +78,38 @@ def get_sampler(sub_matl_sampler: SUB_PG_matl_sampler) -> ssbh_data_py.matl_data
 def get_samplers(samplers: list[SUB_PG_matl_sampler]) -> list[ssbh_data_py.matl_data.SamplerParam]:
     return [get_sampler(sub_matl_sampler) for sub_matl_sampler in samplers]
 
-def get_texture(sub_matl_texture: SUB_PG_matl_texture) -> ssbh_data_py.matl_data.TextureParam:
+def get_texture(sub_matl_texture: SUB_PG_matl_texture, texture_overrides: dict[str, str] = None) -> ssbh_data_py.matl_data.TextureParam:
+    image_name = sub_matl_texture.image.name
+    if texture_overrides is not None:
+        image_name = texture_overrides.get(sub_matl_texture.param_id_name, image_name)
     return ssbh_data_py.matl_data.TextureParam(
         param_id=ssbh_data_py.matl_data.ParamId.from_str(sub_matl_texture.param_id_name),
-        data=sub_matl_texture.image.name
+        data=image_name
     )
 
-def get_textures(textures: list[SUB_PG_matl_texture]) -> list[ssbh_data_py.matl_data.TextureParam]:
-    return [get_texture(sub_matl_texture) for sub_matl_texture in textures]
+def get_textures(textures: list[SUB_PG_matl_texture], texture_overrides: dict[str, str] = None) -> list[ssbh_data_py.matl_data.TextureParam]:
+    return [get_texture(sub_matl_texture, texture_overrides) for sub_matl_texture in textures]
+
+def get_texture_overrides_for_bundle(material: bpy.types.Material, materials_by_name: dict[str, bpy.types.Material]) -> dict[str, str] | None:
+    """Point a Shiny-style bundled material's textures at its base material's.
+
+    Body and BodyShiny share texture files - see source/material_grouping.py -
+    but keep their own material parameters (BodyShiny's own metalness etc.).
+    Returns {param_id_name: image_name} for the base material's textures, or
+    None if this material isn't bundled into another one (or its base isn't
+    available in this export), meaning the material's own images are used as-is.
+    """
+    group_key = group_key_for(material.name, set(materials_by_name))
+    if group_key == material.name:
+        return None
+    base_material = materials_by_name.get(group_key)
+    if base_material is None or not has_sub_matl_data(base_material):
+        return None
+    return {
+        t.param_id_name: t.image.name
+        for t in base_material.sub_matl_data.textures
+        if t.image is not None
+    }
 
 def has_sub_matl_data(material: bpy.types.Material) -> bool:
     try:
@@ -166,7 +191,7 @@ def create_default_matl_entry(material_label: str) -> ssbh_data_py.matl_data.Mat
 
     return entry
 
-def create_matl_entry_from_sub_matl_data(material_label: str, sub_matl_data: SUB_PG_sub_matl_data) -> ssbh_data_py.matl_data.MatlEntryData:
+def create_matl_entry_from_sub_matl_data(material_label: str, sub_matl_data: SUB_PG_sub_matl_data, texture_overrides: dict[str, str] = None) -> ssbh_data_py.matl_data.MatlEntryData:
     return ssbh_data_py.matl_data.MatlEntryData(
         material_label=material_label,
         shader_label=sub_matl_data.shader_label,
@@ -176,17 +201,20 @@ def create_matl_entry_from_sub_matl_data(material_label: str, sub_matl_data: SUB
         vectors=get_vectors(sub_matl_data.vectors),
         rasterizer_states=get_rasterizer_states(sub_matl_data.rasterizer_states),
         samplers=get_samplers(sub_matl_data.samplers),
-        textures=get_textures(sub_matl_data.textures),
+        textures=get_textures(sub_matl_data.textures, texture_overrides),
     )
 
 def create_matl_from_blender_materials(operator: bpy.types.Operator, blender_materials: set[bpy.types.Material]) -> ssbh_data_py.matl_data.MatlData:
     matl = ssbh_data_py.matl_data.MatlData()
-    
+
     linked_materials = get_linked_materials(blender_materials)
-    
-    for material in blender_materials | linked_materials:
+    all_materials = blender_materials | linked_materials
+    materials_by_name = {m.name: m for m in all_materials}
+
+    for material in all_materials:
         if has_sub_matl_data(material):
-            new_matl_entry = create_matl_entry_from_sub_matl_data(material.name, material.sub_matl_data)
+            texture_overrides = get_texture_overrides_for_bundle(material, materials_by_name)
+            new_matl_entry = create_matl_entry_from_sub_matl_data(material.name, material.sub_matl_data, texture_overrides)
         else:
             new_matl_entry = create_default_matl_entry(material.name)
         matl.entries.append(new_matl_entry)

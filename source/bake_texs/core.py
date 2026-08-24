@@ -76,13 +76,10 @@ SKIP_MATERIALS = set()
 # Materials that are the same surface with a different finish - cloth vs metal -
 # don't each need their own texture set. Bundled materials bake into a single
 # col/nor/prm named after the base material, each filling its own UV islands.
-# Any material whose name is another material's name plus one of these
-# suffixes is bundled into it automatically.
-MATERIAL_MERGE_SUFFIXES = ["Shiny"]
-
-# Explicit bundles for anything the suffix rule doesn't catch.
-#   "Body": ["Body", "BodyShiny", "BodyTrim"]
-MATERIAL_GROUPS = {}
+# This grouping is shared with model export (create_matl_from_blender_materials.py,
+# export_nutexb.py) so a bundled bake's file names always match what export
+# looks for - see source/material_grouping.py.
+from ..material_grouping import MATERIAL_MERGE_SUFFIXES, MATERIAL_GROUPS, group_key_for
 
 USE_SELECTION_ONLY = True
 DRY_RUN = False
@@ -1257,19 +1254,6 @@ def apply_coverage_default(img, mask_img, default_rgba):
 # =============================================================================
 # MAIN
 # =============================================================================
-def group_key_for(mat_name, all_names):
-    """Which texture set a material belongs to."""
-    for key, members in MATERIAL_GROUPS.items():
-        if mat_name in members:
-            return key
-    for suffix in MATERIAL_MERGE_SUFFIXES:
-        if suffix and mat_name.endswith(suffix):
-            base = mat_name[:-len(suffix)]
-            if base in all_names:
-                return base
-    return mat_name
-
-
 def collect_targets():
     """Map every texture set to its materials and the meshes that use them."""
     pool = (bpy.context.selected_objects if USE_SELECTION_ONLY

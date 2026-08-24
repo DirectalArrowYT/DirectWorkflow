@@ -39,6 +39,10 @@ class SUB_PT_bake_texs(Panel):
 
         layout.operator('sub.bake_texs_compile_only', icon='FILE_REFRESH')
 
+        layout.separator()
+        layout.operator('sub.bake_texs_apply_to_materials', icon='MATERIAL')
+        layout.label(text="Doesn't happen automatically - only on click", icon='INFO')
+
 
 class SUB_PT_bake_texs_channels(Panel):
     bl_space_type = 'VIEW_3D'
