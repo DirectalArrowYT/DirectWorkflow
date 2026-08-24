@@ -50,10 +50,10 @@ class SUB_PT_reimport_materials(Panel):
             row.prop(ssp, 'material_reimport_side_load')
             if ssp.material_reimport_side_load:
                 box = layout.box()
-                box.label(text='Side-Load is ON', icon='INFO')
-                box.label(text='Your assigned materials will NOT be updated.')
-                box.label(text='Turn this OFF to refresh their Ultimate')
-                box.label(text='Material Data (vectors, textures, ...) in place.')
+                box.label(text='Side-Load: your Blender materials stay', icon='INFO')
+                box.label(text='untouched on the meshes. Export reads the')
+                box.label(text='.numatb data from the twins instead -')
+                box.label(text='needs "Prefer Side-Loaded Materials" below.')
             row = layout.row(align=True)
             row.operator('sub.reimport_materials', icon='IMPORT',
                         text='Side-Load Materials' if ssp.material_reimport_side_load

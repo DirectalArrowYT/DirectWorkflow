@@ -278,17 +278,18 @@ class SubSceneProperties(PropertyGroup):
         default='',
     )
     material_reimport_side_load: BoolProperty(
-        name="Side-Load (Import As Separate Copies)",
+        name="Side-Load (Keep Your Blender Materials)",
         description=(
-            "OFF (recommended): refresh the Ultimate Material Data on the materials "
-            "already assigned to your meshes, in place. Nothing is replaced - the "
-            "material, its name and its node tree all stay exactly as they are, only "
-            "the Smash data (vectors, textures, floats, samplers...) is updated from "
-            "the .numatb. This is what Export Model reads.\n\n"
-            "ON: instead import the .numatb's materials as separate datablocks named "
-            '"<name> (Side-Loaded)", assigned to no mesh, and leave the real materials '
-            "untouched. For comparing against a .numatb without changing anything. "
-            "Export ignores these unless 'Prefer Side-Loaded Materials' is also on"
+            "ON: import the .numatb's materials as separate datablocks named "
+            '"<name> (Side-Loaded)" that are assigned to no mesh. The materials on '
+            "your meshes are not touched at all - node trees, custom shaders and "
+            "their own Ultimate Material Data all stay exactly as they are. Turn on "
+            "'Prefer Side-Loaded Materials' below and export reads the Smash data "
+            "from the twins, so your Blender look and the exported .numatb data stay "
+            "completely independent.\n\n"
+            "OFF: refresh the Ultimate Material Data on the assigned materials "
+            "themselves, in place. Their name and node tree are still preserved, but "
+            "their Smash data is overwritten from the .numatb"
         ),
         default=False,
     )
