@@ -47,3 +47,23 @@ def group_key_for(mat_name, all_names):
 def is_bundled(mat_name, all_names):
     """True when mat_name folds into a *different* material's group."""
     return group_key_for(mat_name, all_names) != mat_name
+
+
+# --- Side-loaded materials ---------------------------------------------------
+# A "side-loaded" material is a twin of a real, mesh-assigned material that
+# Material Re-Importer creates when its Side-Load option is on: it carries
+# freshly re-imported smash material data (shader, textures, params) but is
+# never assigned to any mesh, so the live material - and whatever you've set
+# up on it - is left completely alone. Export's "Prefer Side-Loaded Materials"
+# toggle reads from the twin instead of the live material when one exists.
+#
+# The naming convention is deliberately explicit rather than relying on
+# Blender's own ".001" collision suffixing, which is not a signal anyone
+# controls - two completely unrelated materials can end up ".001" apart for
+# reasons that have nothing to do with side-loading.
+SIDE_LOAD_SUFFIX = " (Side-Loaded)"
+
+
+def side_loaded_name(base_name):
+    """The material name a side-loaded twin of base_name would have."""
+    return f"{base_name}{SIDE_LOAD_SUFFIX}"

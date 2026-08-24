@@ -2,7 +2,7 @@ import bpy
 import re
 
 from ....dependencies import ssbh_data_py
-from ...material_grouping import group_key_for
+from ...material_grouping import group_key_for, side_loaded_name
 from .sub_matl_data import *
 
 def get_blend_state(sub_matl_blend_state: SUB_PG_matl_blend_state) -> ssbh_data_py.matl_data.BlendStateParam:
@@ -90,7 +90,7 @@ def get_texture(sub_matl_texture: SUB_PG_matl_texture, texture_overrides: dict[s
 def get_textures(textures: list[SUB_PG_matl_texture], texture_overrides: dict[str, str] = None) -> list[ssbh_data_py.matl_data.TextureParam]:
     return [get_texture(sub_matl_texture, texture_overrides) for sub_matl_texture in textures]
 
-def get_texture_overrides_for_bundle(material: bpy.types.Material, materials_by_name: dict[str, bpy.types.Material]) -> dict[str, str] | None:
+def get_texture_overrides_for_bundle(material: bpy.types.Material, materials_by_name: dict[str, bpy.types.Material], data_source_by_name: dict[str, bpy.types.Material] = None) -> dict[str, str] | None:
     """Point a Shiny-style bundled material's textures at its base material's.
 
     Body and BodyShiny share texture files - see source/material_grouping.py -
@@ -98,16 +98,25 @@ def get_texture_overrides_for_bundle(material: bpy.types.Material, materials_by_
     Returns {param_id_name: image_name} for the base material's textures, or
     None if this material isn't bundled into another one (or its base isn't
     available in this export), meaning the material's own images are used as-is.
+
+    data_source_by_name lets the base material's own resolved data source
+    (see resolve_material_data_source - itself, or its side-loaded twin) supply
+    the textures instead of the base material's live data, so a bundled
+    material follows whatever its base resolves to. Defaults to the base
+    material itself when not given.
     """
     group_key = group_key_for(material.name, set(materials_by_name))
     if group_key == material.name:
         return None
     base_material = materials_by_name.get(group_key)
-    if base_material is None or not has_sub_matl_data(base_material):
+    if base_material is None:
+        return None
+    base_data_source = (data_source_by_name or {}).get(group_key, base_material)
+    if not has_sub_matl_data(base_data_source):
         return None
     return {
         t.param_id_name: t.image.name
-        for t in base_material.sub_matl_data.textures
+        for t in base_data_source.sub_matl_data.textures
         if t.image is not None
     }
 
@@ -119,6 +128,21 @@ def has_sub_matl_data(material: bpy.types.Material) -> bool:
     if sub_matl_data.shader_label == "":
         return False
     return True
+
+def resolve_material_data_source(material: bpy.types.Material, prefer_side_loaded: bool) -> bpy.types.Material:
+    """Which material's sub_matl_data should actually be read for `material`.
+
+    Normally just `material` itself. When prefer_side_loaded is on and a
+    side-loaded twin exists with real smash data (source/material_grouping.py),
+    the twin is used instead - the exported material_label still comes from
+    `material`, only the underlying data changes.
+    """
+    if not prefer_side_loaded:
+        return material
+    twin = bpy.data.materials.get(side_loaded_name(material.name))
+    if twin is not None and has_sub_matl_data(twin):
+        return twin
+    return material
 
 def get_linked_materials(materials: set[bpy.types.Material]) -> set[bpy.types.Material]:
     linked_materials: set[bpy.types.Material] = set()
@@ -211,10 +235,20 @@ def create_matl_from_blender_materials(operator: bpy.types.Operator, blender_mat
     all_materials = blender_materials | linked_materials
     materials_by_name = {m.name: m for m in all_materials}
 
+    prefer_side_loaded = bpy.context.scene.sub_scene_properties.export_prefer_sideloaded_materials
+    # Resolve each material's effective data source (itself, or its
+    # side-loaded twin) up front, so a Shiny-style bundled material follows
+    # whatever its base material resolves to, not just the base's live data.
+    data_source_by_name = {
+        name: resolve_material_data_source(material, prefer_side_loaded)
+        for name, material in materials_by_name.items()
+    }
+
     for material in all_materials:
-        if has_sub_matl_data(material):
-            texture_overrides = get_texture_overrides_for_bundle(material, materials_by_name)
-            new_matl_entry = create_matl_entry_from_sub_matl_data(material.name, material.sub_matl_data, texture_overrides)
+        data_source = data_source_by_name[material.name]
+        if has_sub_matl_data(data_source):
+            texture_overrides = get_texture_overrides_for_bundle(material, materials_by_name, data_source_by_name)
+            new_matl_entry = create_matl_entry_from_sub_matl_data(material.name, data_source.sub_matl_data, texture_overrides)
         else:
             new_matl_entry = create_default_matl_entry(material.name)
         matl.entries.append(new_matl_entry)

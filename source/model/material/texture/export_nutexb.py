@@ -4,7 +4,7 @@ from pathlib import Path
 from subprocess import run, CalledProcessError
 
 from .convert_nutexb_to_png import get_ultimate_tex_path
-from ..create_matl_from_blender_materials import has_sub_matl_data, get_linked_materials
+from ..create_matl_from_blender_materials import has_sub_matl_data, get_linked_materials, resolve_material_data_source
 from .default_textures import generated_default_texture_name_value
 from ....material_grouping import group_key_for
 from ...export_model import would_trimmed_names_be_unique, get_problematic_names, trim_name
@@ -16,8 +16,17 @@ def export_nutexb_from_blender_materials(operator: bpy.types.Operator, materials
     all_materials = materials | linked_materials
     materials_by_name = {m.name: m for m in all_materials}
 
+    prefer_side_loaded = bpy.context.scene.sub_scene_properties.export_prefer_sideloaded_materials
+    # Same resolution as create_matl_from_blender_materials.py, so the images
+    # exported here always match what the matl entries actually reference.
+    data_source_by_name = {
+        name: resolve_material_data_source(material, prefer_side_loaded)
+        for name, material in materials_by_name.items()
+    }
+
     for material in all_materials:
-        if not has_sub_matl_data(material):
+        data_source = data_source_by_name[material.name]
+        if not has_sub_matl_data(data_source):
             continue
 
         # A Shiny-style bundled material (see source/material_grouping.py) has
@@ -31,10 +40,12 @@ def export_nutexb_from_blender_materials(operator: bpy.types.Operator, materials
         # create_matl_from_blender_materials.get_texture_overrides_for_bundle().
         group_key = group_key_for(material.name, set(materials_by_name))
         base_material = materials_by_name.get(group_key)
-        if group_key != material.name and base_material is not None and has_sub_matl_data(base_material):
-            continue
+        if group_key != material.name and base_material is not None:
+            base_data_source = data_source_by_name.get(group_key, base_material)
+            if has_sub_matl_data(base_data_source):
+                continue
 
-        for texture in material.sub_matl_data.textures:
+        for texture in data_source.sub_matl_data.textures:
             if texture.image.name in generated_default_texture_name_value:
                 operator.report({'INFO'}, f'Not exporting {texture.image.name}, as it is a default texture.')
                 continue

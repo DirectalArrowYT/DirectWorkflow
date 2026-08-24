@@ -47,7 +47,12 @@ class SUB_PT_reimport_materials(Panel):
             row = layout.row(align=True)
             row.operator('sub.mat_reimport_dir_selector', icon='ZOOM_ALL', text='Re-Select folder')
             row = layout.row(align=True)
-            row.operator('sub.reimport_materials', icon='IMPORT', text='Re-Import materials')
+            row.prop(ssp, 'material_reimport_side_load')
+            row = layout.row(align=True)
+            row.operator('sub.reimport_materials', icon='IMPORT',
+                        text='Side-Load Materials' if ssp.material_reimport_side_load else 'Re-Import materials')
+            layout.separator()
+            layout.prop(ssp, 'export_prefer_sideloaded_materials')
 
 class SUB_OP_mat_reimport_directory_selector(Operator):
     bl_idname = 'sub.mat_reimport_dir_selector'
@@ -115,9 +120,10 @@ class SUB_OP_reimport_materials(Operator):
 def reimport_materials(operator: Operator, context):
     from .create_blender_materials_from_matl import create_blender_materials_from_matl
     from ..export_model import would_trimmed_names_be_unique, trim_name, get_problematic_names
+    from ...material_grouping import side_loaded_name
 
     ssp: SubSceneProperties = context.scene.sub_scene_properties
-    arma: bpy.types.Object = ssp.material_reimport_arma 
+    arma: bpy.types.Object = ssp.material_reimport_arma
     mesh_objects: set[bpy.types.Object] = {child for child in arma.children if child.type == 'MESH'}
     materials: set[bpy.types.Material] = {material_slot.material for mesh_object in mesh_objects for material_slot in mesh_object.material_slots}
     material_names: set[str] = {material.name for material in materials}
@@ -127,13 +133,35 @@ def reimport_materials(operator: Operator, context):
             message = f'The material name of "{problematic_name}" is not a unique name after trimming! Cannot reimport Materials! (Trimmed name is "{trim_name(problematic_name)}")'
             operator.report({'WARNING'}, message)
         return
-    
+
     ssbh_matl = ssbh_data_py.matl_data.read_matl(str(ssp.material_reimport_numatb_path))
     material_label_to_material = create_blender_materials_from_matl(operator, ssbh_matl, ssp.material_reimport_folder)
+
+    if ssp.material_reimport_side_load:
+        # Rename the freshly-created materials to their side-loaded names
+        # instead of assigning them to any mesh slot - the currently-assigned
+        # materials, and everything set up on them, are left untouched.
+        # Remove any stale twin from a previous side-load first, so the exact
+        # "<name> (Side-Loaded)" name is always free - otherwise Blender would
+        # auto-suffix the new one to ".001" and the exact-name lookup that
+        # export's "Prefer Side-Loaded Materials" toggle relies on would miss it.
+        for label, material in material_label_to_material.items():
+            target_name = side_loaded_name(label)
+            old_twin = bpy.data.materials.get(target_name)
+            if old_twin is not None and old_twin is not material:
+                bpy.data.materials.remove(old_twin, do_unlink=True)
+            material.name = target_name
+        operator.report(
+            {'INFO'},
+            f'Side-loaded {len(material_label_to_material)} material(s) as "<name> (Side-Loaded)" - '
+            'not assigned to any mesh. Turn on "Prefer Side-Loaded Materials" to export from them.'
+        )
+        return
+
     for mesh_object in mesh_objects:
         for material_slot in mesh_object.material_slots:
             new_material = material_label_to_material.get(trim_name(material_slot.material.name))
             if new_material is not None:
                 material_slot.material = new_material
 
-    
+

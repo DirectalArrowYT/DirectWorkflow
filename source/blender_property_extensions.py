@@ -277,6 +277,29 @@ class SubSceneProperties(PropertyGroup):
         description='The selected .numatb',
         default='',
     )
+    material_reimport_side_load: BoolProperty(
+        name="Side-Load (Don't Replace Assigned Materials)",
+        description=(
+            "Import the .numatb's materials as new, separate datablocks named "
+            '"<name> (Side-Loaded)" without assigning them to any mesh - your '
+            'current materials, and whatever you have set up on them, are left '
+            "completely alone. Turn on 'Prefer Side-Loaded Materials' below to "
+            "have export read from these instead of what's actually assigned"
+        ),
+        default=False,
+    )
+    export_prefer_sideloaded_materials: BoolProperty(
+        name='Prefer Side-Loaded Materials',
+        description=(
+            "When exporting, for any material that has a side-loaded twin "
+            "(Material Re-Importer with Side-Load on), use the side-loaded "
+            "version's data instead of what's actually assigned to the mesh. "
+            "The exported material label still matches the mesh's own material "
+            "name - only which data is used changes. Off: only ever use what's "
+            "actually assigned"
+        ),
+        default=False,
+    )
     cv31_modal_last_mode: StringProperty(
         name='Last Eye Material CV31 Modal Operator Mode',
         description='the last used mode for this operator',
