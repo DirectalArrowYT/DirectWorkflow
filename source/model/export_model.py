@@ -608,17 +608,29 @@ def create_and_save_meshex(operator, folder, ssbh_mesh_data):
 
 def get_mesh_materials(operator, export_meshes) -> set[bpy.types.Material]:
     #  Gather Material Info
+    #
+    # Reads through mesh.material_slots, NOT mesh.data.materials directly.
+    # They're the same storage and always agree for a slot whose Link is the
+    # default 'DATA' - but a slot can be set to 'OBJECT' (a per-object
+    # material override, sharing one mesh data-block across several objects
+    # with different materials each), and material_slots[i].material is the
+    # only read that respects that. Reading mesh.data.materials[i] instead
+    # would silently return the OLD material in that case even after
+    # SUB_OP_reimport_materials correctly wrote the new one to the slot -
+    # since that operator assigns through material_slot.material too, so it
+    # already goes wherever Link says it should.
     materials = set()
     for mesh in export_meshes:
-        if len(mesh.data.materials) > 0:
-            if mesh.data.materials[0] is not None:
-                if len(mesh.data.materials) > 1:
+        if len(mesh.material_slots) > 0:
+            first_material = mesh.material_slots[0].material
+            if first_material is not None:
+                if len(mesh.material_slots) > 1:
                     message = f'The mesh {mesh.name} has more than one material slot. Only the first material will be exported.'
                     operator.report({'WARNING'}, message)
 
-                materials.add(mesh.data.materials[0])
+                materials.add(first_material)
             else:
-                message = f'The mesh {mesh.name} has no material created for the first material slot.' 
+                message = f'The mesh {mesh.name} has no material created for the first material slot.'
                 message += ' Cannot create model.numatb. Create a material or disable .NUMATB export.'
                 raise RuntimeError(message)
 

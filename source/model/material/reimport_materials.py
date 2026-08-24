@@ -117,15 +117,61 @@ class SUB_OP_reimport_materials(Operator):
         reimport_materials(self, context)
         return {'FINISHED'}
 
+_SUB_MATL_DATA_COLLECTIONS = (
+    'bools', 'floats', 'vectors', 'textures',
+    'samplers', 'blend_states', 'rasterizer_states', 'vertex_attributes',
+)
+
+
+def refresh_sub_matl_data(material: bpy.types.Material, entry, texture_name_to_image_dict):
+    """Overwrite an EXISTING material's Ultimate Material Data from a fresh
+    .numatb entry, in place - the material itself (name, node tree, whatever
+    else the user built on it) is left completely alone.
+
+    Mirrors exactly what create_blender_materials_from_matl() fills in for a
+    brand new material (same set_shader_label/add_* calls, same source data),
+    just retargeted at a material that already exists instead of creating a
+    new one. Every add_* call only appends - see sub_matl_data.py, none of
+    them clear first - so every collection is cleared here before refilling,
+    or repeated reimports would pile up duplicate texture/float/vector
+    entries on top of the old ones instead of replacing them.
+
+    Does NOT rebuild the node tree, viewport display settings, blend method,
+    or backface culling - only sub_matl_data, which is what Export Model
+    actually reads (source/model/material/texture/export_nutexb.py and
+    create_matl_from_blender_materials.py both read straight from it). Left
+    untouched: linked_materials (the eye-material cross-linking system) -
+    rebuilding that correctly depends on sibling materials also being
+    refreshed in the same pass, which is more machinery than this needs for
+    the common case; left as whatever it already was rather than risking
+    clearing a working cross-link.
+    """
+    from .create_blender_materials_from_matl import get_vertex_attributes
+
+    sub_matl_data = material.sub_matl_data
+    for collection_name in _SUB_MATL_DATA_COLLECTIONS:
+        getattr(sub_matl_data, collection_name).clear()
+
+    sub_matl_data.set_shader_label(entry.shader_label)
+    sub_matl_data.add_bools(entry.booleans)
+    sub_matl_data.add_floats(entry.floats)
+    sub_matl_data.add_vectors(entry.vectors)
+    sub_matl_data.add_textures(entry.textures, texture_name_to_image_dict)
+    sub_matl_data.add_samplers(entry.samplers)
+    sub_matl_data.add_blend_states(entry.blend_states)
+    sub_matl_data.add_rasterizer_states(entry.rasterizer_states)
+    sub_matl_data.add_vertex_attributes(get_vertex_attributes(entry.shader_label))
+
+
 def reimport_materials(operator: Operator, context):
-    from .create_blender_materials_from_matl import create_blender_materials_from_matl
+    from .create_blender_materials_from_matl import create_blender_materials_from_matl, create_default_textures, import_material_images
     from ..export_model import would_trimmed_names_be_unique, trim_name, get_problematic_names
     from ...material_grouping import side_loaded_name
 
     ssp: SubSceneProperties = context.scene.sub_scene_properties
     arma: bpy.types.Object = ssp.material_reimport_arma
     mesh_objects: set[bpy.types.Object] = {child for child in arma.children if child.type == 'MESH'}
-    materials: set[bpy.types.Material] = {material_slot.material for mesh_object in mesh_objects for material_slot in mesh_object.material_slots}
+    materials: set[bpy.types.Material] = {material_slot.material for mesh_object in mesh_objects for material_slot in mesh_object.material_slots if material_slot.material is not None}
     material_names: set[str] = {material.name for material in materials}
     if not would_trimmed_names_be_unique(material_names):
         problematic_names = get_problematic_names(material_names)
@@ -135,16 +181,15 @@ def reimport_materials(operator: Operator, context):
         return
 
     ssbh_matl = ssbh_data_py.matl_data.read_matl(str(ssp.material_reimport_numatb_path))
-    material_label_to_material = create_blender_materials_from_matl(operator, ssbh_matl, ssp.material_reimport_folder)
 
     if ssp.material_reimport_side_load:
-        # Rename the freshly-created materials to their side-loaded names
-        # instead of assigning them to any mesh slot - the currently-assigned
-        # materials, and everything set up on them, are left untouched.
-        # Remove any stale twin from a previous side-load first, so the exact
-        # "<name> (Side-Loaded)" name is always free - otherwise Blender would
-        # auto-suffix the new one to ".001" and the exact-name lookup that
-        # export's "Prefer Side-Loaded Materials" toggle relies on would miss it.
+        # Side-loading still creates whole separate materials, named
+        # "<name> (Side-Loaded)" and never assigned to any mesh - that's a
+        # deliberately different workflow (compare two versions of the same
+        # material's data without touching what's actually in use) from a
+        # plain reimport's in-place refresh below, so it keeps using
+        # create_blender_materials_from_matl() to build full new materials.
+        material_label_to_material = create_blender_materials_from_matl(operator, ssbh_matl, ssp.material_reimport_folder)
         for label, material in material_label_to_material.items():
             target_name = side_loaded_name(label)
             old_twin = bpy.data.materials.get(target_name)
@@ -158,10 +203,47 @@ def reimport_materials(operator: Operator, context):
         )
         return
 
+    # Plain reimport: refresh Ultimate Material Data on the materials already
+    # assigned, in place - never create a new material or touch which one is
+    # assigned to which mesh.
+    entry_by_label = {entry.material_label: entry for entry in ssbh_matl.entries}
+    create_default_textures()
+    texture_name_to_image_dict = import_material_images(operator, ssbh_matl, ssp.material_reimport_folder)
+
+    skipped: dict[str, set[str]] = {}   # current material name (trimmed) -> mesh names it's on
+    refreshed_materials: set[bpy.types.Material] = set()
     for mesh_object in mesh_objects:
         for material_slot in mesh_object.material_slots:
-            new_material = material_label_to_material.get(trim_name(material_slot.material.name))
-            if new_material is not None:
-                material_slot.material = new_material
+            material = material_slot.material
+            if material is None:
+                continue
+            current_name = trim_name(material.name)
+            entry = entry_by_label.get(current_name)
+            if entry is None:
+                # Nothing in the freshly-parsed .numatb has this label. Used
+                # to be silent - a material left with stale sub_matl_data
+                # after reimport looked identical to one that had genuinely
+                # been refreshed, and Export Model would go on reading
+                # whatever stale data it already had. Most often this means
+                # the mesh's current material name doesn't match its label in
+                # this particular .numatb - a manual rename, or (for
+                # something like eyes) a material this file's .numatb was
+                # never going to contain in the first place.
+                skipped.setdefault(current_name, set()).add(mesh_object.name)
+                continue
+            if material in refreshed_materials:
+                continue   # already handled via another mesh sharing this material
+            refresh_sub_matl_data(material, entry, texture_name_to_image_dict)
+            refreshed_materials.add(material)
+
+    if skipped:
+        detail = '; '.join(f'"{name}" (on {", ".join(sorted(meshes))})'
+                           for name, meshes in sorted(skipped.items()))
+        operator.report({'WARNING'},
+            f'Refreshed Ultimate Material Data on {len(refreshed_materials)} material(s). No matching '
+            f'label in this .numatb for: {detail} - left as-is, so these will export with whatever '
+            f'data they already had. Check the material name matches its label in the .numatb.')
+    else:
+        operator.report({'INFO'}, f'Refreshed Ultimate Material Data on {len(refreshed_materials)} material(s).')
 
 
