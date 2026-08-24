@@ -84,9 +84,8 @@ class SUB_PT_export_model(Panel):
                         break
                     box.row().label(text=f'{missing_bone}', icon='BONE_DATA')
             layout.row().label(text='A new "update.prc" file is needed or the skeleton will glitch in game!')
-            layout.row().label(text='The new "update.prc" file does NOT go with the rest of the model files!')
-            layout.row().label(text='The new "update.prc" file goes in the motion folder!')
-            layout.row().label(text='example: fighter/demon/motion/body/c00/update.prc')
+            layout.row().label(text='Exporting will save it straight into the motion folder automatically')
+            layout.row().label(text='(fighter/demon/motion/body/c00/update.prc, not the model folder).')
             if '' == ssp.vanilla_update_prc:
                 layout.row().label(text='Please select the vanilla "update.prc" file to properly generate the new one.')
                 layout.row().operator('sub.vanilla_update_prc_selector', icon='FILE', text='Select Vanilla update.prc')
@@ -473,12 +472,29 @@ def export_model(operator: bpy.types.Operator, context, directory, include_numdl
                 ssbh_skel_data.save(path)
             except Exception as e:
                 operator.report({'ERROR'}, f'Failed to save .nusktb, Error="{e}" ; Traceback=\n{traceback.format_exc()}')
-        prc_path = str(folder.joinpath('update.prc'))
         if prc is not None:
-            try:
-                prc.save(prc_path)
-            except Exception as e:
-                operator.report({'ERROR'}, f'Failed to save update.prc, Error="{e}" ; Traceback=\n{traceback.format_exc()}')
+            motion_folder = get_motion_folder_for_model_folder(folder)
+            if motion_folder is not None:
+                try:
+                    motion_folder.mkdir(parents=True, exist_ok=True)
+                    prc_path = str(motion_folder.joinpath('update.prc'))
+                    prc.save(prc_path)
+                    operator.report({'INFO'}, f'Saved update.prc to the motion folder: {prc_path}')
+                except Exception as e:
+                    operator.report({'ERROR'}, f'Failed to save update.prc, Error="{e}" ; Traceback=\n{traceback.format_exc()}')
+            else:
+                # No "model" path component to swap for "motion" - this export
+                # isn't under the usual fighter/<name>/model/... layout, so
+                # there's no sibling folder to guess. Fall back to next to the
+                # model files rather than silently dropping the file.
+                prc_path = str(folder.joinpath('update.prc'))
+                try:
+                    prc.save(prc_path)
+                    operator.report({'WARNING'},
+                        f'Could not find a "model" folder in the export path to locate the '
+                        f'motion folder, so update.prc was saved next to the model files instead: {prc_path}')
+                except Exception as e:
+                    operator.report({'ERROR'}, f'Failed to save update.prc, Error="{e}" ; Traceback=\n{traceback.format_exc()}')
 
     if include_nuhlpb:
         try:
@@ -522,6 +538,34 @@ def export_model(operator: bpy.types.Operator, context, directory, include_numdl
         setup_visibility_drivers(arma)
 
     arma.data.pose_position = old_pose_position
+
+def get_motion_folder_for_model_folder(model_folder: Path) -> "Path | None":
+    """The motion/... folder that sits next to a model/... export folder.
+
+    update.prc belongs in the motion folder, never with the rest of the model
+    files - fighter/<name>/motion/body/c00/update.prc, not
+    fighter/<name>/model/body/c00/update.prc. Putting it in the wrong one is
+    exactly the "skeleton glitches in game" failure the export panel warns
+    about above, and it used to be a step the user had to remember to do by
+    hand after every export.
+
+    Swaps the LAST path component that is exactly "model" for "motion",
+    matching the same convention SUB_OP_swing_import already uses (there, via
+    a plain '/model/' -> '/motion/' string replace on the model path). Done
+    here via Path.parts instead, so a folder that merely contains the
+    substring "model" somewhere in its name - "custom_model_v2", say - can't
+    misfire. The LAST match is used because the segment that means the export
+    location is the deepest one (.../model/body/c00), not some unrelated
+    ancestor folder earlier in the path that happens to share the name.
+    Returns None if no path component is exactly "model".
+    """
+    parts = list(model_folder.parts)
+    indices = [i for i, part in enumerate(parts) if part.lower() == 'model']
+    if not indices:
+        return None
+    parts[indices[-1]] = 'motion'
+    return Path(*parts)
+
 
 def create_skel_and_prc(operator, context, linked_nusktb_settings, folder) -> tuple[ssbh_data_py.skel_data.SkelData, Any]:
     try:
