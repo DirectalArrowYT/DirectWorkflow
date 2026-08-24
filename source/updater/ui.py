@@ -19,7 +19,7 @@ class SUB_PT_update_plugin(Panel):
         layout.use_property_split = False
         
         # Commit information
-        layout.row().label(text="A new update is available on animation-workflow branch!")
+        layout.row().label(text="A new update is available!")
         
         # Current and latest commit info
         current_version = bl_info['version']
@@ -101,6 +101,6 @@ class SUB_PT_updater_settings(Panel):
         
         # Information
         layout.separator()
-        layout.row().label(text="Repository: CrusherD2/smash-ultimate-blender")
-        layout.row().label(text="Branch: animation-workflow")
+        layout.row().label(text="Repository: private server (Hype Bros Studios)")
+        layout.row().label(text="Branch: main")
         layout.row().label(text="Updates monitor commits on this branch")

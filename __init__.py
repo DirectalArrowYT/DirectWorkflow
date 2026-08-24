@@ -53,11 +53,10 @@ def register():
     from .source import updater
     updater.register()
 
-    # Auto-update checking is disabled (source/updater/version_check.py,
-    # DISABLE_UPDATE_CHECK) - this addon is a local fork with custom
-    # swing-bone-collision tools that upstream doesn't have. The call below
-    # is now a no-op that never reaches the network; kept so the updater
-    # panel's globals (UPDATE_STATUS etc.) still initialize cleanly.
+    # Checks this fork's own private repo (source/updater/version_check.py,
+    # UPDATE_REMOTE_URL) for a newer commit on main - a quick `git fetch`, not
+    # a working-tree change. Set DISABLE_UPDATE_CHECK there to skip this at
+    # startup, e.g. when working somewhere with no route to that server.
     from .source.updater.version_check import check_for_newer_version
     check_for_newer_version()
 
