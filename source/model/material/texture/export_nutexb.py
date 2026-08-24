@@ -9,8 +9,25 @@ from .default_textures import generated_default_texture_name_value
 from ....material_grouping import group_key_for
 from ...export_model import would_trimmed_names_be_unique, get_problematic_names, trim_name
 
+# Texture4 (NOR) and Texture6 (PRM) are the only slots create_blender_materials_
+# from_matl.py's own setup_blender_material_node_tree() explicitly forces to
+# 'Non-Color' on import - COL (Texture0) is never explicitly set to 'sRGB'
+# anywhere in this addon, it only ever gets whatever colorspace Blender
+# happened to default a freshly-loaded image to. That made this function's
+# old colorspace-only format check silently wrong for COL whenever that
+# default wasn't exactly 'sRGB' - a real, reproduced case (colorspace was
+# something else, so it fell into the "unsupported colorspace" branch, which
+# defaulted to BC7Unorm/linear: a color texture written as data). Determine
+# the format primarily from which texture param the image actually is - a
+# deterministic Smash Ultimate convention, not per-image Blender state -
+# falling back to the image's own colorspace only for slots outside this set.
+LINEAR_TEXTURE_PARAM_NAMES = {'Texture4', 'Texture6'}
+
 def export_nutexb_from_blender_materials(operator: bpy.types.Operator, materials: set[bpy.types.Material], export_dir: Path):
-    images: set[bpy.types.Image] = set()
+    # image -> every param_id_name (Texture0, Texture4, ...) it's plugged into,
+    # across every exported material - needed to pick the export format below,
+    # since a single `images` set would lose which slot each one came from.
+    image_param_names: dict[bpy.types.Image, set[str]] = {}
 
     linked_materials = get_linked_materials(materials)
     all_materials = materials | linked_materials
@@ -49,8 +66,9 @@ def export_nutexb_from_blender_materials(operator: bpy.types.Operator, materials
             if texture.image.name in generated_default_texture_name_value:
                 operator.report({'INFO'}, f'Not exporting {texture.image.name}, as it is a default texture.')
                 continue
-            images.add(texture.image)
+            image_param_names.setdefault(texture.image, set()).add(texture.param_id_name)
 
+    images = set(image_param_names)
     texture_names = {image.name for image in images}
 
     trim_names = would_trimmed_names_be_unique(texture_names)
@@ -82,13 +100,18 @@ def export_nutexb_from_blender_materials(operator: bpy.types.Operator, materials
             nutexb_filepath = export_dir.joinpath(image.name + ".nutexb")
 
         format: str
-        if image.colorspace_settings.name == 'sRGB':
-            format = "BC7Srgb"
+        param_names = image_param_names.get(image, set())
+        if param_names & LINEAR_TEXTURE_PARAM_NAMES:
+            format = "BC7Unorm"
         elif image.colorspace_settings.name == 'Non-Color':
             format = "BC7Unorm"
+        elif image.colorspace_settings.name == 'sRGB':
+            format = "BC7Srgb"
         else:
-            operator.report({'WARNING'}, f"Image `{image.name}` has unsupported color space of `{image.colorspace_settings.name}`, defaulting to BC7Unorm")
-            format = "BC7Unorm"
+            operator.report({'WARNING'}, f"Image `{image.name}` (param(s) {sorted(param_names)}) has "
+                                         f"colorspace `{image.colorspace_settings.name}`, not sRGB or "
+                                         f"Non-Color - defaulting to sRGB since it isn't Texture4/Texture6")
+            format = "BC7Srgb"
 
         try:
             run([get_ultimate_tex_path(), str(temp_image_path), str(nutexb_filepath), "--format", format], capture_output=True, check=True)

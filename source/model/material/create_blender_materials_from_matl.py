@@ -318,6 +318,15 @@ def setup_blender_material_node_tree(material: bpy.types.Material):
         if texture.node_name in linear_textures_names and texture_node.image:
             texture_node.image.colorspace_settings.name = 'Non-Color'
             texture_node.image.alpha_mode = 'CHANNEL_PACKED'
+        elif texture.node_name == ParamId.Texture0.name and texture_node.image:
+            # COL was never explicitly set here, only ever relying on whatever
+            # colorspace Blender happened to default a freshly-loaded image to.
+            # export_nutexb.py's format check reads this - an unset/wrong
+            # default there silently exported COL as linear (BC7Unorm) instead
+            # of sRGB. That's now fixed independently of this (export decides
+            # format from the texture param, not the image's colorspace), but
+            # set it explicitly here too so the viewport display is correct.
+            texture_node.image.colorspace_settings.name = 'sRGB'
         
         # Create UV Map Node
         uv_map_node: ShaderNodeUVMap = nodes.new("ShaderNodeUVMap")
