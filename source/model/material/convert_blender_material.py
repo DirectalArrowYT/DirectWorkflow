@@ -16,6 +16,27 @@ from .create_blender_materials_from_matl import create_default_textures
 from .texture.convert_textures import create_nor_from_material, create_prm_from_material
 ParamId = ssbh_data_py.matl_data.ParamId
 
+
+def _force_col_colorspace(image):
+    """Force a COL (Texture0/Texture1) image to sRGB, regardless of whatever
+    colorspace it already had.
+
+    Every COL image below is picked up from the user's own existing node
+    graph (get_tex_image_going_to_linked_input) or loaded by name/filepath
+    with bpy.data.images.load(), which reuses an already-loaded datablock of
+    that name rather than creating a fresh one. Either way its colorspace can
+    already be anything - most commonly 'Non-Color', if the same-named image
+    happened to get loaded as a NOR/PRM texture elsewhere first, or Blender's
+    own non-sRGB default for a freshly loaded image. export_nutexb.py's
+    format check reads this at export time, so a COL image that's silently
+    still 'Non-Color' here exports as linear (BC7Unorm) - a color texture
+    written as data. Texture4 (NOR) and Texture6 (PRM) already get the mirror
+    image of this treatment below, force-set to 'Non-Color' unconditionally;
+    COL needs the same unconditional forcing in the other direction.
+    """
+    if image is not None:
+        image.colorspace_settings.name = 'sRGB'
+
 def convert_from_no_nodes(operator: bpy.types.Operator, material: bpy.types.Material):
     diffuse_color = material.diffuse_color[:]
     metalness = material.metallic
@@ -268,8 +289,10 @@ def convert_principled_emission(principled_node: ShaderNodeBsdfPrincipled, mater
     cv3: SUB_PG_matl_vector = sub_matl_data.vectors.get(ParamId.CustomVector3.name)
     
     texture0.image = col_layer_1 if col_layer_1 is not None else bpy.data.images.get('/common/shader/sfxpbs/default_white')
+    _force_col_colorspace(texture0.image)
     if texture1 is not None:
         texture1.image = col_layer_2 if col_layer_2 is not None else bpy.data.images.get('/common/shader/sfxpbs/default_white')
+        _force_col_colorspace(texture1.image)
         
     if was_emission_input_linked is False:
         cv3.value = [emission_color[i] * emission_strength for i in (0,1,2,3)]
@@ -321,8 +344,10 @@ def convert_principled_subsurface(operator: Operator, principled_node: ShaderNod
     cv30: SUB_PG_matl_vector = sub_matl_data.vectors.get(ParamId.CustomVector30.name)
     if col_layer_1 is not None:
         texture0.image = col_layer_1
+        _force_col_colorspace(texture0.image)
     if texture1 is not None and col_layer_2 is not None:
         texture1.image = col_layer_2
+        _force_col_colorspace(texture1.image)
     if sub_surface_color is not None:
         cv11.value = [sub_surface_color[i] for i in (0,1,2,3)]
     cv30.value[0] = 0.5
@@ -348,8 +373,10 @@ def convert_principled_standard(principled_node: ShaderNodeBsdfPrincipled, mater
     texture1: SUB_PG_matl_texture = sub_matl_data.textures.get(ParamId.Texture1.name)
     if col_layer_1 is not None:
         texture0.image = col_layer_1
+        _force_col_colorspace(texture0.image)
     if texture1 is not None and col_layer_2 is not None:
         texture1.image = col_layer_2
+        _force_col_colorspace(texture1.image)
 
 def is_fpv3_material(node: ShaderNode) -> bool:
     """Check if a node is a FPv3 Material from Fortnite"""
@@ -511,6 +538,7 @@ def convert_fpv3_material(fpv3_node: ShaderNode, material: Material, vertex_colo
     
     if diffuse_tex:
         texture0.image = diffuse_tex
+        _force_col_colorspace(texture0.image)
         print(f"Assigned '{diffuse_tex.name}' to Texture0 (COL)")
     
     if normal_tex:
@@ -861,7 +889,15 @@ def load_and_assign_texture(material, texture_path, param_id_name):
         # Set correct color space for NOR/PRM
         if param_id_name in ["Texture4", "Texture6"]:  # NOR and PRM
             image.colorspace_settings.name = 'Non-Color'
-            
+        elif param_id_name in ["Texture0", "Texture1"]:  # COL layers 1 and 2
+            # Same reuse-by-name hazard as everywhere else in this file: this
+            # function reuses an already-loaded datablock of this name if one
+            # exists, so a COL image loaded here inherits whatever colorspace
+            # it was left in by the last thing that touched that name -
+            # commonly 'Non-Color', if it was previously used as a NOR/PRM
+            # texture above. Force it every time, not just on first load.
+            _force_col_colorspace(image)
+
         # Assign the image to the material's texture parameter
         sub_matl_data = material.sub_matl_data
         
