@@ -1,6 +1,7 @@
 from . import attribute_renamer
 from . import create_meshes
 from . import eye_material_custom_vector_31_modal
+from . import face_picker
 from . import misc_panel
 from . import set_linear_vertex_color
 from . import create_ik_arms
@@ -14,6 +15,7 @@ from . import ik_influence_toggle
 from . import ik_fk_switch
 from . import ik_pole_alignment
 from . import limit_weights
+from . import unstack_uvs
 from . import rename_utils
 from . import fk_to_ik
 from . import user_poses
@@ -21,6 +23,8 @@ from . import user_poses
 # Import reset_animation module and ensure it's properly registered
 from . import reset_animation
 from . import mirror_animation
+from . import roll_copy
+from . import stage_tools
 
 # Import animation_scroll module
 from . import animation_scroll
@@ -32,12 +36,16 @@ def register():
     
     # Register mirror_animation
     mirror_animation.register()
+
+    roll_copy.register()
+    stage_tools.register()
     
     # Register rename_utils
     rename_utils.register()
     
     # Register animation_scroll
     animation_scroll.register()
+    face_picker.register()
     
     # Register misc_panel first since IK panel depends on it
     misc_panel.register()
@@ -53,6 +61,7 @@ def register():
     ik_pole_alignment.register()
     
 def unregister():
+    face_picker.unregister()
     # Unregister animation_scroll
     animation_scroll.unregister()
     
@@ -62,6 +71,9 @@ def unregister():
     # Unregister reset_animation
     reset_animation.unregister()
     
+    roll_copy.unregister()
+    stage_tools.unregister()
+
     # Unregister mirror_animation
     mirror_animation.unregister()
     

@@ -134,9 +134,7 @@ class SUB_OP_eye_material_custom_vector_31_modal(Operator):
             return {'CANCELLED'}
 
 def insert_cv31_keyframes(arma: bpy.types.Object, cv31_l: SUB_PG_mat_track_property, cv31_r: SUB_PG_mat_track_property):
-    try:
-        arma.data.animation_data.action.fcurves
-    except AttributeError:
+    if arma.data.animation_data is None or arma.data.animation_data.action is None:
         return
     sap: SUB_PG_sub_anim_data = arma.data.sub_anim_properties
     if cv31_l:

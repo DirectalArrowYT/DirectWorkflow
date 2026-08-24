@@ -1,16 +1,13 @@
 import bpy
-import os
 import json
-import math
 from pathlib import Path
-from bpy.types import Operator, PropertyGroup
-from bpy.props import StringProperty, BoolProperty, EnumProperty
-from mathutils import Matrix, Quaternion, Vector
+from bpy.types import Operator
+from bpy.props import StringProperty
 
 from ...dependencies import ssbh_data_py
-from ..model.import_model import get_blender_transform
-from ..anim.import_anim import get_raw_matrix, apply_transform_flags
-from .mirror_animation import mirror_action, rotate_hip_180
+from ..anim.import_anim import get_hierarchy_order
+from .anim_flip import apply_smash_node_to_bone, collect_excluded_bone_names, mirror_smash_pose_data
+from .mirror_animation import rotate_hip_180
 
 def get_predefined_poses():
     """Get list of predefined pose names"""
@@ -50,81 +47,15 @@ def apply_pose_with_options(context, pose_data_str, include_trans=True, mirrored
         return {'CANCELLED'}, "No pose data available"
     
     try:
-        # Prepare bone hierarchy order to process parent bones before their children
-        from ..anim.import_anim import get_heirarchy_order
-        reordered_bones = get_heirarchy_order(list(armature.pose.bones))
+        reordered_bones = get_hierarchy_order(list(armature.pose.bones))
         
         # Get the stored pose data
         pose_data = json.loads(pose_data_str)
         
-        # If mirrored, create mirrored pose data BEFORE applying (like the external script)
+        # Same Smash-space flip as Mirror Animation / Studio SB (Hip and Trans included).
         if mirrored:
-            print("=== CREATING MIRRORED POSE DATA ===")
-            mirrored_pose_data = {}
-            
-            # Pre-identify bones that should be excluded from mirroring
-            excluded_bones = set()
-            for bone in armature.pose.bones:
-                # Exclude finger bones
-                if bone.name.startswith('Finger'):
-                    excluded_bones.add(bone.name)
-                    continue
-                
-                # Exclude Face bone and all its children (including mouth_group)
-                if bone.name == 'Face':
-                    excluded_bones.add(bone.name)
-                    # Add all children of Face bone
-                    for child in armature.pose.bones:
-                        if child.parent and child.parent.name == 'Face':
-                            excluded_bones.add(child.name)
-                    continue
-                
-                # Check if this bone is a child of Face bone
-                if bone.parent and bone.parent.name == 'Face':
-                    excluded_bones.add(bone.name)
-                    continue
-            
-            # First, handle L/R bone swapping and axis negation
-            for bone_name, data in pose_data.items():
-                target_bone_name = bone_name
-                mirrored_data = data.copy()
-                
-                # Swap L/R bone names (like the external script does)
-                if bone_name.endswith('L'):
-                    target_bone_name = bone_name[:-1] + 'R'
-                elif bone_name.endswith('R'):
-                    target_bone_name = bone_name[:-1] + 'L'
-                
-                # Skip facial/hair bones, finger bones, and mouth_group bones from mirroring
-                if (bone_name.startswith('S_') or 
-                    any(keyword in bone_name.lower() for keyword in ['brow', 'lip', 'eye', 'nose', 'cheek', 'jaw', 'mouth']) or
-                    bone_name in excluded_bones):
-                    # Keep original data for non-body bones
-                    mirrored_pose_data[bone_name] = data
-                    continue
-                
-                # Apply axis negations (based on the external script pattern)
-                # translateZ -> negate Z location
-                translation = mirrored_data["translation"].copy()
-                translation[2] = -translation[2]  # Negate Z
-                mirrored_data["translation"] = translation
-                
-                # rotateX and rotateY -> negate X and Y rotation (quaternion components)
-                rotation = mirrored_data["rotation"].copy()
-                # For quaternions [x, y, z, w], negate x and y components
-                rotation[0] = -rotation[0]  # Negate X
-                rotation[1] = -rotation[1]  # Negate Y
-                mirrored_data["rotation"] = rotation
-                
-                # Store the mirrored data for the target bone
-                mirrored_pose_data[target_bone_name] = mirrored_data
-                
-                print(f"  {bone_name} -> {target_bone_name} (mirrored)")
-            
-            # Use the mirrored data instead of original
-            pose_data = mirrored_pose_data
-            print(f"Created mirrored data for {len(mirrored_pose_data)} bones")
-            print("====================================")
+            excluded_bones = collect_excluded_bone_names(armature, include_fingers=False)
+            pose_data = mirror_smash_pose_data(pose_data, excluded_bones=excluded_bones)
         
         # Create a mapping for quick access to stored node data
         bone_to_node_data = {}
@@ -136,63 +67,11 @@ def apply_pose_with_options(context, pose_data_str, include_trans=True, mirrored
                 
                 bone_to_node_data[bone] = pose_data[bone.name]
         
-        # Process bones in hierarchy order
+        # Process bones in hierarchy order using the shared Smash→Blender apply path
         for bone in reordered_bones:
             if bone not in bone_to_node_data:
                 continue
-                
-            node_data = bone_to_node_data[bone]
-            
-            # Create transform flags
-            flags = ssbh_data_py.anim_data.TransformFlags()
-            flags.override_translation = node_data["flags"]["override_translation"]
-            flags.override_rotation = node_data["flags"]["override_rotation"] 
-            flags.override_scale = node_data["flags"]["override_scale"]
-            
-            # Create Transform
-            transform = ssbh_data_py.anim_data.Transform(
-                node_data["scale"],
-                node_data["rotation"],
-                node_data["translation"]
-            )
-            
-            # Set bone transformation based on imported data
-            if bone.parent is None:
-                # Root bone handling similar to import_model_anim
-                y_up_to_z_up = Matrix.Rotation(math.radians(90), 4, 'X')
-                x_major_to_y_major = Matrix.Rotation(math.radians(-90), 4, 'Z')
-                
-                # Create transform matrix
-                translation = Vector(transform.translation)
-                tm = Matrix.Translation(translation)
-                
-                rotation = Quaternion([transform.rotation[3], transform.rotation[0], 
-                                      transform.rotation[1], transform.rotation[2]])
-                rm = Matrix.Rotation(rotation.angle, 4, rotation.axis)
-                
-                scale = Vector(transform.scale)
-                sm = Matrix.Diagonal((scale[0], scale[1], scale[2], 1.0))
-                
-                raw_matrix = tm @ rm @ sm
-                
-                bone.matrix = y_up_to_z_up @ raw_matrix @ x_major_to_y_major
-            else:
-                # Non-root bones
-                # Create transform matrix
-                translation = Vector(transform.translation)
-                tm = Matrix.Translation(translation)
-                
-                rotation = Quaternion([transform.rotation[3], transform.rotation[0], 
-                                      transform.rotation[1], transform.rotation[2]])
-                rm = Matrix.Rotation(rotation.angle, 4, rotation.axis)
-                
-                scale = Vector(transform.scale)
-                sm = Matrix.Diagonal((scale[0], scale[1], scale[2], 1.0))
-                
-                raw_matrix = tm @ rm @ sm
-                
-                # Apply to bone similar to import_model_anim
-                bone.matrix = bone.parent.matrix @ get_blender_transform(raw_matrix).transposed()
+            apply_smash_node_to_bone(bone, bone_to_node_data[bone])
         
         # IMPORTANT: Keyframe ALL bones to prevent animation interference
         # This ensures the pose is applied cleanly regardless of existing animation

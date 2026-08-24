@@ -347,24 +347,6 @@ def weights_to_parent_bones(ssbh_mesh_data: ssbh_data_py.mesh_data.MeshData, ssb
         mesh_object.bone_influences.clear()
             
 
-def _get_excluded_collection_objects(context) -> set:
-    """Return all objects that belong to a collection which is excluded or
-    hidden in the current view layer.  Objects in disabled collections are
-    skipped during export so the exported model matches what is active in
-    the scene."""
-    excluded = set()
-
-    def _walk(layer_col):
-        if layer_col.exclude or layer_col.hide_viewport:
-            excluded.update(layer_col.collection.all_objects)
-        else:
-            for child in layer_col.children:
-                _walk(child)
-
-    _walk(context.view_layer.layer_collection)
-    return excluded
-
-
 def export_model(operator: bpy.types.Operator, context, directory, include_numdlb, include_numshb, include_numshexb, include_nusktb,
                 include_numatb, include_nuhlpb, include_nutexb, linked_nusktb_settings, optimize_mesh_weights:str, armature_position: str,
                 apply_modifiers: str, split_shape_keys: str, ignore_underscore_meshes:str):
@@ -394,14 +376,11 @@ def export_model(operator: bpy.types.Operator, context, directory, include_numdl
     # Create and save files individually to make this step more robust.
     # Users can avoid errors in generating a file by disabling export for that file.
     if include_numshb or include_numshexb or include_numatb or include_numdlb:
-        # Collect objects in disabled/excluded collections before they are un-hidden below.
-        excluded_by_collection = _get_excluded_collection_objects(context)
-
         # Only Mesh Objects, Skip Empty Objects
         if ignore_underscore_meshes == 'IGNORE_STARTING_UNDERSCORE':
-            unprocessed_meshes: list[Object] = [child for child in arma.children if child.type == 'MESH' and len(child.data.vertices) > 0 and not child.name.startswith("_") and child not in excluded_by_collection]
+            unprocessed_meshes: list[Object] = [child for child in arma.children if child.type == 'MESH' and len(child.data.vertices) > 0 and not child.name.startswith("_")] 
         else:
-            unprocessed_meshes: list[Object] = [child for child in arma.children if child.type == 'MESH' and len(child.data.vertices) > 0 and child not in excluded_by_collection]
+            unprocessed_meshes: list[Object] = [child for child in arma.children if child.type == 'MESH' and len(child.data.vertices) > 0] 
         
         # Remove swing meshes
         unprocessed_meshes = [mesh for mesh in unprocessed_meshes if mesh.data.sub_swing_data_linked_mesh.is_swing_mesh == False]
@@ -1229,7 +1208,7 @@ def make_mesh_object(operator, context, mesh: bpy.types.Object, group_name, i, m
     # This actually results in smaller file sizes since HalFloat4 is smaller than Float3.
     normals = np.append(normals, np.zeros((normals.shape[0],1)), axis=1)
             
-    normal0.data = normals
+    normal0.data = normals.astype(np.float32)
     ssbh_mesh_object.normals = [normal0]
 
     # Export Weights
@@ -1512,11 +1491,11 @@ def get_ssbh_bone(blender_bone: bpy.types.EditBone, parent_index):
         unreoriented_matrix = get_smash_transform(blender_bone.parent.matrix.inverted() @ blender_bone.matrix)
         m = list(list(r) for r in unreoriented_matrix)
         #return ssbh_data_py.skel_data.BoneData(blender_bone.name, unreoriented_matrix, parent_index)
-        return ssbh_data_py.skel_data.BoneData(blender_bone.name, m, parent_index)
+        return ssbh_data_py.skel_data.BoneData(blender_bone.name, np.array(m, dtype=np.float32), parent_index)
     else:
         m = list(list(r) for r in get_smash_root_transform(blender_bone))
         #return ssbh_data_py.skel_data.BoneData(blender_bone.name, get_smash_root_transform(blender_bone), None)
-        return ssbh_data_py.skel_data.BoneData(blender_bone.name, m, None)
+        return ssbh_data_py.skel_data.BoneData(blender_bone.name, np.array(m, dtype=np.float32), None)
     
 def get_parent_first_ordered_bones(arma: bpy.types.Object) -> list[bpy.types.EditBone]:
     ''' Edit Bones are not guaranteed to appear in such a way where the child appears after its parent

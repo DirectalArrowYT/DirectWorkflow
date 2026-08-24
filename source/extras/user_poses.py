@@ -4,6 +4,8 @@ from bpy.types import Operator
 from bpy.props import StringProperty
 from mathutils import Quaternion
 
+from ..blender_compat import set_pose_bone_select
+
 
 def _generate_unique_user_pose_name(ssp, base_name: str) -> str:
     existing = {item.name for item in ssp.user_pose_list}
@@ -139,8 +141,8 @@ class SUB_OP_user_pose_apply_selected(Operator):
         # If applying to all saved bones, clear selection to reflect affected bones
         if not apply_only_selected:
             try:
-                for ebone in armature.data.bones:
-                    ebone.select = False
+                for pbone in armature.pose.bones:
+                    set_pose_bone_select(pbone, False)
             except Exception:
                 pass
 
@@ -181,7 +183,7 @@ class SUB_OP_user_pose_apply_selected(Operator):
             # Select affected bone only when applying to all
             if not apply_only_selected:
                 try:
-                    pbone.bone.select = True
+                    set_pose_bone_select(pbone, True)
                     if active_bone_name is None:
                         active_bone_name = bone_name
                 except Exception:

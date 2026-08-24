@@ -4,8 +4,8 @@ bl_info = {
     'category': 'Object',
     'location': 'View 3D > Tool Shelf > Ultimate',
     'description': 'A collection of tools for importing models and animations to smash ultimate.',
-    'version': (3, 0, 3),
-    'blender': (2, 80, 0),
+    'version': (4, 1, 0),
+    'blender': (4, 0, 0),
     'warning': 'TO REMOVE: First "Disable" the plugin, then restart blender, then you can hit "Remove" to uninstall',
     'doc_url': 'https://github.com/ssbucarlos/smash-ultimate-blender/wiki',
     'tracker_url': 'https://github.com/ssbucarlos/smash-ultimate-blender/issues',
@@ -14,12 +14,11 @@ bl_info = {
 
 def check_unsupported_blender_versions():
     import bpy
-    if bpy.app.version < (2, 80):
-        raise ImportError('Cant use a Blender version older than 2.80, please use 2.80 or newer')
+    if bpy.app.version < (4, 0):
+        raise ImportError('This addon requires Blender 4.0 or newer (Blender 4 and 5 are supported)')
     
 def register():
     import bpy
-    import nodeitems_utils
     print('Loading Smash Ultimate Blender Tools...')
 
     check_unsupported_blender_versions()
@@ -43,7 +42,9 @@ def register():
     
     bpy.types.VIEW3D_MT_paint_vertex.append(set_linear_vertex_color.menu_func)
 
-    nodeitems_utils.register_node_categories('CUSTOM_ULTIMATE_NODES', shader_nodes.node_categories.node_categories)
+    from .source.blender_compat import register_node_categories
+    if getattr(shader_nodes.node_categories, 'HAS_NODEITEMS', True) and shader_nodes.node_categories.node_categories:
+        register_node_categories('CUSTOM_ULTIMATE_NODES', shader_nodes.node_categories.node_categories)
     
     # Register texture conversion tools
     from .source.model.material import texture
@@ -80,7 +81,6 @@ def register():
 
 def unregister():
     import bpy
-    import nodeitems_utils
     print('Unloading Smash Ultimate Blender Tools...')
 
     from .source.extras import set_linear_vertex_color
@@ -92,7 +92,8 @@ def unregister():
     from .source import retargeting
     retargeting.unregister()
 
-    nodeitems_utils.unregister_node_categories('CUSTOM_ULTIMATE_NODES')
+    from .source.blender_compat import unregister_node_categories
+    unregister_node_categories('CUSTOM_ULTIMATE_NODES')
     
     # Unregister texture conversion tools
     texture.unregister()

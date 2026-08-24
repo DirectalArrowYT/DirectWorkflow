@@ -15,12 +15,15 @@ from bpy.props import (
     PointerProperty,
     FloatVectorProperty,)
 
+from .fcurve_compat import get_id_action_fcurves, find_fcurve, new_fcurve
+
 mat_sub_types = (
     ('VECTOR', 'Custom Vector', 'Custom Vector'),
     ('FLOAT', 'Custom Float', 'Custom Float'),
     ('BOOL', 'Custom Bool', 'Custom Bool'),
     ('PATTERN', 'Pattern Index', 'Pattern Index'),
-    ('TEXTURE', 'Texture Transform', 'Texture Transform')
+    ('TEXTURE', 'Texture Transform', 'Texture Transform'),
+    ('DIFFUSE_UV', 'Diffuse UV Transform', 'Diffuse UV Transform')
 )
 
 # Store the last known action for each armature to detect changes
@@ -272,6 +275,7 @@ class SUB_PT_sub_smush_anim_data_main(Panel):
             
         # Manual sync button
         row.operator(SUB_OP_sync_sap_action.bl_idname, icon='FILE_REFRESH', text="Manual Sync")
+        layout.operator("sub.face_picker_popup", text="Easy Facial Animation", icon="IMAGE_DATA")
 
 class SUB_PT_sub_smush_anim_data_vis_tracks(Panel):
     bl_label = "Ultimate Visibility Track Entries"
@@ -478,9 +482,8 @@ class SUB_OP_mat_track_remove(Operator):
         sap = context.object.data.sub_anim_properties
         amt = sap.mat_tracks[sap.active_mat_track_index]
         # Find matching Fcurve and Remove
-        try:
-            fcurves = context.object.data.animation_data.action.fcurves
-        except AttributeError:
+        fcurves = get_id_action_fcurves(context.object.data)
+        if fcurves is None:
             sap.mat_tracks.remove(sap.active_mat_track_index)
             i = sap.active_mat_track_index
             sap.active_mat_track_index = min(max(0,i-1),len(sap.mat_tracks))
@@ -491,7 +494,12 @@ class SUB_OP_mat_track_remove(Operator):
             if fc.data_path.startswith(f"sub_anim_properties.mat_tracks[{amti}]"):
                 fcurves.remove(fc)
         # The remaining materials with an index greater than this one must have all thier fcurves adjusted
-        fcurves = context.object.data.animation_data.action.fcurves
+        fcurves = get_id_action_fcurves(context.object.data)
+        if fcurves is None:
+            sap.mat_tracks.remove(sap.active_mat_track_index)
+            i = sap.active_mat_track_index
+            sap.active_mat_track_index = min(max(0,i-1),len(sap.mat_tracks))
+            return {'FINISHED'}
         for fc in fcurves:
             regex = r"sub_anim_properties\.mat_tracks\[(\d+)\](\.properties\[\d+\]\.\w+)"
             matches = re.match(regex, fc.data_path)
@@ -572,9 +580,8 @@ class SUB_OP_mat_property_remove(Operator):
     def execute(self, context):
         sap = context.object.data.sub_anim_properties
         amt = sap.mat_tracks[sap.active_mat_track_index]  
-        try:
-            fcurves = context.object.data.animation_data.action.fcurves
-        except AttributeError:
+        fcurves = get_id_action_fcurves(context.object.data)
+        if fcurves is None:
             amt.properties.remove(amt.active_property_index)
             i = amt.active_property_index
             amt.active_property_index = min(max(0,i-1), len(amt.properties)-1)
@@ -586,7 +593,12 @@ class SUB_OP_mat_property_remove(Operator):
             if fc.data_path.startswith(f"sub_anim_properties.mat_tracks[{amti}].properties[{api}]"):
                 fcurves.remove(fc)
         # The material's remaining properties' fcurves with indexes greater to this one must be decremented
-        fcurves = context.object.data.animation_data.action.fcurves
+        fcurves = get_id_action_fcurves(context.object.data)
+        if fcurves is None:
+            amt.properties.remove(amt.active_property_index)
+            i = amt.active_property_index
+            amt.active_property_index = min(max(0,i-1), len(amt.properties)-1)
+            return {'FINISHED'}
 
         for fc in fcurves:    
             regex = r"sub_anim_properties\.mat_tracks\[(\d+)\]\.properties\[(\d+)\](\.\w+)"
@@ -669,12 +681,8 @@ class SUB_OP_mat_property_shift(Operator):
         
         other_index = active_property_index-1 if self.shift_direction == 'UP' else active_property_index+1
             
-        # Getting fcurves without throwing an exception is hard, so rather than do 3 "is not None" checks do one "try"    
-        try:
-            fcurves = context.object.data.animation_data.action.fcurves
-        except AttributeError: # Theres no fcurves
-            pass
-        else: # Theres fcurves
+        fcurves = get_id_action_fcurves(context.object.data)
+        if fcurves is not None:
             swap_mat_property_fcurve_target_indices(fcurves, sap, active_property_index, other_index)
 
         active_mat.properties.move(active_property_index, other_index)
@@ -714,11 +722,8 @@ class SUB_OP_vis_entry_remove(Operator):
         sap = context.object.data.sub_anim_properties
         active_vis_track_index = sap.active_vis_track_index
         
-        try:
-            fcurves = context.object.data.animation_data.action.fcurves
-        except AttributeError:
-            pass
-        else:
+        fcurves = get_id_action_fcurves(context.object.data)
+        if fcurves is not None:
             fcurve_to_remove = fcurves.find(f'sub_anim_properties.vis_track_entries[{active_vis_track_index}].value')
             if fcurve_to_remove is not None:
                 fcurves.remove(fcurve_to_remove)
@@ -760,12 +765,8 @@ class SUB_OP_vis_entry_shift(Operator):
         
         other_index = active_vis_entry_index-1 if self.shift_direction == 'UP' else active_vis_entry_index+1
             
-        # Getting fcurves without throwing an exception is hard, so rather than do 3 "is not None" checks do one "try"    
-        try:
-            fcurves = context.object.data.animation_data.action.fcurves
-        except AttributeError: # Theres no fcurves
-            pass
-        else: # Theres fcurves
+        fcurves = get_id_action_fcurves(context.object.data)
+        if fcurves is not None:
             active_fcurve = fcurves.find(f"sub_anim_properties.vis_track_entries[{active_vis_entry_index}].value")
             other_fcurve = fcurves.find(f"sub_anim_properties.vis_track_entries[{other_index}].value")
             if active_fcurve is not None:
@@ -1005,9 +1006,9 @@ class SUB_OP_batch_add_hidden_keyframes_for_new_vis_entries(Operator):
         for action in sap_actions:
             for index, entry in enumerate(sap.vis_track_entries):
                 data_path = f'sub_anim_properties.vis_track_entries[{index}].value'
-                if action.fcurves.find(data_path) is not None:
+                if find_fcurve(action, data_path) is not None:
                     continue
-                fcurve = action.fcurves.new(data_path, index=0, action_group='Visibility')
+                fcurve = new_fcurve(action, data_path, index=0, action_group='Visibility')
                 fcurve.extrapolation = 'CONSTANT'
                 kp = fcurve.keyframe_points.insert(frame=1, value=0.0)
                 kp.interpolation = 'CONSTANT'
@@ -2367,8 +2368,6 @@ class SUB_MT_vis_entry_context_menu(Menu):
         layout.separator()
         layout.operator('sub.set_all_vis_entries_false', icon='HIDE_ON', text='Set All Entries Off')
         layout.operator('sub.set_all_vis_entries_true', icon='HIDE_OFF', text='Set All Entries On')
-        layout.separator()
-        layout.operator('sub.batch_add_hidden_keyframes_for_new_vis_entries', icon='ACTION', text='Set New Entries Hidden in All Actions')
         
 class SUB_MT_mat_entry_context_menu(Menu):
     bl_label = "Mat Entry Specials"
@@ -2380,22 +2379,18 @@ class SUB_MT_mat_entry_context_menu(Menu):
 
 class SUB_UL_vis_track_entries(UIList):
     def draw_item(self, _context, layout, _data, item, icon, active_data, _active_propname, index):
+        # assert(isinstance(item, bpy.types.ShapeKey))
         obj = active_data
+        # key = data
         entry = item
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
-            row = layout.row(align=True)
-            export_icon = 'EXPORT' if entry.export_enabled else 'X'
-            row.prop(entry, "export_enabled", text="", icon=export_icon, emboss=False)
-            split = row.split(factor=0.72, align=False)
-            name_row = split.row()
-            if not entry.export_enabled:
-                name_row.active = False
-            name_row.prop(entry, "name", text="", emboss=False, icon='HIDE_OFF')
-            right_row = split.row(align=True)
-            right_row.emboss = 'NONE_OR_STATUS'
-            right_row.label(text="")
-            vis_icon = 'CHECKBOX_HLT' if entry.value == True else 'CHECKBOX_DEHLT'
-            right_row.prop(entry, "value", text="", icon=vis_icon, emboss=False)
+            split = layout.split(factor=0.66, align=False)
+            split.prop(entry, "name", text="", emboss=False, icon='HIDE_OFF')
+            row = split.row(align=True)
+            row.emboss = 'NONE_OR_STATUS'
+            row.label(text="")
+            icon = 'CHECKBOX_HLT' if entry.value == True else 'CHECKBOX_DEHLT'
+            row.prop(entry, "value", text="", icon=icon, emboss=False)
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             layout.label(text="", icon_value=icon)
@@ -2534,7 +2529,6 @@ class SUB_PG_vis_track_entry(PropertyGroup):
         default="Unknown",
         update=vis_track_name_update,)
     value: BoolProperty(name="Visible", default=False, update=dummy_update)
-    export_enabled: BoolProperty(name="Include in Export", default=True, description="Include this entry in the exported animation file")
 
 class SUB_PG_mat_track_property(PropertyGroup):
     name: StringProperty(

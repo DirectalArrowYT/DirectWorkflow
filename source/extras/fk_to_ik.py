@@ -3,9 +3,12 @@ import mathutils
 from mathutils import Vector, Matrix
 import math
 
+from ..anim.fcurve_compat import find_fcurve, get_fcurves, new_fcurve, remove_fcurve
+from ..blender_compat import assign_action
+
 # Function to invoke the position matching dialog that can be imported by other scripts
-def invoke_position_match_dialog():
-    bpy.ops.sub.fk_to_ik_transfer('INVOKE_DEFAULT')
+def invoke_position_match_dialog(cleanup_mode='LEGS'):
+    bpy.ops.sub.fk_to_ik_transfer('INVOKE_DEFAULT', cleanup_mode=cleanup_mode)
 
 class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
     """Perfectly positions IK controls to match the FK bone positions"""
@@ -25,16 +28,34 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         default=True
     )
 
+    cleanup_mode: bpy.props.EnumProperty(
+        name="Cleanup Mode",
+        description="Which original FK bones can have leftover mocap frames removed",
+        items=(
+            ('LEGS', "Legs", "Offer knee/leg cleanup"),
+            ('ARMS', "Arms", "Offer arm cleanup"),
+            ('BOTH', "Arms and Legs", "Offer knee and arm cleanup"),
+        ),
+        default='LEGS',
+        options={'SKIP_SAVE'},
+    )
+
     remove_knee_frames: bpy.props.BoolProperty(
         name="Remove Knee Frames",
-        description="Remove all keyframes from the original Knee bones except frame 1 (helps with mocap cleanup)",
+        description="Remove all keyframes from KneeL/KneeR and LegL/LegR except the reference frame",
         default=True
     )
 
-    # When removing knee frames, allow the user to choose the reference frame
+    remove_arm_frames: bpy.props.BoolProperty(
+        name="Remove Arm Frames",
+        description="Remove all keyframes from ArmL/ArmR except the reference frame",
+        default=True
+    )
+
+    # When removing leftover FK frames, allow the user to choose the reference frame
     reference_frame: bpy.props.EnumProperty(
         name="Reference Frame",
-        description="Which frame to keep as the reference when cleaning knee/leg keyframes",
+        description="Which frame to keep as the reference when cleaning leftover FK keyframes",
         items=(
             ('FIRST', "Keep First Frame", "Keep only the first frame's keys"),
             ('LAST', "Keep Last Frame", "Keep only the last frame's keys"),
@@ -59,10 +80,12 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         armature = armature_object.data
         transfer_count = 0
         
-        # Store all constraints states and disable them
+        # Mute only the IK/copy-rotation constraints on the chains we are matching
         constraint_states = {}
-        for pose_bone in armature_object.pose.bones:
+        for pose_bone in self._iter_ik_chain_bones(armature_object):
             for i, constraint in enumerate(pose_bone.constraints):
+                if constraint.type not in {'IK', 'COPY_ROTATION'}:
+                    continue
                 constraint_key = (pose_bone.name, i)
                 constraint_states[constraint_key] = constraint.mute
                 constraint.mute = True
@@ -258,35 +281,9 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
                 constraint = bone.constraints[constraint_idx]
                 constraint.mute = original_state
         
-        # Wait for the IK system to update before applying pole angles
+        # One IK update, then solve both knee pole angles analytically
         context.view_layer.update()
-        
-        # Now apply the calculated pole angles for each bone
-        # Calculate pole angles dynamically based on KneeIK positions
-        for side in ["L", "R"]:
-            knee_bone = armature_object.pose.bones.get(f"Knee{side}")
-            knee_ik_bone = armature_object.pose.bones.get(f"KneeIK{side}")
-            leg_bone = armature_object.pose.bones.get(f"Leg{side}")
-            foot_bone = armature_object.pose.bones.get(f"Foot{side}")
-            
-            if all([knee_bone, knee_ik_bone, leg_bone, foot_bone]):
-                # Find the IK constraint on the knee bone
-                ik_constraint = None
-                for constraint in knee_bone.constraints:
-                    if constraint.type == 'IK':
-                        ik_constraint = constraint
-                        break
-                
-                if ik_constraint:
-                    # Calculate the required pole angle to point knee toward KneeIK
-                    pole_angle_rad = self.calculate_pole_angle_to_target(
-                        armature_object, knee_bone, knee_ik_bone, leg_bone, foot_bone
-                    )
-                    
-                    # Apply the calculated pole angle
-                    ik_constraint.pole_angle = pole_angle_rad
-        
-        # Final update to apply pole angles
+        self._apply_knee_pole_angles(armature_object)
         context.view_layer.update()
         
         # Final positioning: Force FootIK and HandIK to exact ORIGINAL FK positions
@@ -328,128 +325,201 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
                         break
                 
                 if ik_constraint:
-                    # For arms, use a simpler approach or set to 0 for now
                     ik_constraint.pole_angle = 0.0
-                    print(f"Applied default pole angle to Arm{side}: 0.0°")
         
         # Auto keyframe if needed
         if self.entire_animation and self.auto_keyframe:
             current_frame = context.scene.frame_current
-            for bone in bones_to_keyframe:
-                bone.keyframe_insert(data_path="location", frame=current_frame, group=bone.name)
-                bone.keyframe_insert(data_path="rotation_quaternion", frame=current_frame, group=bone.name)
-                bone.keyframe_insert(data_path="rotation_euler", frame=current_frame, group=bone.name)
-                bone.keyframe_insert(data_path="scale", frame=current_frame, group=bone.name)
+            if getattr(self, "_collect_keys", False):
+                self._record_bone_keys(current_frame, bones_to_keyframe)
+            else:
+                for bone in bones_to_keyframe:
+                    bone.keyframe_insert(data_path="location", frame=current_frame, group=bone.name)
+                    bone.keyframe_insert(data_path="rotation_quaternion", frame=current_frame, group=bone.name)
+                    bone.keyframe_insert(data_path="rotation_euler", frame=current_frame, group=bone.name)
+                    bone.keyframe_insert(data_path="scale", frame=current_frame, group=bone.name)
         
         # Final update
         context.view_layer.update()
         
         return transfer_count
 
-    def calculate_pole_angle_to_target(self, armature_object, knee_bone, knee_ik_bone, leg_bone, foot_bone):
-        """Calculate the pole angle needed to make the knee bone head point toward the KneeIK bone head"""
-        
-        # Find the IK constraint on the knee bone
-        ik_constraint = None
-        for constraint in knee_bone.constraints:
+    def _iter_ik_chain_bones(self, armature_object):
+        names = []
+        for side in ("L", "R"):
+            names.extend((
+                f"Leg{side}", f"Knee{side}", f"Foot{side}",
+                f"Shoulder{side}", f"Arm{side}", f"Hand{side}",
+                f"FootIK{side}", f"KneeIK{side}", f"HandIK{side}", f"ArmIK{side}",
+            ))
+        for name in names:
+            bone = armature_object.pose.bones.get(name)
+            if bone:
+                yield bone
+
+    def _find_ik_constraint(self, pose_bone):
+        if pose_bone is None:
+            return None
+        for constraint in pose_bone.constraints:
             if constraint.type == 'IK':
-                ik_constraint = constraint
-                break
-        
-        if not ik_constraint:
+                return constraint
+        return None
+
+    def _signed_angle(self, v1, v2, axis):
+        if v1.length < 1e-6 or v2.length < 1e-6 or axis.length < 1e-6:
             return 0.0
-        
-        # Store the original pole angle
-        original_pole_angle = ik_constraint.pole_angle
-        
-        # Get the fixed target direction (from leg to KneeIK - this should NOT change)
+        v1 = v1.normalized()
+        v2 = v2.normalized()
+        axis = axis.normalized()
+        return math.atan2(axis.dot(v1.cross(v2)), v1.dot(v2))
+
+    def _pole_angle_from_zero(self, knee_bone, knee_ik_bone, leg_bone, foot_bone):
+        """Pole angle that points the knee at KneeIK, assuming the constraint is currently 0."""
         leg_pos = leg_bone.matrix.to_translation()
         foot_pos = foot_bone.matrix.to_translation()
-        knee_ik_pos = knee_ik_bone.matrix.to_translation()
-        
-        # Calculate the chain axis (leg to foot)
-        chain_axis = (foot_pos - leg_pos).normalized()
-        
-        # Target direction (where we want knee to point)
-        target_direction = knee_ik_pos - leg_pos
-        target_projected = target_direction - target_direction.dot(chain_axis) * chain_axis
-        if target_projected.length < 0.001:
+        chain_axis = foot_pos - leg_pos
+        if chain_axis.length < 1e-6:
             return 0.0
-        target_projected.normalize()
-        
-        # Use binary search to find the pole angle that makes knee point toward target
-        min_angle = math.radians(-180.0)
-        max_angle = math.radians(180.0)
-        best_angle = 0.0
-        best_alignment = -1.0  # Best dot product (closer to 1.0 is better)
-        
-        # Binary search with high precision
-        for iteration in range(20):  # 20 iterations should give us very high precision
-            # Test the middle angle
-            test_angle = (min_angle + max_angle) / 2.0
-            ik_constraint.pole_angle = test_angle
-            bpy.context.view_layer.update()
-            
-            # Get the current knee position with this pole angle
-            current_knee_pos = knee_bone.matrix.to_translation()
-            
-            # Calculate the current knee direction
-            current_direction = current_knee_pos - leg_pos
-            current_projected = current_direction - current_direction.dot(chain_axis) * chain_axis
-            
-            if current_projected.length > 0.001:
-                current_projected.normalize()
-                
-                # Calculate alignment (dot product - closer to 1.0 means better alignment)
-                alignment = current_projected.dot(target_projected)
-                
-                # If this is the best alignment so far, save it
-                if alignment > best_alignment:
-                    best_alignment = alignment
-                    best_angle = test_angle
-                
-                # For binary search, test small steps to determine direction
-                # Test positive direction
-                ik_constraint.pole_angle = test_angle + math.radians(1.0)
-                bpy.context.view_layer.update()
-                pos_plus = knee_bone.matrix.to_translation()
-                dir_plus = pos_plus - leg_pos
-                proj_plus = dir_plus - dir_plus.dot(chain_axis) * chain_axis
-                if proj_plus.length > 0.001:
-                    proj_plus.normalize()
-                    align_plus = proj_plus.dot(target_projected)
-                else:
-                    align_plus = -1.0
-                
-                # Test negative direction
-                ik_constraint.pole_angle = test_angle - math.radians(1.0)
-                bpy.context.view_layer.update()
-                pos_minus = knee_bone.matrix.to_translation()
-                dir_minus = pos_minus - leg_pos
-                proj_minus = dir_minus - dir_minus.dot(chain_axis) * chain_axis
-                if proj_minus.length > 0.001:
-                    proj_minus.normalize()
-                    align_minus = proj_minus.dot(target_projected)
-                else:
-                    align_minus = -1.0
-                
-                # Determine which direction to search
-                if align_plus > align_minus:
-                    # Positive direction gives better alignment
-                    min_angle = test_angle
-                else:
-                    # Negative direction gives better alignment
-                    max_angle = test_angle
-                
-                # If we're very well aligned, we can stop
-                if best_alignment > 0.999:  # Very close to perfect alignment
-                    break
-        
-        # Restore original angle temporarily for cleanup
-        ik_constraint.pole_angle = original_pole_angle
+        chain_axis.normalize()
+
+        def project(point):
+            direction = point - leg_pos
+            return direction - direction.dot(chain_axis) * chain_axis
+
+        current = project(knee_bone.matrix.to_translation())
+        target = project(knee_ik_bone.matrix.to_translation())
+        if current.length < 1e-4 or target.length < 1e-4:
+            return 0.0
+        return self._signed_angle(current, target, chain_axis)
+
+    def _apply_knee_pole_angles(self, armature_object):
+        """Solve both knees with one depsgraph sample at pole_angle 0."""
+        jobs = []
+        for side in ("L", "R"):
+            knee_bone = armature_object.pose.bones.get(f"Knee{side}")
+            knee_ik_bone = armature_object.pose.bones.get(f"KneeIK{side}")
+            leg_bone = armature_object.pose.bones.get(f"Leg{side}")
+            foot_bone = armature_object.pose.bones.get(f"Foot{side}")
+            ik_constraint = self._find_ik_constraint(knee_bone)
+            if not all([knee_bone, knee_ik_bone, leg_bone, foot_bone, ik_constraint]):
+                continue
+            jobs.append((knee_bone, knee_ik_bone, leg_bone, foot_bone, ik_constraint))
+
+        if not jobs:
+            return
+
+        for _knee, _pole, _leg, _foot, ik_constraint in jobs:
+            ik_constraint.pole_angle = 0.0
         bpy.context.view_layer.update()
-        
-        return best_angle
+
+        pole_sign = getattr(self, "_pole_sign", 1.0)
+        computed = []
+        for knee_bone, knee_ik_bone, leg_bone, foot_bone, ik_constraint in jobs:
+            angle = self._pole_angle_from_zero(knee_bone, knee_ik_bone, leg_bone, foot_bone)
+            computed.append((ik_constraint, angle))
+            ik_constraint.pole_angle = pole_sign * angle
+
+        if getattr(self, "_pole_sign_checked", False):
+            return
+
+        bpy.context.view_layer.update()
+        worst_alignment = 1.0
+        for knee_bone, knee_ik_bone, leg_bone, foot_bone, _ik in jobs:
+            leg_pos = leg_bone.matrix.to_translation()
+            chain_axis = foot_bone.matrix.to_translation() - leg_pos
+            if chain_axis.length < 1e-6:
+                continue
+            chain_axis.normalize()
+            current = (knee_bone.matrix.to_translation() - leg_pos)
+            target = (knee_ik_bone.matrix.to_translation() - leg_pos)
+            current = current - current.dot(chain_axis) * chain_axis
+            target = target - target.dot(chain_axis) * chain_axis
+            if current.length > 1e-4 and target.length > 1e-4:
+                worst_alignment = min(worst_alignment, current.normalized().dot(target.normalized()))
+
+        if worst_alignment < 0.85:
+            self._pole_sign = -pole_sign
+            for ik_constraint, angle in computed:
+                ik_constraint.pole_angle = self._pole_sign * angle
+        self._pole_sign_checked = True
+
+    def _record_bone_keys(self, frame, bones):
+        store = self._key_store
+        for bone in bones:
+            entry = store.setdefault(bone.name, {
+                "mode": bone.rotation_mode,
+                "frames": [],
+            })
+            if bone.rotation_mode == 'QUATERNION':
+                rotation = tuple(bone.rotation_quaternion)
+            else:
+                rotation = tuple(bone.rotation_euler)
+            entry["frames"].append((
+                frame,
+                tuple(bone.location),
+                rotation,
+                tuple(bone.scale),
+            ))
+
+    def _flush_recorded_keys(self, armature_object):
+        if not armature_object.animation_data:
+            armature_object.animation_data_create()
+        action = armature_object.animation_data.action
+        if action is None:
+            action = bpy.data.actions.new(name=f"{armature_object.name} IK Match")
+            assign_action(armature_object.animation_data, action)
+
+        for bone_name, entry in self._key_store.items():
+            frames = entry["frames"]
+            if not frames:
+                continue
+            frames.sort(key=lambda item: item[0])
+            loc_values = [item[1] for item in frames]
+            rot_values = [item[2] for item in frames]
+            if entry["mode"] == 'QUATERNION':
+                aligned = [list(rot_values[0])]
+                for quat in rot_values[1:]:
+                    prev = aligned[-1]
+                    if (prev[0] * quat[0] + prev[1] * quat[1] + prev[2] * quat[2] + prev[3] * quat[3]) < 0.0:
+                        aligned.append([-quat[0], -quat[1], -quat[2], -quat[3]])
+                    else:
+                        aligned.append(list(quat))
+                rot_values = aligned
+            scl_values = [item[3] for item in frames]
+            frame_nums = [item[0] for item in frames]
+
+            frame_min = frame_nums[0]
+            frame_max = frame_nums[-1]
+
+            def write_channel(data_path, index, values):
+                fcurve = find_fcurve(action, data_path, index=index)
+                if fcurve is None:
+                    fcurve = new_fcurve(action, data_path, index=index, action_group=bone_name)
+                else:
+                    for i in range(len(fcurve.keyframe_points) - 1, -1, -1):
+                        frame = fcurve.keyframe_points[i].co[0]
+                        if frame_min - 0.001 <= frame <= frame_max + 0.001:
+                            fcurve.keyframe_points.remove(fcurve.keyframe_points[i])
+                for frame, value in zip(frame_nums, values):
+                    fcurve.keyframe_points.insert(frame, value, options={'FAST'})
+                fcurve.update()
+
+            loc_path = f'pose.bones["{bone_name}"].location'
+            for index in range(3):
+                write_channel(loc_path, index, [value[index] for value in loc_values])
+
+            if entry["mode"] == 'QUATERNION':
+                rot_path = f'pose.bones["{bone_name}"].rotation_quaternion'
+                for index in range(4):
+                    write_channel(rot_path, index, [value[index] for value in rot_values])
+            else:
+                rot_path = f'pose.bones["{bone_name}"].rotation_euler'
+                for index in range(3):
+                    write_channel(rot_path, index, [value[index] for value in rot_values])
+
+            scl_path = f'pose.bones["{bone_name}"].scale'
+            for index in range(3):
+                write_channel(scl_path, index, [value[index] for value in scl_values])
 
     def execute(self, context):
         if self.entire_animation:
@@ -460,6 +530,10 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
             
             total_frames = end_frame - start_frame + 1
             total_transfers = 0
+            self._collect_keys = bool(self.auto_keyframe)
+            self._key_store = {}
+            self._pole_sign = 1.0
+            self._pole_sign_checked = False
             
             # Show a progress indicator in the status bar
             context.window_manager.progress_begin(0, 100)
@@ -476,6 +550,9 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
                     # Process this frame
                     transfers = self.process_frame(context)
                     total_transfers += transfers
+
+                if self._collect_keys:
+                    self._flush_recorded_keys(context.object)
                     
                 # End progress indicator
                 context.window_manager.progress_end()
@@ -483,10 +560,11 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
                 # Return to the original frame
                 context.scene.frame_set(original_frame)
                 
-                # Remove keyframes from knee (and leg) bones if requested
-                if self.remove_knee_frames:
-                    keep_frame = start_frame if self.reference_frame == 'FIRST' else end_frame
-                    self.remove_knee_and_leg_keyframes(context, keep_frame)
+                keep_frame = start_frame if self.reference_frame == 'FIRST' else end_frame
+                if self._should_remove_knee_frames() and self.remove_knee_frames:
+                    self.remove_fk_keyframes(context, keep_frame, ["KneeL", "KneeR", "LegL", "LegR"], "knee/leg")
+                if self._should_remove_arm_frames() and self.remove_arm_frames:
+                    self.remove_fk_keyframes(context, keep_frame, ["ArmL", "ArmR"], "arm")
                 
                 # Reset foot FK bones if requested
                 if self.reset_foot_bones:
@@ -504,6 +582,9 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
                 return {'CANCELLED'}
         else:
             # Process only the current frame
+            self._pole_sign = 1.0
+            self._pole_sign_checked = False
+            self._collect_keys = False
             transfer_count = self.process_frame(context)
             
             # Report success
@@ -514,23 +595,22 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
                 
             return {'FINISHED'}
     
-    def remove_knee_and_leg_keyframes(self, context, frame_to_keep):
-        """Remove all keyframes from Knee and Leg bones except the chosen reference frame"""
+    def _should_remove_knee_frames(self):
+        return self.cleanup_mode in {'LEGS', 'BOTH'}
+
+    def _should_remove_arm_frames(self):
+        return self.cleanup_mode in {'ARMS', 'BOTH'}
+
+    def remove_fk_keyframes(self, context, frame_to_keep, bone_names, label):
+        """Remove all keyframes from the given bones except the chosen reference frame"""
         armature_object = context.object
-        
-        # Bones to process: knees and legs
-        knee_bones = [
-            armature_object.pose.bones.get("KneeL"),
-            armature_object.pose.bones.get("KneeR")
+        bones_to_process = [
+            armature_object.pose.bones.get(name) for name in bone_names
+            if armature_object.pose.bones.get(name)
         ]
-        leg_bones = [
-            armature_object.pose.bones.get("LegL"),
-            armature_object.pose.bones.get("LegR")
-        ]
-        bones_to_process = [b for b in knee_bones + leg_bones if b]
         
         if not bones_to_process:
-            self.report({'WARNING'}, "No Knee/Leg bones found to remove keyframes from")
+            self.report({'WARNING'}, f"No {label} bones found to remove keyframes from")
             return
         
         # Ensure action exists
@@ -544,11 +624,12 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         # Track the number of keyframes removed
         removed_count = 0
         
-        # Find all FCurves associated with the knee bones
+        # Find all FCurves associated with the requested bones
         fcurves_to_process = []
-        for fcurve in action.fcurves:
-            # Parse the data path to check if it belongs to a knee bone
-            if fcurve.data_path.startswith('pose.bones["') and any(bone_name in fcurve.data_path for bone_name in bone_names):
+        for fcurve in get_fcurves(action):
+            if fcurve.data_path.startswith('pose.bones["') and any(
+                f'pose.bones["{bone_name}"]' in fcurve.data_path for bone_name in bone_names
+            ):
                 fcurves_to_process.append(fcurve)
         
         # For each FCurve, remove all keyframes except for the chosen frame
@@ -579,9 +660,9 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         
         # Report the number of keyframes removed
         if removed_count > 0:
-            self.report({'INFO'}, f"Removed {removed_count} keyframes from knee/leg bones, keeping only frame {int(frame_to_keep)}")
+            self.report({'INFO'}, f"Removed {removed_count} keyframes from {label} bones, keeping only frame {int(frame_to_keep)}")
         else:
-            self.report({'INFO'}, "No knee/leg bone keyframes found to remove")
+            self.report({'INFO'}, f"No {label} bone keyframes found to remove")
     
     def reset_foot_bone_transforms(self, context):
         """Reset transforms and remove keyframes from Foot FK bones after IK transfer"""
@@ -627,7 +708,7 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
             
             # Find all FCurves associated with the foot bones and remove them
             fcurves_to_remove = []
-            for fcurve in action.fcurves:
+            for fcurve in get_fcurves(action):
                 # Parse the data path to check if it belongs to a foot bone
                 if fcurve.data_path.startswith('pose.bones["') and any(bone_name in fcurve.data_path for bone_name in bone_names):
                     fcurves_to_remove.append(fcurve)
@@ -635,7 +716,7 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
             
             # Remove the FCurves entirely
             for fcurve in fcurves_to_remove:
-                action.fcurves.remove(fcurve)
+                remove_fcurve(action, fcurve)
             
             # Report the number of keyframes removed
             if removed_count > 0:
@@ -660,10 +741,17 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         # Only show auto keyframe option if entire animation is selected
         if self.entire_animation:
             layout.prop(self, "auto_keyframe")
-            layout.prop(self, "remove_knee_frames")
-            if self.remove_knee_frames:
+            show_reference = False
+            if self._should_remove_knee_frames():
+                layout.prop(self, "remove_knee_frames")
+                show_reference = show_reference or self.remove_knee_frames
+            if self._should_remove_arm_frames():
+                layout.prop(self, "remove_arm_frames")
+                show_reference = show_reference or self.remove_arm_frames
+            if show_reference:
                 layout.prop(self, "reference_frame")
-            layout.prop(self, "reset_foot_bones")
+            if self._should_remove_knee_frames():
+                layout.prop(self, "reset_foot_bones")
 
 def register():
     bpy.utils.register_class(SUB_OP_fk_to_ik_transfer)

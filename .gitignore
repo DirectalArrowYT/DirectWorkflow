@@ -1,4 +1,9 @@
-__pycache__/
 *.pyc
-*.pyo
+*.sh
+*.bat
+test/temp.zip
+test/*.zip
+__pycache__
+.vscode/*
 .DS_Store
+.current_commit

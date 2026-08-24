@@ -1,5 +1,8 @@
 import bpy
 
+from ..anim.fcurve_compat import get_fcurves, remove_fcurve
+from ..blender_compat import set_pose_bone_select
+
 class SUB_OP_apply_ik_animation_operator(bpy.types.Operator):
     """Bake IK Animation to Original Bones and Remove IK Bones"""
     bl_idname = "sub.apply_ik_animation"
@@ -16,9 +19,12 @@ class SUB_OP_apply_ik_animation_operator(bpy.types.Operator):
         # First, bake animation for all bones
         bpy.ops.object.mode_set(mode='POSE')
         
-        # Select all bones before baking
-        for bone in armature_object.pose.bones:
-            bone.bone.select = True
+        # Select all bones before baking (Bone.select is gone in Blender 5)
+        try:
+            bpy.ops.pose.select_all(action='SELECT')
+        except Exception:
+            for bone in armature_object.pose.bones:
+                set_pose_bone_select(bone, True)
             
         # Bake the animation
         frame_start = bpy.context.scene.frame_start
@@ -69,7 +75,8 @@ class SUB_OP_apply_ik_animation_operator(bpy.types.Operator):
             fcurves_to_remove = []
             
             # Find all fcurves related to the deleted IK bones
-            for i, fcurve in enumerate(action.fcurves):
+            action_fcurves = get_fcurves(action)
+            for i, fcurve in enumerate(action_fcurves):
                 for bone_name in ik_bones_to_delete:
                     # Check if fcurve data_path contains bone name in the format pose.bones["BoneName"]
                     if f'pose.bones["{bone_name}"]' in fcurve.data_path:
@@ -78,7 +85,7 @@ class SUB_OP_apply_ik_animation_operator(bpy.types.Operator):
             
             # Remove the identified fcurves in reverse order to avoid index shifting issues
             for i in sorted(fcurves_to_remove, reverse=True):
-                action.fcurves.remove(action.fcurves[i])
+                remove_fcurve(action, action_fcurves[i])
             
             if fcurves_to_remove:
                 self.report({'INFO'}, f"Removed {len(fcurves_to_remove)} keyframe channels from deleted IK bones.")

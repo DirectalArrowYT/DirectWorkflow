@@ -3,6 +3,7 @@ import mathutils
 from mathutils import Vector
 import math  # Import the math module
 from . import fk_to_ik
+from ..blender_compat import assign_bone_to_collection, ensure_bone_collection
 
 class SUB_OP_create_ik_bones_operator(bpy.types.Operator):
     """Generate IK Bones for Arms and Legs with Automatic Setup"""
@@ -171,15 +172,11 @@ class SUB_OP_create_ik_bones_operator(bpy.types.Operator):
                 bone.color.palette = 'THEME01'
         
         # Create and assign bones to IK collection
-        ik_bone_collection_name = "IK Bones"
-        if ik_bone_collection_name not in armature.collections:
-            ik_bone_collection = armature.collections.new(name=ik_bone_collection_name)
-        else:
-            ik_bone_collection = armature.collections[ik_bone_collection_name]
+        ik_bone_collection = ensure_bone_collection(armature, "IK Bones")
 
         for bone in armature.bones:
             if "IK" in bone.name:
-                ik_bone_collection.assign(bone)
+                assign_bone_to_collection(ik_bone_collection, bone)
         
         # Accurately position the IK bones to match FK
         for i in side:
@@ -221,7 +218,7 @@ class SUB_OP_create_ik_bones_operator(bpy.types.Operator):
         
         # Prompt for position matching if requested
         if self.match_position:
-            fk_to_ik.invoke_position_match_dialog()
+            fk_to_ik.invoke_position_match_dialog(cleanup_mode='BOTH')
             
         return {'FINISHED'}
     

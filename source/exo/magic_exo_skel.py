@@ -207,7 +207,7 @@ class SUB_OP_make_combined_skeleton(Operator):
         '''
         First, copy "Smash" bones as-is.
         Then, copy the "Other" bones into the "Smash" bones,
-           preserving the heirarchy of "Other",
+           preserving the hierarchy of "Other",
            just replacing the head/tail data with Smash's when available.
         Note, for proper implementation in Smash Ultimate,
             'Hip' is the bone to parent the 'root' bone of "Other" to.

@@ -1,15 +1,6 @@
+# Load the native ssbh_data_py extension for this OS and CPython ABI.
+# Builds are extracted from https://github.com/ScanMountGoat/ssbh_data_py/releases
+# Shipped ABIs: cp310 (Blender 4.0–4.1), cp311 (Blender 4.2–4.5), cp313 (Blender 5.x).
+from .._native_loader import load_native
 
-# Check if a binary is available for the current platform.
-# These builds are extracted from the wheels published here:
-# https://github.com/ScanMountGoat/ssbh_data_py/releases
-# TODO: There may be an easier way in future Blender versions.
-from sys import platform
-if platform.startswith('win'):
-    from .win.ssbh_data_py import *
-elif platform.startswith('lin'):
-    from .linux.ssbh_data_py import *
-elif platform.startswith('dar'):
-    try:
-        from .macos.arm64.ssbh_data_py import *
-    except:
-        from .macos.x86.ssbh_data_py import *
+load_native('ssbh_data_py')

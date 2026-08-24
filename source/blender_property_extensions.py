@@ -13,9 +13,19 @@ from .swing import sub_swing_data
 from .model.material import sub_matl_data
 from .model.skel import helper_bone_data
 
+
+def poll_armature_object(_self, obj):
+    return obj is not None and getattr(obj, 'type', None) == 'ARMATURE'
+
+
 def register():
+    from .extras.face_picker import SUB_PG_face_picker_data
+
     Armature.sub_anim_properties = PointerProperty(
         type=anim_data.SUB_PG_sub_anim_data
+    )
+    Armature.sub_face_picker = PointerProperty(
+        type=SUB_PG_face_picker_data
     )
     Scene.sub_scene_properties = PointerProperty(
         type=SubSceneProperties
@@ -37,6 +47,9 @@ def register():
     )
     Collection.sub_swing_collection_props = PointerProperty(
         type=sub_swing_data.SUB_PG_sub_swing_master_collection_props
+    )
+    Object.sub_shpc = PointerProperty(
+        type=SUB_PG_shpc_settings
     )
 
 class ModelImportFile(PropertyGroup):
@@ -66,6 +79,66 @@ class IdlePoseItem(PropertyGroup):
 bpy.utils.register_class(ModelImportFile)
 bpy.utils.register_class(ModelImportItem)
 bpy.utils.register_class(AnimationImportFile)
+
+class MirrorCustomBoneItem(PropertyGroup):
+    name: StringProperty(
+        name="Bone Name",
+        description="Custom bone that is not part of a normal Smash Ultimate armature",
+        default=""
+    )
+    include: BoolProperty(
+        name="Mirror",
+        description="Mirror this custom bone",
+        default=False
+    )
+
+
+def _update_shpc_preview(self, context):
+    obj = getattr(self, "id_data", None)
+    if obj is None or not obj.get("sub_shpc_root"):
+        return
+    from .extras.stage_tools.shpcanim import refresh_shpc_preview_object
+    refresh_shpc_preview_object(obj, context.scene.frame_current)
+
+
+def _update_stage_light_preview(self, context):
+    from .extras.stage_tools.light_nuanmb import apply_stage_light_preview
+    apply_stage_light_preview(context)
+
+
+class SUB_PG_shpc_settings(PropertyGroup):
+    intensity: FloatProperty(
+        name="Intensity",
+        description="Scale every SH coefficient on preview and export",
+        default=1.0,
+        min=0.0,
+        soft_max=8.0,
+        max=50.0,
+        update=_update_shpc_preview,
+    )
+    tint: FloatVectorProperty(
+        name="Tint",
+        description="Tint the ambient grid RGB channels",
+        subtype="COLOR",
+        size=3,
+        min=0.0,
+        soft_max=2.0,
+        max=8.0,
+        default=(1.0, 1.0, 1.0),
+        update=_update_shpc_preview,
+    )
+    use_vertex_colors: BoolProperty(
+        name="Export Painted Ambient",
+        description="Replace L0 ambient from the Col vertex colors on export",
+        default=False,
+    )
+    sync_scene_frame: BoolProperty(
+        name="Sync to Scene Frame",
+        description="Switch SHPC keyframes when the scene frame changes",
+        default=True,
+        update=_update_shpc_preview,
+    )
+
 
 class UserPoseItem(PropertyGroup):
     name: StringProperty(
@@ -316,6 +389,23 @@ class SubSceneProperties(PropertyGroup):
         description="Whether the Model Tools section is expanded",
         default=False
     )
+    roll_copy_source: PointerProperty(
+        name="Source",
+        description="Armature to copy roll values from",
+        type=Object,
+        poll=poll_armature_object,
+    )
+    roll_copy_target: PointerProperty(
+        name="Target",
+        description="Armature whose matching bone rolls will be changed",
+        type=Object,
+        poll=poll_armature_object,
+    )
+    roll_copy_selected_only: BoolProperty(
+        name="Selected Target Bones Only",
+        description="Only copy rolls for bones currently selected on the target armature",
+        default=False,
+    )
     mirror_animation_expanded: BoolProperty(
         name="Mirror Animation Expanded",
         description="Whether the Mirror Animation section is expanded",
@@ -329,6 +419,20 @@ class SubSceneProperties(PropertyGroup):
             ('LOCAL', 'Local', "Mirror using local/bone coordinate space"),
             ('GLOBAL', 'Global', "Mirror using world/global coordinate space"),
         )
+    )
+    mirror_custom_bones: CollectionProperty(
+        name="Custom Mirror Bones",
+        description="Extra bones that are not part of a normal Smash armature",
+        type=MirrorCustomBoneItem
+    )
+    mirror_custom_bones_index: IntProperty(
+        name="Custom Mirror Bones Index",
+        default=0
+    )
+    mirror_custom_armature_name: StringProperty(
+        name="Custom Mirror List Source Armature",
+        description="Internal: armature the custom bone list was last scanned from",
+        default=""
     )
     mirror_include_fingers: BoolProperty(
         name="Include Fingers",
@@ -398,6 +502,47 @@ class SubSceneProperties(PropertyGroup):
         name="Apply to only selected bones",
         description="If enabled, applying a user pose will affect only currently selected pose bones",
         default=False
+    )
+    stage_light_expanded: BoolProperty(
+        name="Stage Lighting Expanded",
+        description="Whether the Stage Lighting section is expanded",
+        default=True,
+    )
+    stage_light_preview: EnumProperty(
+        name="Viewport Preview",
+        description="SSBH uses one directional light per mesh plus SH ambient, not every LightStg as a Blender sun",
+        items=(
+            ("AMBIENT", "Ambient Fill", "SH-like fill only. Closest to how SSBH lights a stage (baked maps + ambient)"),
+            ("CHR", "Ambient + LightChr", "Fill plus LightChr. Smash fighter lighting"),
+            ("STG0", "Ambient + LightStg0", "Fill plus LightStg0. Stage light set 0"),
+            ("ALL", "All Lights (Debug)", "Every LightChr/LightStg sun contributes. Harsh and not how the game works"),
+            ("NONE", "Gizmos Only", "Imported lights do not illuminate. Rotate them for export only"),
+        ),
+        default="CHR",
+        update=_update_stage_light_preview,
+    )
+    stage_light_apply_ambient: BoolProperty(
+        name="Apply Smash Ambient",
+        description="Add an SH-like fill light and world so Smash EEVEE materials are not a black void",
+        default=True,
+        update=_update_stage_light_preview,
+    )
+    stage_shpc_expanded: BoolProperty(
+        name="Ambient SH Expanded",
+        description="Whether the Ambient SH section is expanded",
+        default=True,
+    )
+    last_stage_light_dir: StringProperty(
+        name="Last Stage Light Directory",
+        description="Last folder used for light.nuanmb import or export",
+        default="",
+        subtype="DIR_PATH",
+    )
+    last_stage_shpc_dir: StringProperty(
+        name="Last Stage SHPC Directory",
+        description="Last folder used for shpcanim import or export",
+        default="",
+        subtype="DIR_PATH",
     )
 
 

@@ -2,6 +2,12 @@ import bpy
 
 from bpy.types import Panel, Operator
 
+from ..model.material.convert_smash_material import (
+    find_target_armature,
+    armature_has_converted_smash_materials,
+    armature_has_unconverted_smash_materials,
+)
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..anim.anim_data import SUB_PG_sub_anim_data
@@ -130,9 +136,7 @@ class SUB_PT_animation_tools(Panel):
         
         # Add button for hip animation transfer
         row = layout.row(align=True)
-        row.operator("sub.transfer_hip_animation", text="Transfer Hip to Trans (Forward)")
-        row2 = layout.row(align=True)
-        row2.operator("sub.transfer_hip_jump_animation", text="Transfer Hip to Trans (Jump)")
+        row.operator("sub.transfer_hip_animation", text="Transfer Hip Animation to Trans")
         
         # Add Mirror Animation section
         layout.separator()
@@ -155,6 +159,28 @@ class SUB_PT_animation_tools(Panel):
             
             # Mirror space option
             col.prop(ssp, "mirror_space", text="Space")
+            
+            col.separator()
+            col.operator("sub.find_custom_mirror_bones", text="Find Custom Bones")
+            if ssp.mirror_custom_bones:
+                included = sum(1 for item in ssp.mirror_custom_bones if item.include)
+                col.label(text=f"Custom bones: {included}/{len(ssp.mirror_custom_bones)} set to mirror")
+                col.template_list(
+                    "SUB_UL_mirror_custom_bones",
+                    "",
+                    ssp,
+                    "mirror_custom_bones",
+                    ssp,
+                    "mirror_custom_bones_index",
+                    rows=6,
+                )
+                row = col.row(align=True)
+                op_all = row.operator("sub.mirror_custom_bones_set_all", text="Check All")
+                op_all.include = True
+                op_none = row.operator("sub.mirror_custom_bones_set_all", text="Uncheck All")
+                op_none.include = False
+            else:
+                col.label(text="Scan the armature to list extra bones")
             
             # Add spacing between dropdown and button
             col.separator()
@@ -188,6 +214,89 @@ class SUB_PT_animation_tools(Panel):
             else:
                 row.operator("sub.invert_rotation_values", text="Invert Positive and Negative (Select Bones)")
 
+        row = layout.row(align=True)
+        row.operator("sub.remove_swing_bone_animation", text="Remove Animation from Swing Bones")
+
+class SUB_PT_model_tools(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Ultimate'
+    bl_label = 'Model Tools'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        modes = ['POSE', 'OBJECT', 'EDIT_ARMATURE', 'EDIT_MESH']
+        return context.mode in modes
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        ssp = context.scene.sub_scene_properties
+
+        row = layout.row(align=True)
+        row.operator("sub.limit_weights", text="Limit Weights to 4")
+
+        row = layout.row(align=True)
+        if context.mode == 'OBJECT':
+            row.operator("sub.mirror_vertex_groups", text="Mirror Vertex Groups")
+        else:
+            row.enabled = False
+            row.operator("sub.mirror_vertex_groups", text="Mirror Vertex Groups (Object Mode Only)")
+
+        row = layout.row(align=True)
+        if context.mode == 'OBJECT':
+            row.operator("sub.mirror_mesh_as_separate_object", text="Mirror Mesh as Separate Object")
+        else:
+            row.enabled = False
+            row.operator("sub.mirror_mesh_as_separate_object", text="Mirror Mesh as Separate Object (Object Mode Only)")
+
+        row = layout.row(align=True)
+        row.operator("sub.unstack_uv_islands", text="Unstack UV Islands")
+
+        row = layout.row(align=True)
+        if context.mode == 'OBJECT':
+            row.label(text="Shape Keys Prefix:")
+            row.prop(ssp, "shape_keys_prefix", text="")
+        else:
+            row.enabled = False
+            row.label(text="Shape Keys Prefix (Object Mode Only)")
+
+        row = layout.row(align=True)
+        if context.mode == 'OBJECT':
+            row.operator("sub.convert_shape_keys_to_meshes", text="Convert Shape Keys to Meshes")
+        else:
+            row.enabled = False
+            row.operator("sub.convert_shape_keys_to_meshes", text="Convert Shape Keys to Meshes (Object Mode Only)")
+
+        row = layout.row(align=True)
+        if context.mode == 'EDIT_ARMATURE':
+            row.operator("sub.remove_selected_bones")
+        else:
+            row.enabled = False
+            row.operator("sub.remove_selected_bones", text="Remove Bones (Edit Mode Only)")
+
+        col = layout.column(align=True)
+        col.separator()
+        col.label(text="Roll Value Copier", icon="BONE_DATA")
+        col.prop(ssp, "roll_copy_source")
+        col.prop(ssp, "roll_copy_target")
+        col.prop(ssp, "roll_copy_selected_only")
+        button_row = layout.row()
+        source = ssp.roll_copy_source
+        target = ssp.roll_copy_target
+        button_row.enabled = (
+            source is not None
+            and target is not None
+            and source != target
+            and source.type == "ARMATURE"
+            and target.type == "ARMATURE"
+        )
+        button_row.operator("sub.copy_bone_rolls", icon="DUPLICATE")
+        help_box = layout.box()
+        help_box.label(text="Matches bone names exactly (case-sensitive).", icon="INFO")
+        help_box.label(text="Only roll values are changed.")
+
 class SUB_PT_misc_utilities(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -207,57 +316,30 @@ class SUB_PT_misc_utilities(Panel):
         # Eye Material Custom Vector 31 Modal Operator
         row = layout.row(align=True)
         row.operator("sub.eye_material_custom_vector_31_modal")
-        
-        # Show bone removal button only in edit mode or grayed out
-        row = layout.row(align=True)
-        if context.mode == 'EDIT_ARMATURE':
-            row.operator("sub.remove_selected_bones")
-        else:
-            row.enabled = False
-            row.operator("sub.remove_selected_bones", text="Remove Bones (Edit Mode Only)")
-        
-        # Add collapsible model tools section
+
         layout.separator()
         box = layout.box()
-        
-        # Get scene properties
-        ssp = context.scene.sub_scene_properties
-        
-        # Collapsible header with toggle
-        header_row = box.row()
-        header_row.prop(ssp, "model_tools_expanded", 
-                       icon="TRIA_DOWN" if ssp.model_tools_expanded else "TRIA_RIGHT",
-                       icon_only=True, emboss=False)
-        header_row.label(text="Model Tools")
-        
-        # Only show content if expanded
-        if ssp.model_tools_expanded:
-            row = box.row(align=True)
-            row.operator("sub.limit_weights", text="Limit Weights to 4")
-            
-            # Add Mirror Vertex Groups button
-            row = box.row(align=True)
-            if context.mode == 'OBJECT':
-                row.operator("sub.mirror_vertex_groups", text="Mirror Vertex Groups")
-            else:
-                row.enabled = False
-                row.operator("sub.mirror_vertex_groups", text="Mirror Vertex Groups (Object Mode Only)")
-            
-            # Add Shape Keys to Meshes conversion
-            row = box.row(align=True)
-            if context.mode == 'OBJECT':
-                row.label(text="Shape Keys Prefix:")
-                row.prop(ssp, "shape_keys_prefix", text="")
-            else:
-                row.enabled = False
-                row.label(text="Shape Keys Prefix (Object Mode Only)")
-            
-            row = box.row(align=True)
-            if context.mode == 'OBJECT':
-                row.operator("sub.convert_shape_keys_to_meshes", text="Convert Shape Keys to Meshes")
-            else:
-                row.enabled = False
-                row.operator("sub.convert_shape_keys_to_meshes", text="Convert Shape Keys to Meshes (Object Mode Only)")
+        box.label(text="Armature Materials", icon="MATERIAL")
+        armature = find_target_armature(context)
+        if armature is None:
+            row = box.row()
+            row.enabled = False
+            row.operator("sub.convert_armature_smash_materials", text="Convert All to Principled BSDF", icon="MATERIAL")
+            box.label(text="Select an armature.")
+        elif armature_has_converted_smash_materials(armature):
+            box.operator(
+                "sub.revert_armature_smash_materials",
+                text="Revert to Smash Material",
+                icon="LOOP_BACK",
+            )
+        else:
+            row = box.row()
+            row.enabled = armature_has_unconverted_smash_materials(armature)
+            row.operator(
+                "sub.convert_armature_smash_materials",
+                text="Convert All to Principled BSDF",
+                icon="MATERIAL",
+            )
         
     
         
@@ -314,6 +396,77 @@ class SUB_OP_mirror_vertex_groups(bpy.types.Operator):
             vgs[temp].name = rename_map[old]
 
         self.report({'INFO'}, f"Renamed {len(rename_map)} vertex groups.")
+        return {'FINISHED'}
+
+
+def _mirror_mesh_geometry_x(mesh):
+    from mathutils import Matrix
+
+    matrix = Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0))
+    try:
+        mesh.transform(matrix, shape_keys=True)
+    except TypeError:
+        mesh.transform(matrix)
+        if mesh.shape_keys:
+            for key_block in mesh.shape_keys.key_blocks:
+                for point in key_block.data:
+                    point.co.x *= -1
+    mesh.flip_normals()
+    mesh.update()
+
+
+def _flipped_mesh_name(name):
+    vis_suffix = "_VIS_O_OBJShape"
+    vis_index = name.find(vis_suffix)
+    if vis_index != -1:
+        return f"{name[:vis_index]}FLIP{name[vis_index:]}"
+    return f"{name}FLIP"
+
+
+class SUB_OP_mirror_mesh_as_separate_object(bpy.types.Operator):
+    bl_idname = "sub.mirror_mesh_as_separate_object"
+    bl_label = "Mirror Mesh as Separate Object"
+    bl_description = "Duplicate the selected mesh as a new object that contains only the mirrored geometry"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and any(obj.type == 'MESH' for obj in context.selected_objects)
+
+    def execute(self, context):
+        sources = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not sources:
+            self.report({'ERROR'}, "Select a mesh object.")
+            return {'CANCELLED'}
+
+        created = []
+
+        for obj in sources:
+            new_mesh = obj.data.copy()
+            new_obj = obj.copy()
+            new_obj.data = new_mesh
+
+            collections = list(obj.users_collection)
+            if collections:
+                for col in collections:
+                    col.objects.link(new_obj)
+            else:
+                context.collection.objects.link(new_obj)
+
+            flipped_name = _flipped_mesh_name(obj.name)
+            new_obj.name = flipped_name
+            new_obj.data.name = flipped_name
+
+            _mirror_mesh_geometry_x(new_mesh)
+            created.append(new_obj)
+
+        for selected in list(context.selected_objects):
+            selected.select_set(False)
+        for new_obj in created:
+            new_obj.select_set(True)
+        context.view_layer.objects.active = created[-1]
+
+        self.report({'INFO'}, f"Created {len(created)} mirrored mesh object(s).")
         return {'FINISHED'}
 
 
@@ -378,15 +531,19 @@ class SUB_OP_convert_shape_keys_to_meshes(bpy.types.Operator):
 
 def register():
     bpy.utils.register_class(SUB_PT_animation_tools)
+    bpy.utils.register_class(SUB_PT_model_tools)
     bpy.utils.register_class(SUB_PT_misc_utilities)
     bpy.utils.register_class(SUB_OP_mirror_vertex_groups)
+    bpy.utils.register_class(SUB_OP_mirror_mesh_as_separate_object)
     bpy.utils.register_class(SUB_OP_convert_shape_keys_to_meshes)
 
 
 def unregister():
     bpy.utils.unregister_class(SUB_OP_convert_shape_keys_to_meshes)
+    bpy.utils.unregister_class(SUB_OP_mirror_mesh_as_separate_object)
     bpy.utils.unregister_class(SUB_OP_mirror_vertex_groups)
     bpy.utils.unregister_class(SUB_PT_misc_utilities)
+    bpy.utils.unregister_class(SUB_PT_model_tools)
     bpy.utils.unregister_class(SUB_PT_animation_tools)
         
     

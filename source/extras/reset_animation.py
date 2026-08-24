@@ -3,6 +3,8 @@ from bpy.types import Operator
 from bpy.props import BoolProperty, EnumProperty
 import logging
 
+from ..anim.fcurve_compat import get_fcurves, remove_fcurve
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ class SUB_OT_reset_bone_locations(Operator):
             bone_names = {bone.name for bone in armature.pose.bones}
             for action in bpy.data.actions:
                 # Check if any fcurve in the action is for a bone in this armature
-                for fcurve in action.fcurves:
+                for fcurve in get_fcurves(action):
                     if fcurve.data_path.startswith('pose.bones["'):
                         bone_name = fcurve.data_path.split('"')[1]
                         if bone_name in bone_names:
@@ -99,7 +101,7 @@ class SUB_OT_reset_bone_locations(Operator):
         location_fcurves = []
         scale_fcurves = []
         selected_bone_names = [bone.name for bone in selected_bones]
-        for fcurve in action.fcurves:
+        for fcurve in get_fcurves(action):
             if "pose.bones" not in fcurve.data_path:
                 continue
             bone_name = fcurve.data_path.split('"')[1]
@@ -226,7 +228,7 @@ class SUB_OT_reset_bone_locations(Operator):
         
         print(f"Looking for fcurves for bones: {bone_names}")
         
-        for fcurve in action.fcurves:
+        for fcurve in get_fcurves(action):
             # Check if this fcurve belongs to one of the specified bones
             if fcurve.data_path.startswith('pose.bones["'):
                 # Extract bone name from data path
@@ -307,6 +309,68 @@ class SUB_OT_invert_rotation_values(Operator):
             bones_affected += 1
         
         self.report({'INFO'}, f"Inverted rotation values for {bones_affected} selected bones")
+        return {'FINISHED'}
+
+
+class SUB_OT_remove_swing_bone_animation(Operator):
+    """Remove animation data from swing bones (S_*) and reset them to rest values"""
+    bl_idname = "sub.remove_swing_bone_animation"
+    bl_label = "Remove Animation from Swing Bones"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object or context.active_object
+        return obj is not None and obj.type == 'ARMATURE'
+
+    def execute(self, context):
+        armature = context.object or context.active_object
+        swing_bones = [bone for bone in armature.pose.bones if bone.name.startswith('S_')]
+        if not swing_bones:
+            self.report({'WARNING'}, "No swing bones (S_*) found on this armature")
+            return {'CANCELLED'}
+
+        swing_names = {bone.name for bone in swing_bones}
+        original_mode = context.mode
+        if original_mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+
+        fcurves_removed = 0
+        action = armature.animation_data.action if armature.animation_data else None
+        if action:
+            to_remove = []
+            for fcurve in get_fcurves(action):
+                data_path = fcurve.data_path
+                if 'pose.bones[' not in data_path:
+                    continue
+                if '"' in data_path:
+                    bone_name = data_path.split('"')[1]
+                elif "'" in data_path:
+                    bone_name = data_path.split("'")[1]
+                else:
+                    continue
+                if bone_name in swing_names:
+                    to_remove.append(fcurve)
+            for fcurve in to_remove:
+                remove_fcurve(action, fcurve)
+                fcurves_removed += 1
+
+        for bone in swing_bones:
+            bone.location = (0.0, 0.0, 0.0)
+            bone.scale = (1.0, 1.0, 1.0)
+            if bone.rotation_mode == 'QUATERNION':
+                bone.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+            else:
+                bone.rotation_euler = (0.0, 0.0, 0.0)
+
+        context.view_layer.update()
+        if original_mode == 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        self.report(
+            {'INFO'},
+            f"Removed animation from {len(swing_bones)} swing bone(s) ({fcurves_removed} fcurve(s))"
+        )
         return {'FINISHED'}
 
 
@@ -479,6 +543,7 @@ class SUB_OT_ground_character(Operator):
 classes = (
     SUB_OT_reset_bone_locations,
     SUB_OT_invert_rotation_values,
+    SUB_OT_remove_swing_bone_animation,
     SUB_OT_ground_character,
 )
 

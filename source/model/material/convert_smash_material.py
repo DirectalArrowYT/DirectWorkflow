@@ -1,7 +1,7 @@
 import bpy
 import tempfile
 import os
-from bpy.types import ShaderNode, ShaderNodeTexImage, ShaderNodeBsdfPrincipled, ShaderNodeOutputMaterial, ShaderNodeSeparateRGB, ShaderNodeNormalMap, Material, Operator
+from bpy.types import Material, Operator
 from ....dependencies import ssbh_data_py
 
 ParamId = ssbh_data_py.matl_data.ParamId
@@ -75,6 +75,296 @@ def decompose_prm_texture(material: Material, prm_image: bpy.types.Image) -> dic
         'prm_separate_node': separate_rgb_node
     }
 
+def _texture_slot_names(texture):
+    return {
+        str(getattr(texture, "param_id_name", "") or ""),
+        str(getattr(texture, "node_name", "") or ""),
+        str(getattr(texture, "name", "") or ""),
+    }
+
+
+def _slot_number(texture):
+    number = getattr(texture, "texture_number", None)
+    if isinstance(number, int):
+        return number
+    for name in _texture_slot_names(texture):
+        if name.startswith("Texture") and name[7:].isdigit():
+            return int(name[7:])
+    return None
+
+
+def _image_name(image) -> str:
+    return (getattr(image, "name", "") or "").replace("\\", "/").lower()
+
+
+def _is_dummy_image(image) -> bool:
+    if image is None:
+        return True
+    name = _image_name(image)
+    dummy_tokens = (
+        "default_white",
+        "default_black",
+        "default_gray",
+        "default_normal",
+        "default_params",
+        "/common/shader/sfxpbs/default",
+        "#replace_cubemap",
+    )
+    return any(token in name for token in dummy_tokens)
+
+
+def _is_usable_color_image(image) -> bool:
+    if image is None or _is_dummy_image(image):
+        return False
+    name = _image_name(image)
+    return not any(token in name for token in ("cubemap", "irradiance"))
+
+
+def _uv_from_tex_node(node) -> str:
+    visited = set()
+    sockets = [node.inputs.get("Vector")] if node.inputs.get("Vector") else []
+    while sockets:
+        socket = sockets.pop(0)
+        if socket is None:
+            continue
+        for link in socket.links:
+            from_node = link.from_node
+            if from_node in visited:
+                continue
+            visited.add(from_node)
+            uv_map = getattr(from_node, "uv_map", None)
+            if uv_map:
+                return uv_map
+            attr = getattr(from_node, "attribute_name", None)
+            if attr:
+                return attr
+            for input_socket in from_node.inputs:
+                if input_socket.is_linked:
+                    sockets.append(input_socket)
+    return ""
+
+
+def _harvest_tex_nodes(material: Material):
+    harvested = []
+    if not material.node_tree:
+        return harvested
+    for node in material.node_tree.nodes:
+        image = getattr(node, "image", None)
+        if image is None:
+            continue
+        harvested.append({
+            "name": str(node.name),
+            "label": str(node.label or ""),
+            "image": image,
+            "uv_map": _uv_from_tex_node(node) or "",
+        })
+    return harvested
+
+
+def _images_from_harvest(harvested) -> dict:
+    found = {}
+    for entry in harvested:
+        image = entry["image"]
+        found[entry["name"]] = image
+        if entry["label"]:
+            found[entry["label"]] = image
+        name = entry["name"]
+        if name.startswith("Texture") and name[7:].isdigit():
+            found[f"slot:{name[7:]}"] = image
+    return found
+
+
+def _image_for_slot(sub_matl_data, node_images, number: int):
+    slot_name = f"Texture{number}"
+    candidates = []
+    for texture in sub_matl_data.textures:
+        if _slot_number(texture) == number or slot_name in _texture_slot_names(texture):
+            if texture.image:
+                candidates.append(texture.image)
+            for name in _texture_slot_names(texture):
+                if name in node_images:
+                    candidates.append(node_images[name])
+    for key in (slot_name, f"slot:{number}"):
+        if key in node_images:
+            candidates.append(node_images[key])
+    return _first_real_image(*candidates)
+
+
+def _first_real_image(*images):
+    for image in images:
+        if _is_usable_color_image(image):
+            return image
+    for image in images:
+        if image is not None and not _is_dummy_image(image):
+            return image
+    return None
+
+
+def _uv_for_slot(number: int) -> str:
+    if number in (3, 9):
+        return "bake1"
+    if number in (1, 11, 14):
+        return "uvSet"
+    return "map1"
+
+
+def _uv_for_image(harvested, image, slot: int) -> str:
+    for entry in harvested:
+        if entry["image"] is image and entry["uv_map"]:
+            return entry["uv_map"]
+    return _uv_for_slot(slot)
+
+
+def _collect_maps(material: Material, sub_matl_data, emission_shader: bool):
+    harvested = _harvest_tex_nodes(material)
+    node_images = _images_from_harvest(harvested)
+    extras = []
+    for entry in harvested:
+        image = entry["image"]
+        if _is_usable_color_image(image) and image not in extras:
+            extras.append(image)
+    for texture in sub_matl_data.textures:
+        if _is_usable_color_image(texture.image) and texture.image not in extras:
+            extras.append(texture.image)
+
+    # 0100 / ShaderFX color lives on Texture2, not Texture0. Do not prefer bake maps
+    # as albedo on those shaders — bake1 is lighting, not the ring/emissive art.
+    if emission_shader:
+        albedo_order = (2, 5, 0, 10, 1, 11, 14)
+    elif "bake" in (material.name or "").lower():
+        albedo_order = (0, 10, 2, 5, 1, 11, 9, 3)
+    else:
+        albedo_order = (0, 10, 2, 5, 1, 11, 9, 3)
+
+    albedo = None
+    albedo_slot = 0
+    for number in albedo_order:
+        image = _image_for_slot(sub_matl_data, node_images, number)
+        if _is_usable_color_image(image):
+            albedo = image
+            albedo_slot = number
+            break
+    if albedo is None:
+        for entry in harvested:
+            label = f"{entry['name']} {entry['label']}".lower()
+            if _is_usable_color_image(entry["image"]) and any(
+                token in label for token in ("emiss", "col", "texture2", "texture0", "texture5")
+            ):
+                albedo = entry["image"]
+                break
+    if albedo is None and extras:
+        albedo = extras[0]
+
+    emissive = _first_real_image(
+        _image_for_slot(sub_matl_data, node_images, 5),
+        _image_for_slot(sub_matl_data, node_images, 2),
+        _image_for_slot(sub_matl_data, node_images, 14),
+        albedo if emission_shader else None,
+    )
+
+    return {
+        "albedo": albedo,
+        "albedo_slot": albedo_slot,
+        "albedo_uv": _uv_for_image(harvested, albedo, albedo_slot),
+        "normal": _first_real_image(_image_for_slot(sub_matl_data, node_images, 4)),
+        "prm": _first_real_image(_image_for_slot(sub_matl_data, node_images, 6)),
+        "emissive": emissive,
+    }
+
+
+def _vector_by_name(sub_matl_data, *names):
+    wanted = set(names)
+    for vector in sub_matl_data.vectors:
+        candidates = {
+            str(getattr(vector, "param_id_name", "") or ""),
+            str(getattr(vector, "name", "") or ""),
+        }
+        if wanted.intersection(candidates):
+            return list(vector.value)
+    return None
+
+
+def _is_emission_shader(sub_matl_data, material: Material) -> bool:
+    label = (getattr(sub_matl_data, "shader_label", "") or "").lower()
+    name = (material.name or "").lower()
+    # SFX_PBS_<hex> — shadeless emissive shaders end in 0100, not the leading 0100...
+    hex_id = ""
+    marker = "sfx_pbs_"
+    if marker in label:
+        hex_id = label.split(marker, 1)[1]
+        hex_id = hex_id.split("_", 1)[0]
+    if hex_id.endswith("0100") or "emiss" in label:
+        return True
+    return any(token in name for token in ("emi", "crystal", "glow", "fx_"))
+
+
+def _principled_input(node, *names):
+    for name in names:
+        if name in node.inputs:
+            return node.inputs[name]
+    return None
+
+
+def _add_image_node(nodes, links, image, location, label, name, non_color=False, uv_map="map1"):
+    tex_node = nodes.new("ShaderNodeTexImage")
+    tex_node.image = image
+    tex_node.location = location
+    tex_node.label = label
+    tex_node.name = name
+    if image is not None and non_color:
+        try:
+            image.colorspace_settings.name = "Non-Color"
+        except Exception:
+            pass
+    uv_node = nodes.new("ShaderNodeUVMap")
+    uv_node.location = (location[0] - 200, location[1])
+    uv_node.uv_map = uv_map
+    uv_node.label = f"UV ({uv_map})"
+    links.new(uv_node.outputs["UV"], tex_node.inputs["Vector"])
+    return tex_node
+
+
+def _new_mix_rgb(nodes, location, label="Mix"):
+    try:
+        mix_node = nodes.new("ShaderNodeMix")
+        mix_node.data_type = "RGBA"
+        mix_node.blend_type = "MULTIPLY"
+        mix_node.location = location
+        mix_node.label = label
+        color1 = mix_node.inputs.get("A") or mix_node.inputs.get("Color1")
+        color2 = mix_node.inputs.get("B") or mix_node.inputs.get("Color2")
+        factor = mix_node.inputs.get("Factor") or mix_node.inputs.get("Fac")
+        output = mix_node.outputs.get("Result") or mix_node.outputs.get("Color")
+        return mix_node, factor, color1, color2, output
+    except Exception:
+        mix_node = nodes.new("ShaderNodeMixRGB")
+        mix_node.blend_type = "MULTIPLY"
+        mix_node.location = location
+        mix_node.label = label
+        return mix_node, mix_node.inputs["Fac"], mix_node.inputs["Color1"], mix_node.inputs["Color2"], mix_node.outputs["Color"]
+
+
+def _is_fake_sss_826b(sub_matl_data) -> bool:
+    label = (getattr(sub_matl_data, "shader_label", "") or "").lower()
+    return "826b" in label
+
+
+def _add_invert_color_node(nodes, location, label="Invert Color"):
+    try:
+        invert = nodes.new("ShaderNodeInvertColor")
+    except Exception:
+        invert = nodes.new("ShaderNodeInvert")
+    invert.location = location
+    invert.label = label
+    invert.name = "PRM_Red_Invert"
+    factor = invert.inputs.get("Factor") or invert.inputs.get("Fac")
+    if factor is not None:
+        factor.default_value = 1.0
+    color_in = invert.inputs.get("Color") or invert.inputs[1]
+    color_out = invert.outputs.get("Color") or invert.outputs[0]
+    return invert, color_in, color_out
+
+
 def convert_smash_material_to_principled(operator: Operator, material: Material):
     """
     Convert a Smash Ultimate material to a standard Principled BSDF material.
@@ -87,27 +377,20 @@ def convert_smash_material_to_principled(operator: Operator, material: Material)
     if not material.use_nodes:
         material.use_nodes = True
     
+    sub_matl_data = material.sub_matl_data
+    emission_shader = _is_emission_shader(sub_matl_data, material)
+    maps = _collect_maps(material, sub_matl_data, emission_shader)
+    texture0 = maps["albedo"]
+    texture4 = maps["normal"]
+    texture6 = maps["prm"]
+    cv3 = _vector_by_name(sub_matl_data, "CustomVector3")
+    cv8 = _vector_by_name(sub_matl_data, "CustomVector8")
+    cv0 = _vector_by_name(sub_matl_data, "CustomVector0")
+    
     # Clear existing nodes to start fresh
     material.node_tree.nodes.clear()
-    
     nodes = material.node_tree.nodes
     links = material.node_tree.links
-    
-    # Get the Smash material data
-    sub_matl_data = material.sub_matl_data
-    
-    # Find the relevant textures
-    texture0 = None  # COL (Diffuse/Albedo)
-    texture4 = None  # NOR (Normal map)
-    texture6 = None  # PRM (Metalness, Roughness, AO, Specular)
-    
-    for texture in sub_matl_data.textures:
-        if texture.param_id_name == ParamId.Texture0.name and texture.image:
-            texture0 = texture.image
-        elif texture.param_id_name == ParamId.Texture4.name and texture.image:
-            texture4 = texture.image
-        elif texture.param_id_name == ParamId.Texture6.name and texture.image:
-            texture6 = texture.image
     
     # Create the Principled BSDF node
     principled_node = nodes.new('ShaderNodeBsdfPrincipled')
@@ -115,44 +398,66 @@ def convert_smash_material_to_principled(operator: Operator, material: Material)
     principled_node.label = "Converted from Smash Material"
     principled_node.name = "Principled_BSDF"
     
-    # Create Material Output nodes for both EEVEE and Cycles
-    eevee_output = nodes.new('ShaderNodeOutputMaterial')
-    eevee_output.location = (600, 100)
-    eevee_output.target = 'EEVEE'
-    eevee_output.label = 'EEVEE Output'
-    eevee_output.name = 'eevee_output'
+    output = nodes.new('ShaderNodeOutputMaterial')
+    output.location = (600, 0)
+    output.label = 'Material Output'
+    try:
+        output.target = 'ALL'
+    except Exception:
+        pass
+    bsdf_out = principled_node.outputs.get('BSDF') or principled_node.outputs[0]
+    links.new(bsdf_out, output.inputs[0])
     
-    cycles_output = nodes.new('ShaderNodeOutputMaterial')
-    cycles_output.location = (600, -100)
-    cycles_output.target = 'CYCLES'
-    cycles_output.label = 'Cycles Output'
-    cycles_output.name = 'cycles_output'
-    
-    # Connect Principled BSDF to both outputs
-    links.new(principled_node.outputs['BSDF'], eevee_output.inputs['Surface'])
-    links.new(principled_node.outputs['BSDF'], cycles_output.inputs['Surface'])
-    
-    # Set up diffuse/albedo texture (Texture0)
+    base_color_in = _principled_input(principled_node, 'Base Color')
+    emission_color_in = _principled_input(principled_node, 'Emission Color', 'Emission')
+    emission_strength_in = _principled_input(principled_node, 'Emission Strength')
+    color_socket = None
+
+    # Set up diffuse/albedo / emission texture. Stage FX 0100 shaders use Texture2.
     if texture0:
-        diffuse_tex_node = nodes.new('ShaderNodeTexImage')
-        diffuse_tex_node.image = texture0
-        diffuse_tex_node.location = (-600, 300)
-        diffuse_tex_node.label = "Diffuse/Albedo (COL)"
-        diffuse_tex_node.name = "COL_Texture"
-        
-        # Create UV map node for diffuse
-        uv_map_node = nodes.new('ShaderNodeUVMap')
-        uv_map_node.location = (-800, 300)
-        uv_map_node.uv_map = 'map1'  # Default UV map for COL textures
-        uv_map_node.label = "UV Map (map1)"
-        
-        # Connect UV to diffuse texture
-        links.new(uv_map_node.outputs['UV'], diffuse_tex_node.inputs['Vector'])
-        
-        # Connect diffuse to principled base color
-        links.new(diffuse_tex_node.outputs['Color'], principled_node.inputs['Base Color'])
-        
-        operator.report({'INFO'}, f"Connected diffuse texture: {texture0.name}")
+        slot = maps["albedo_slot"]
+        uv_map = maps["albedo_uv"] or _uv_for_slot(slot)
+        label = f"Emission (Texture{slot})" if emission_shader else f"Diffuse/Albedo (Texture{slot})"
+        diffuse_tex_node = _add_image_node(
+            nodes, links, texture0, (-600, 300), label, "COL_Texture", uv_map=uv_map
+        )
+        color_socket = diffuse_tex_node.outputs['Color']
+        if base_color_in is not None:
+            links.new(color_socket, base_color_in)
+        operator.report({'INFO'}, f"Connected texture: {texture0.name} (Texture{slot}, UV {uv_map})")
+    else:
+        fallback = cv3 or cv0 or cv8
+        if fallback and base_color_in is not None:
+            rgb = nodes.new('ShaderNodeRGB')
+            rgb.location = (-300, 300)
+            rgb.outputs[0].default_value = (float(fallback[0]), float(fallback[1]), float(fallback[2]), 1.0)
+            links.new(rgb.outputs[0], base_color_in)
+            color_socket = rgb.outputs[0]
+            operator.report({'WARNING'}, "No Smash color/emissive texture found; used a CustomVector color")
+
+    if emission_shader:
+        if emission_strength_in is not None:
+            emission_strength_in.default_value = 1.0
+        if color_socket is not None and emission_color_in is not None:
+            tint = cv8 or cv3
+            if tint and any(abs(float(v) - 1.0) > 0.001 for v in tint[:3]):
+                _mix, factor, color1, color2, mix_out = _new_mix_rgb(nodes, (0, 400), "Emission Tint")
+                if factor is not None:
+                    factor.default_value = 1.0
+                links.new(color_socket, color1)
+                color2.default_value = (float(tint[0]), float(tint[1]), float(tint[2]), 1.0)
+                links.new(mix_out, emission_color_in)
+            else:
+                links.new(color_socket, emission_color_in)
+        elif cv3 and emission_color_in is not None:
+            emission_color_in.default_value = (float(cv3[0]), float(cv3[1]), float(cv3[2]), 1.0)
+        metallic_in = _principled_input(principled_node, 'Metallic')
+        roughness_in = _principled_input(principled_node, 'Roughness')
+        if metallic_in is not None:
+            metallic_in.default_value = 0.0
+        if roughness_in is not None:
+            roughness_in.default_value = 1.0
+        operator.report({'INFO'}, "Connected as an emission / shadeless Smash shader")
     
     # Set up normal map (Texture4)
     if texture4:
@@ -207,43 +512,33 @@ def convert_smash_material_to_principled(operator: Operator, material: Material)
         links.new(prm_uv_node.outputs['UV'], prm_components['prm_texture_node'].inputs['Vector'])
         
         # Connect PRM components to Principled BSDF
-        links.new(prm_components['metalness'], principled_node.inputs['Metallic'])
+        metallic_in = principled_node.inputs['Metallic']
+        if _is_fake_sss_826b(sub_matl_data):
+            _invert, invert_in, invert_out = _add_invert_color_node(nodes, (0, -80))
+            links.new(prm_components['metalness'], invert_in)
+            links.new(invert_out, metallic_in)
+            operator.report({'INFO'}, "Inverted PRM red into Metallic for fake SSS (826b)")
+        else:
+            links.new(prm_components['metalness'], metallic_in)
         links.new(prm_components['roughness'], principled_node.inputs['Roughness'])
         
         # For ambient occlusion, we'll need to create a mix node to multiply with base color
-        if texture0:  # Only if we have a diffuse texture to mix with
-            ao_mix_node = nodes.new('ShaderNodeMixRGB')
-            ao_mix_node.location = (0, 200)
-            ao_mix_node.blend_type = 'MULTIPLY'
-            ao_mix_node.inputs['Fac'].default_value = 1.0
-            ao_mix_node.label = "AO Mix"
-            ao_mix_node.name = "AO_Mix"
-            
-            # Find and store the base color connection info before removing
+        if texture0 and base_color_in is not None:
+            _mix, factor, color1, color2, mix_out = _new_mix_rgb(nodes, (0, 200), "AO Mix")
+            if factor is not None:
+                factor.default_value = 1.0
+
             base_color_from_socket = None
-            base_color_from_node = None
-            for link in links:
-                if link.to_node == principled_node and link.to_socket.name == 'Base Color':
-                    base_color_from_socket = link.from_socket
-                    base_color_from_node = link.from_node
-                    break
-            
-            if base_color_from_socket and base_color_from_node:
-                # Remove the direct connection by removing all links to this input
-                # Create a list copy to avoid modifying collection while iterating
-                base_color_links = list(principled_node.inputs['Base Color'].links)
-                for link in base_color_links:
-                    links.remove(link)
-                
-                # Connect diffuse to mix node Color1
-                links.new(base_color_from_socket, ao_mix_node.inputs['Color1'])
-                
-                # Connect AO to mix node Color2 (using white as base, AO as factor)
-                ao_mix_node.inputs['Color2'].default_value = (1.0, 1.0, 1.0, 1.0)  # White base
-                links.new(prm_components['ambient_occlusion'], ao_mix_node.inputs['Fac'])
-                
-                # Connect mix result to principled base color
-                links.new(ao_mix_node.outputs['Color'], principled_node.inputs['Base Color'])
+            for link in list(base_color_in.links):
+                base_color_from_socket = link.from_socket
+                links.remove(link)
+                break
+
+            if base_color_from_socket is not None:
+                links.new(base_color_from_socket, color1)
+                color2.default_value = (1.0, 1.0, 1.0, 1.0)
+                links.new(prm_components['ambient_occlusion'], factor)
+                links.new(mix_out, base_color_in)
         
         # Connect specular (note: Blender's specular input changed in 4.0+)
         # Check which specular input is available
@@ -333,7 +628,8 @@ def has_prm_texture(material: Material) -> bool:
         return False
     
     for texture in material.sub_matl_data.textures:
-        if texture.param_id_name == ParamId.Texture6.name and texture.image:
+        names = _texture_slot_names(texture)
+        if ("Texture6" in names or getattr(texture, "texture_number", None) == 6) and texture.image:
             return True
     return False
 
@@ -352,6 +648,66 @@ def is_converted_to_principled(material: Material) -> bool:
                 return True
     
     return False
+
+
+def find_target_armature(context):
+    obj = getattr(context, "object", None)
+    if obj is not None and obj.type == "ARMATURE":
+        return obj
+    for selected in getattr(context, "selected_objects", []) or []:
+        if selected.type == "ARMATURE":
+            return selected
+    if obj is not None and obj.type == "MESH":
+        armature = obj.find_armature()
+        if armature is not None:
+            return armature
+    return None
+
+
+def iter_armature_meshes(armature):
+    seen = set()
+    if armature is None:
+        return
+    children = getattr(armature, "children_recursive", None)
+    if children is None:
+        children = armature.children
+    for obj in children:
+        if obj.type == "MESH" and obj.name not in seen:
+            seen.add(obj.name)
+            yield obj
+    for obj in bpy.data.objects:
+        if obj.type != "MESH" or obj.name in seen:
+            continue
+        for modifier in obj.modifiers:
+            if modifier.type == "ARMATURE" and modifier.object == armature:
+                seen.add(obj.name)
+                yield obj
+                break
+
+
+def smash_materials_on_armature(armature):
+    materials = []
+    seen = set()
+    for mesh in iter_armature_meshes(armature):
+        for slot in mesh.material_slots:
+            material = slot.material
+            if material is None or material.name in seen:
+                continue
+            if not has_smash_material_data(material):
+                continue
+            seen.add(material.name)
+            materials.append(material)
+    return materials
+
+
+def armature_has_unconverted_smash_materials(armature) -> bool:
+    return any(not is_converted_to_principled(material) for material in smash_materials_on_armature(armature))
+
+
+def armature_has_converted_smash_materials(armature) -> bool:
+    materials = smash_materials_on_armature(armature)
+    return bool(materials) and all(is_converted_to_principled(material) for material in materials)
+
 
 def revert_to_smash_material(operator: Operator, material: Material):
     """

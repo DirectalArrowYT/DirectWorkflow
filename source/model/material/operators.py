@@ -52,7 +52,17 @@ class SUB_OP_apply_material_preset(Operator):
         return {'FINISHED'} 
     
 from .convert_blender_material import convert_blender_material, rename_mesh_attributes_of_meshes_using_material
-from .convert_smash_material import convert_smash_material_to_principled, has_smash_material_data, has_prm_texture, is_converted_to_principled, revert_to_smash_material
+from .convert_smash_material import (
+    convert_smash_material_to_principled,
+    has_smash_material_data,
+    has_prm_texture,
+    is_converted_to_principled,
+    revert_to_smash_material,
+    find_target_armature,
+    smash_materials_on_armature,
+    armature_has_unconverted_smash_materials,
+    armature_has_converted_smash_materials,
+)
 class SUB_OP_convert_blender_material(Operator):
     bl_idname = 'sub.convert_blender_material'
     bl_label = 'Convert Blender Material (Creates PRM, uses existing normal)'
@@ -608,3 +618,67 @@ class SUB_OP_revert_smash_material(Operator):
         else:
             self.report({'ERROR'}, f"Failed to revert material '{material.name}'")
             return {'CANCELLED'}
+
+
+class SUB_OP_convert_armature_smash_materials(Operator):
+    bl_idname = "sub.convert_armature_smash_materials"
+    bl_label = "Convert All to Principled BSDF"
+    bl_description = "Convert every Smash material on the selected armature's meshes to Principled BSDF"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        armature = find_target_armature(context)
+        return armature is not None and armature_has_unconverted_smash_materials(armature)
+
+    def execute(self, context):
+        armature = find_target_armature(context)
+        if armature is None:
+            self.report({"ERROR"}, "Select an armature")
+            return {"CANCELLED"}
+        converted = 0
+        failed = 0
+        for material in smash_materials_on_armature(armature):
+            if is_converted_to_principled(material):
+                continue
+            if convert_smash_material_to_principled(self, material):
+                converted += 1
+            else:
+                failed += 1
+        if converted:
+            self.report({"INFO"}, f"Converted {converted} material(s) on '{armature.name}' to Principled BSDF")
+            return {"FINISHED"}
+        self.report({"ERROR"}, f"Failed to convert materials on '{armature.name}' ({failed} failed)")
+        return {"CANCELLED"}
+
+
+class SUB_OP_revert_armature_smash_materials(Operator):
+    bl_idname = "sub.revert_armature_smash_materials"
+    bl_label = "Revert All to Smash Material"
+    bl_description = "Rebuild the original Smash shaders for every converted material on the selected armature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        armature = find_target_armature(context)
+        return armature is not None and armature_has_converted_smash_materials(armature)
+
+    def execute(self, context):
+        armature = find_target_armature(context)
+        if armature is None:
+            self.report({"ERROR"}, "Select an armature")
+            return {"CANCELLED"}
+        reverted = 0
+        failed = 0
+        for material in smash_materials_on_armature(armature):
+            if not is_converted_to_principled(material):
+                continue
+            if revert_to_smash_material(self, material):
+                reverted += 1
+            else:
+                failed += 1
+        if reverted:
+            self.report({"INFO"}, f"Reverted {reverted} material(s) on '{armature.name}' to Smash shaders")
+            return {"FINISHED"}
+        self.report({"ERROR"}, f"Failed to revert materials on '{armature.name}' ({failed} failed)")
+        return {"CANCELLED"}

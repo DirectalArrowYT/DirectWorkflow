@@ -15,6 +15,7 @@ from bpy.types import Panel, Operator, EditBone
 from bpy_extras import image_utils
 from mathutils import Matrix
 from .material.create_blender_materials_from_matl import create_blender_materials_from_matl
+from ..blender_compat import assign_bone_to_collection, ensure_bone_collection
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -282,7 +283,7 @@ def import_model(operator: bpy.types.Operator, context: bpy.types.Context):
 
     # Numpy provides much faster performance than Python lists.
     # TODO: This API for ssbh_data_py will likely have changes and improvements in the future.
-    ssbh_mesh = ssbh_data_py.mesh_data.read_mesh(str(numshb_name), use_numpy=True) if numshb_name != '' else None
+    ssbh_mesh = ssbh_data_py.mesh_data.read_mesh(str(numshb_name)) if numshb_name != '' else None
     ssbh_skel = ssbh_data_py.skel_data.read_skel(str(nusktb_name)) if nusktb_name != '' else None
     ssbh_matl = ssbh_data_py.matl_data.read_matl(str(numatb_name)) if numatb_name != '' else None
     end = time.time()
@@ -320,6 +321,13 @@ def import_model(operator: bpy.types.Operator, context: bpy.types.Context):
 
     # Store the model path for animation importing
     ssp.last_imported_model_path = str(dir)
+
+    if armature is not None:
+        try:
+            from ..extras.face_picker import on_model_imported
+            on_model_imported(armature, str(dir))
+        except Exception:
+            print(f'Face picker auto-load skipped:\n{traceback.format_exc()}')
     
     # Get related animation path
     model_path = str(dir)
@@ -581,13 +589,12 @@ def fix_bone_length(blender_bone: EditBone, edit_bones: bpy.types.ArmatureEditBo
 def assign_bone_layers(arma_obj: bpy.types.Object) -> None:
     # Pose bones only exist in pose mode, so enter pose mode to properly set their colors.
     bpy.ops.object.mode_set(mode='POSE')
-    bone_collections = arma_obj.data.collections
-    standard_collection = bone_collections.new("Standard Bones")
-    helper_collection = bone_collections.new("Helper Bones")
-    exo_collection = bone_collections.new('"Exo" Helper Bones')
-    swing_collection = bone_collections.new("Swing Bones")
-    null_collection = bone_collections.new("Null Swing Bones")
-    system_collection = bone_collections.new("System Bones")
+    standard_collection = ensure_bone_collection(arma_obj.data, "Standard Bones")
+    helper_collection = ensure_bone_collection(arma_obj.data, "Helper Bones")
+    exo_collection = ensure_bone_collection(arma_obj.data, '"Exo" Helper Bones')
+    swing_collection = ensure_bone_collection(arma_obj.data, "Swing Bones")
+    null_collection = ensure_bone_collection(arma_obj.data, "Null Swing Bones")
+    system_collection = ensure_bone_collection(arma_obj.data, "System Bones")
 
     system_bone_names = ['Trans', 'Rot', 'Throw']
     system_bone_suffixes = ['_null', '_eff', '_offset']
@@ -595,27 +602,27 @@ def assign_bone_layers(arma_obj: bpy.types.Object) -> None:
     for bone in arma_obj.pose.bones:
         bone: PoseBone
         if bone.name.startswith('H_Exo_'):
-            exo_collection.assign(bone)
+            assign_bone_to_collection(exo_collection, bone)
             bone.color.palette = 'THEME09'
             bone.bone.color.palette = 'THEME09'
         elif bone.name.startswith('H_'):
-            helper_collection.assign(bone)
+            assign_bone_to_collection(helper_collection, bone)
             bone.color.palette = 'THEME06'
             bone.bone.color.palette = 'THEME06'
         elif bone.name.startswith('S_'):
-            swing_collection.assign(bone)
+            assign_bone_to_collection(swing_collection, bone)
             bone.color.palette = 'THEME04'
             bone.bone.color.palette = 'THEME04'
             if '_null' in bone.name:
-                null_collection.assign(bone)
+                assign_bone_to_collection(null_collection, bone)
                 bone.color.palette = 'THEME10'
                 bone.bone.color.palette = 'THEME10'
         else:
-            standard_collection.assign(bone)
+            assign_bone_to_collection(standard_collection, bone)
             # Fixed the variable names in the any() expressions
             if any(name == bone.name for name in system_bone_names) or \
                any(suffix in bone.name for suffix in system_bone_suffixes):
-                system_collection.assign(bone)
+                assign_bone_to_collection(system_collection, bone)
                 bone.color.palette = 'THEME10'
                 bone.bone.color.palette = 'THEME10'
 
@@ -712,7 +719,9 @@ def attach_armature_create_vertex_groups(mesh_obj, skel, armature, ssbh_mesh_obj
             else:
                 vertex_group = mesh_obj.vertex_groups.new(name=parent_bone.name)
 
-            vertex_group.add(ssbh_mesh_object.vertex_indices, 1.0, 'REPLACE')
+            # VertexGroup.add() requires plain Python ints, but ssbh_data_py's
+            # use_numpy=True mode returns vertex_indices as a numpy uint32 array.
+            vertex_group.add([int(i) for i in ssbh_mesh_object.vertex_indices], 1.0, 'REPLACE')
         else:
             # Set the vertex skin weights for each bone.
             # TODO: Is there a faster way than setting weights per vertex?
@@ -725,7 +734,7 @@ def attach_armature_create_vertex_groups(mesh_obj, skel, armature, ssbh_mesh_obj
                     vertex_group = mesh_obj.vertex_groups.new(name=influence.bone_name)
 
                 for w in influence.vertex_weights:
-                    vertex_group.add([w.vertex_index], w.vertex_weight, 'REPLACE')
+                    vertex_group.add([int(w.vertex_index)], w.vertex_weight, 'REPLACE')
 
         # Convert from Y up to Z up.
         mesh_obj.data.transform(Matrix.Rotation(math.radians(90), 4, 'X'))

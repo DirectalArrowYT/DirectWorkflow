@@ -20,6 +20,7 @@ from .rig_mapping import bone_mapping
 from . import preset_handler
 from . import bone_utils
 from . import fbx_helper
+from ..source.anim.fcurve_compat import get_fcurves, remove_fcurve
 
 from mathutils import Vector
 from mathutils import Matrix
@@ -187,7 +188,7 @@ class SelectConstrainedControls(bpy.types.Operator):
 
         if self.select_type == 'constr':
             for pb in bone_utils.get_constrained_controls(ob, unselect=True, use_deform=not self.skip_deform):
-                pb.bone.select = bool(pb.custom_shape) if self.has_shape else True
+                pb.select = bool(pb.custom_shape) if self.has_shape else True
 
         elif self.select_type == 'anim':
             if not ob.animation_data:
@@ -195,7 +196,7 @@ class SelectConstrainedControls(bpy.types.Operator):
             if not ob.animation_data.action:
                 return {'FINISHED'}
 
-            for fc in ob.animation_data.action.fcurves:
+            for fc in get_fcurves(ob.animation_data.action):
                 bone_name = crv_bone_name(fc)
                 if not bone_name:
                     continue
@@ -389,7 +390,7 @@ class ConvertBoneNaming(bpy.types.Operator):
                                                                 'bones["{0}"'.format(trg_name))
 
             for action in actions:
-                for fc in action.fcurves:
+                for fc in get_fcurves(action):
                     try:
                         track_bone = fc.data_path.split('"')[1]
                     except IndexError:
@@ -545,7 +546,7 @@ class CreateTransformOffset(bpy.types.Operator):
                 if not validate_actions(action, path_resolve):
                     continue
 
-                for fc in action.fcurves:
+                for fc in get_fcurves(action):
                     data_path = fc.data_path
 
                     if not data_path.endswith('location'):
@@ -1107,7 +1108,7 @@ class ActionEndToLastKeyframe(bpy.types.Operator):
         
         # Find the last keyframe in the action
         last_keyframe = 0
-        for fcurve in action.fcurves:
+        for fcurve in get_fcurves(action):
             if fcurve.keyframe_points:
                 for keyframe in fcurve.keyframe_points:
                     if keyframe.co[0] > last_keyframe:
@@ -1186,7 +1187,7 @@ def mute_fcurves(obj: bpy.types.Object, channel_name: str):
     if not action:
         return
     
-    for fc in action.fcurves:
+    for fc in get_fcurves(action):
         if fc.data_path == channel_name:
             fc.mute = True
 
@@ -1893,7 +1894,7 @@ class ConstrainToArmature(bpy.types.Operator):
                 if self.adjust_location:
                     # scale location animation to avoid offset
                     trg_action = trg_ob.animation_data.action
-                    for fc in trg_action.fcurves:
+                    for fc in get_fcurves(trg_action):
                         data_path = fc.data_path
 
                         if not data_path.endswith('location'):
@@ -2242,7 +2243,7 @@ class ClearSAPSync(bpy.types.Operator):
 
 
 def validate_actions(action: bpy.types.Action, path_resolve: callable):
-    for fc in action.fcurves:
+    for fc in get_fcurves(action):
         data_path = fc.data_path
         if fc.array_index:
             data_path = data_path + "[%d]" % fc.array_index
@@ -2264,7 +2265,7 @@ def clean_baked_action(original_action, baked_action, target_armature):
     
     # Get bones that were actually animated in the original action
     original_animated_bones = set()
-    for fc in original_action.fcurves:
+    for fc in get_fcurves(original_action):
         if fc.data_path.startswith('pose.bones['):
             # Extract bone name from data path
             bone_name = fc.data_path.split('"')[1] if '"' in fc.data_path else None
@@ -2274,7 +2275,7 @@ def clean_baked_action(original_action, baked_action, target_armature):
     # Remove animation data for bones that weren't animated in the original
     # EXCEPT for bones with "_RET" suffix which should preserve their pose
     bones_to_clean = set()
-    for fc in baked_action.fcurves:
+    for fc in get_fcurves(baked_action):
         if fc.data_path.startswith('pose.bones['):
             bone_name = fc.data_path.split('"')[1] if '"' in fc.data_path else None
             if bone_name and bone_name not in original_animated_bones:
@@ -2284,9 +2285,9 @@ def clean_baked_action(original_action, baked_action, target_armature):
     
     # Remove F-curves for bones that weren't originally animated (excluding _RET bones)
     for bone_name in bones_to_clean:
-        for fc in list(baked_action.fcurves):
+        for fc in list(get_fcurves(baked_action)):
             if fc.data_path.startswith(f'pose.bones["{bone_name}"]'):
-                baked_action.fcurves.remove(fc)
+                remove_fcurve(baked_action, fc)
     
     print(f"Cleaned baked action: removed animation data for {len(bones_to_clean)} bones that weren't animated in original (preserved _RET bones)")
 
@@ -2392,7 +2393,7 @@ class BakeConstrainedActions(bpy.types.Operator):
             for pb in bone_utils.get_constrained_controls(ob, unselect=True, use_deform=not self.exclude_deform):
                 
                 if pb.name + "_RET" in trg_ob.data.bones:
-                    pb.bone.select = True
+                    pb.select = True
                     constr_bone_names.append(pb.name)
 
             for action in list(bpy.data.actions):  # convert to list beforehand to avoid picking new actions

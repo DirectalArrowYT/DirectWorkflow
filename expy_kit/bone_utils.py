@@ -240,12 +240,12 @@ def get_constrained_controls(armature_object: bpy.types.Object, unselect=False, 
     for pb in armature_object.pose.bones:
         if pb.bone.use_deform and not use_deform:  # FIXME: ik controls might have use_deform just to be exported for games
             if unselect:
-                pb.bone.select = False
+                pb.select = False
             continue
 
         if len(pb.constraints) == 0:
             if unselect:
-                pb.bone.select = False
+                pb.select = False
             continue
     
         yield pb

@@ -15,7 +15,8 @@ from bpy.props import IntProperty, StringProperty, BoolProperty, CollectionPrope
 from pathlib import Path
 
 from ...dependencies import ssbh_data_py
-from .import_anim import get_heirarchy_order
+from .import_anim import get_hierarchy_order
+from .fcurve_compat import get_fcurves
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -451,8 +452,9 @@ class SUB_OP_batch_export_anim(Operator):
     
     def find_last_keyframe(self, action):
         last_frame = 1
-        if action.fcurves:
-            for fcurve in action.fcurves:
+        fcurves = get_fcurves(action)
+        if fcurves:
+            for fcurve in fcurves:
                 for keyframe in fcurve.keyframe_points:
                     if keyframe.co[0] > last_frame:
                         last_frame = int(keyframe.co[0])
@@ -504,10 +506,8 @@ class SUB_OP_batch_export_anim(Operator):
             # --------------------------------------------------------------
             
             # Create export path with sanitized filename
-            safe_name = sanitize_filename(action_name)
+            safe_name = ensure_nuanmb_filename(sanitize_filename(action_name))
             filepath = os.path.join(self.directory, safe_name)
-            if not filepath.endswith('.nuanmb'):
-                filepath += '.nuanmb'
             
             # Determine last keyframe for this action if auto-range is enabled
             if self.use_auto_range:
@@ -575,6 +575,27 @@ def sanitize_filename(filename):
     for char in invalid_chars:
         filename = filename.replace(char, '_')
         
+    return filename
+
+
+def strip_nuanmb_suffix(name):
+    """Remove every trailing .nuanmb so imported action names do not stack the extension."""
+    stripped = name
+    while stripped.lower().endswith('.nuanmb'):
+        stripped = stripped[:-7]
+    return stripped
+
+
+def ensure_nuanmb_filename(filename):
+    """Return a filename with exactly one .nuanmb suffix."""
+    return strip_nuanmb_suffix(filename) + '.nuanmb'
+
+
+def ensure_nuanmb_filepath(filepath):
+    directory, filename = os.path.split(filepath)
+    filename = ensure_nuanmb_filename(filename)
+    if directory:
+        return os.path.join(directory, filename)
     return filename
 
 class SUB_OP_anim_export(Operator):
@@ -659,8 +680,8 @@ class SUB_OP_anim_export(Operator):
         return True
 
     def invoke(self, context: Context, _event):
-        # Use the action name plus the extension
-        action_name = f"{context.active_object.animation_data.action.name}.nuanmb"
+        # Imported actions are already named *.nuanmb; do not add the suffix twice.
+        action_name = ensure_nuanmb_filename(context.active_object.animation_data.action.name)
         safe_name = sanitize_filename(action_name)
         
         # Set filepath
@@ -745,10 +766,8 @@ class SUB_OP_anim_export(Operator):
         # Clear transient preset flags
         ssp.anim_preset_force_override_translation = False
         
-        # Ensure filepath has .nuanmb extension
-        filepath = self.filepath
-        if not filepath.endswith('.nuanmb'):
-            filepath += '.nuanmb'
+        # Ensure filepath has exactly one .nuanmb extension
+        filepath = ensure_nuanmb_filepath(self.filepath)
 
         # Get the filename part without path
         filename = os.path.basename(filepath)
@@ -874,9 +893,9 @@ def does_armature_data_have_fcurves(arma: bpy.types.Object) -> bool:
         return False
     if arma.data.animation_data.action is None:
         return False
-    if arma.data.animation_data.action.fcurves is None:
-        return False
-    return True
+    
+    fcurves = get_fcurves(arma.data.animation_data.action)
+    return fcurves is not None and len(fcurves) > 0
 
 def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.types.Object, filepath, include_transform_track, include_material_track, include_visibility_track, first_blender_frame, last_blender_frame, transform_compensate_scale: bool = False, transform_override_translation: bool = False, transform_override_rotation: bool = False, transform_override_scale: bool = False, transform_override_compensate_scale: bool = False, override_bone_names: list[str] | None = None, use_exclude_list: bool = True):
     # SSBH Anim Setup
@@ -892,7 +911,7 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         bone_name_to_rotation_values: dict[str, list[Rotation]] = {}
         bone_name_to_scale_values: dict[str, list[Scale]] = {}
         bone_to_rel_matrix_local = {}
-        reordered_pose_bones = get_heirarchy_order(list(arma.pose.bones))
+        reordered_pose_bones = get_hierarchy_order(list(arma.pose.bones))
 
         # Fill value dicts with default values. Not every bone will be animated, so for these the default values of a matrix basis will be needed
         for pose_bone in reordered_pose_bones:
@@ -908,7 +927,7 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         animated_pose_bones: set[bpy.types.PoseBone] = set()
         
         object_level_transform_reported = False
-        for fcurve in arma.animation_data.action.fcurves:
+        for fcurve in get_fcurves(arma.animation_data.action):
             regex = r'pose\.bones\[\"(.*)\"\]\.(.*)'
             matches = re.match(regex, fcurve.data_path)
             if matches is None: # A fcurve in the action that isn't a bone transform, such as the user keyframing the Armature Object itself.
@@ -1110,7 +1129,7 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         vis_track_index_to_name: dict[int, str] = {}
         vis_track_index_to_values: dict[int, list[bool]] = {}
         fcurve: bpy.types.FCurve
-        for fcurve in arma.data.animation_data.action.fcurves:
+        for fcurve in get_fcurves(arma.data.animation_data.action):
             regex = r'.*\[(\d*)\]\.value'
             matches = re.match(regex, fcurve.data_path)
             if matches is None: # Not a visibility fcurve, its probably a material track fcurve
@@ -1118,8 +1137,6 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
             vis_track_index = int(matches.groups()[0])
             if vis_track_index >= len(sap.vis_track_entries): # this can happen if the user removes entries manually but not the fcurves
                 operator.report(type={'WARNING'}, message=f'The fcurve with data path {fcurve.data_path} will be skipped, its index was out of bounds.')
-                continue
-            if not sap.vis_track_entries[vis_track_index].export_enabled:
                 continue
             vis_track_index_to_name[vis_track_index] = sap.vis_track_entries[vis_track_index].name
             vis_track_index_to_values[vis_track_index] = [bool(fcurve.evaluate(frame)) for frame in range(first_blender_frame, last_blender_frame+1)]
@@ -1148,7 +1165,7 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         # In addition, fcurves may only exist for a few indices of a CustomVector or TextureTransform, since the user may not have animated them all
         # Example: mat_name_prop_name_to_values['EyeL']['CustomVector31'] -> [[1.0,1.0,1.0,1.0], ...]
         mat_name_prop_name_to_values: dict[str, dict[str, list[CustomVector|CustomFloat|CustomBool|PatternIndex|TextureTransform]]] = {}
-        for fcurve in arma.data.animation_data.action.fcurves:
+        for fcurve in get_fcurves(arma.data.animation_data.action):
             regex = r"sub_anim_properties\.mat_tracks\[(\d+)\]\.properties\[(\d+)\](\.\w+)"
             matches = re.match(regex, fcurve.data_path)
             if matches is None: # The vis and mat track fcurves are in the same action, so its normal to not match every fcurve

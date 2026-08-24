@@ -2,6 +2,8 @@ import bpy
 from bpy.types import Operator
 from bpy.props import BoolProperty
 
+from ..anim.fcurve_compat import get_fcurves
+
 # Global variable to track the last checked object
 _last_checked_object = None
 
@@ -24,7 +26,7 @@ def reset_unanimated_bones_to_rest(armature, action):
         if original_mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
         
-        if not action or not action.fcurves:
+        if not action or not get_fcurves(action):
             # If no action or no fcurves, reset all bones to rest (except _RET bones)
             for bone in armature.pose.bones:
                 # Skip bones with "_RET" suffix - don't reset them to rest pose
@@ -43,7 +45,7 @@ def reset_unanimated_bones_to_rest(armature, action):
         
         # Get all bone names that are animated in this action
         animated_bones = set()
-        for fcurve in action.fcurves:
+        for fcurve in get_fcurves(action):
             if fcurve.data_path.startswith('pose.bones["'):
                 # Extract bone name from data path like 'pose.bones["BoneName"].location'
                 try:
@@ -270,13 +272,13 @@ class SUB_OP_animation_scroll_modal(Operator):
         reset_unanimated_bones_to_rest(armature, new_action)
         
         # Update the timeline to show the full animation range
-        if new_action and new_action.fcurves:
+        if new_action and get_fcurves(new_action):
             # Find the first and last keyframed frames in the action
             first_frame = float('inf')
             last_frame = float('-inf')
             has_keyframes = False
             
-            for fcurve in new_action.fcurves:
+            for fcurve in get_fcurves(new_action):
                 if fcurve.keyframe_points:
                     for keyframe in fcurve.keyframe_points:
                         frame_num = int(keyframe.co[0])
@@ -291,7 +293,7 @@ class SUB_OP_animation_scroll_modal(Operator):
                 # Keep the current frame position - don't jump to start
         
         # Show notification with frame range info
-        if new_action and new_action.fcurves:
+        if new_action and get_fcurves(new_action):
             frame_range = f" (frames {context.scene.frame_start}-{context.scene.frame_end})"
         else:
             frame_range = ""
@@ -316,6 +318,16 @@ def draw_animation_scroll_button(self, context):
         icon = 'PLAY' if not is_running else 'PAUSE'
         label = 'Start Animation Scroll' if not is_running else 'Stop Animation Scroll'
         self.layout.operator('sub.toggle_animation_scroll_modal', text=label, icon=icon, depress=is_running)
+        try:
+            from .face_picker import armature_has_face_picker_menu
+            if armature_has_face_picker_menu(context):
+                self.layout.operator(
+                    'sub.face_picker_popup',
+                    text='Easy Facial Animation',
+                    icon='IMAGE_DATA',
+                )
+        except Exception:
+            pass
 
 # --- TOGGLE OPERATOR ---
 class SUB_OP_toggle_animation_scroll_modal(Operator):
