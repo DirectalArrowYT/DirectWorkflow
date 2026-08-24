@@ -48,11 +48,31 @@ class SUB_PT_reimport_materials(Panel):
             row.operator('sub.mat_reimport_dir_selector', icon='ZOOM_ALL', text='Re-Select folder')
             row = layout.row(align=True)
             row.prop(ssp, 'material_reimport_side_load')
+            if ssp.material_reimport_side_load:
+                box = layout.box()
+                box.label(text='Side-Load is ON', icon='INFO')
+                box.label(text='Your assigned materials will NOT be updated.')
+                box.label(text='Turn this OFF to refresh their Ultimate')
+                box.label(text='Material Data (vectors, textures, ...) in place.')
             row = layout.row(align=True)
             row.operator('sub.reimport_materials', icon='IMPORT',
-                        text='Side-Load Materials' if ssp.material_reimport_side_load else 'Re-Import materials')
+                        text='Side-Load Materials' if ssp.material_reimport_side_load
+                        else 'Re-Import materials (refresh in place)')
             layout.separator()
             layout.prop(ssp, 'export_prefer_sideloaded_materials')
+            # "Prefer Side-Loaded" with no twins actually present is a silent
+            # no-op: export looks for "<name> (Side-Loaded)", finds nothing and
+            # quietly falls back to the assigned material's data. Worth saying
+            # out loud, since the toggle being on reads like it's doing
+            # something. Twins used to vanish on save because they had no fake
+            # user (fixed above), so an older file can easily be in this state.
+            if ssp.export_prefer_sideloaded_materials:
+                if not any('(Side-Loaded)' in m.name for m in bpy.data.materials):
+                    box = layout.box()
+                    box.alert = True
+                    box.label(text='No "(Side-Loaded)" materials exist!', icon='ERROR')
+                    box.label(text='Export is falling back to the assigned')
+                    box.label(text='materials, so this toggle does nothing.')
 
 class SUB_OP_mat_reimport_directory_selector(Operator):
     bl_idname = 'sub.mat_reimport_dir_selector'
@@ -196,6 +216,14 @@ def reimport_materials(operator: Operator, context):
             if old_twin is not None and old_twin is not material:
                 bpy.data.materials.remove(old_twin, do_unlink=True)
             material.name = target_name
+            # A side-loaded material is deliberately assigned to no mesh, so it
+            # has zero users - which means Blender discards it on the next
+            # save/reload, taking the whole side-load with it. Found exactly
+            # that in a real file: both side-load toggles on, yet not a single
+            # "(Side-Loaded)" material left in the .blend, so export silently
+            # fell back to the assigned materials' stale data. A fake user is
+            # what keeps an intentionally-unassigned datablock alive.
+            material.use_fake_user = True
         operator.report(
             {'INFO'},
             f'Side-loaded {len(material_label_to_material)} material(s) as "<name> (Side-Loaded)" - '
