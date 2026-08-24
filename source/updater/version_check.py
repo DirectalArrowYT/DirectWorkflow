@@ -98,15 +98,30 @@ def get_commit_message_by_sha(sha):
         print(f"Smash_ultimate_blender: Error fetching commit message for {sha}: {e}")
         return "Unknown message"
 
+# This addon is now a locally-maintained fork (own git history, pushed to a
+# private remote) with custom swing-bone-collision tools that don't exist
+# upstream. The auto-updater's job is to overwrite this folder with whatever
+# is on CrusherD2/smash-ultimate-blender's animation-workflow branch, which
+# would silently delete those local changes - so it's disabled at the root:
+# no network check, no nag banner, and (below) the download/install/legacy-
+# install operators refuse outright even if triggered by hand. Flip this back
+# to False if this fork should start tracking upstream again.
+DISABLE_UPDATE_CHECK = True
+
 def check_for_newer_version():
     """
     Check the animation-workflow branch for new commits.
     If there's a newer commit than what we have stored, mark update as available.
     """
     global UPDATE_STATUS, UPDATE_AVAILABLE, LATEST_COMMIT_SHA, LATEST_COMMIT_MESSAGE, LATEST_COMMIT_DATE, CURRENT_COMMIT_SHA, CURRENT_COMMIT_MESSAGE
-    
+
+    if DISABLE_UPDATE_CHECK:
+        UPDATE_STATUS = "idle"
+        UPDATE_AVAILABLE = False
+        return
+
     UPDATE_STATUS = "checking"
-    
+
     # Clean up old binary files from previous updates
     cleanup_old_binaries()
 
@@ -370,6 +385,11 @@ class SUB_OP_download_update(Operator):
     def execute(self, context):
         global UPDATE_STATUS, UPDATE_DOWNLOAD_PROGRESS, BRANCH_DOWNLOAD_URL
 
+        if DISABLE_UPDATE_CHECK:
+            self.report({'ERROR'}, "Updater is disabled - this is a local fork with custom "
+                                   "changes. Installing an update would overwrite them.")
+            return {'CANCELLED'}
+
         if not UPDATE_AVAILABLE:
             self.report({'ERROR'}, "No update available")
             return {'CANCELLED'}
@@ -520,7 +540,12 @@ class SUB_OP_install_update(Operator):
     
     def execute(self, context):
         global UPDATE_STATUS
-        
+
+        if DISABLE_UPDATE_CHECK:
+            self.report({'ERROR'}, "Updater is disabled - this is a local fork with custom "
+                                   "changes. Installing an update would overwrite them.")
+            return {'CANCELLED'}
+
         download_path = getattr(context.scene, 'sub_updater_download_path', None)
         if not download_path or not os.path.exists(download_path):
             self.report({'ERROR'}, "No downloaded update found")
@@ -650,14 +675,18 @@ class SUB_OP_check_for_updates(Operator):
     bl_description = "Manually check for available updates"
     
     def execute(self, context):
+        if DISABLE_UPDATE_CHECK:
+            self.report({'INFO'}, "Updater is disabled - this is a local fork with custom changes.")
+            return {'FINISHED'}
+
         check_for_newer_version()
-        
+
         if UPDATE_AVAILABLE:
             commit_short = LATEST_COMMIT_SHA[:8] if LATEST_COMMIT_SHA else "unknown"
             self.report({'INFO'}, f"Update available: commit {commit_short}")
         else:
             self.report({'INFO'}, "No updates available")
-        
+
         return {'FINISHED'}
 
 # Register properties for the scene
