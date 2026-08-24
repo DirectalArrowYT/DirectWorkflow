@@ -10,7 +10,8 @@ automatically.
 3. Safe Installation: Refuses to run over local edits instead of silently discarding them
 4. Auto-Restart: Restarts Blender automatically to complete the update process
 
-Repository: shoup@100.118.148.112:E:/Git/smash-ultimate-blender-animation-workflow
+Repository: shoup@10.0.0.46:E:/Git/smash-ultimate-blender-animation-workflow (LAN)
+        or  shoup@100.118.148.112:E:/Git/smash-ultimate-blender-animation-workflow (Tailscale)
 Branch: main
 
 The system operates through a state machine with the following states:
@@ -49,7 +50,17 @@ UPDATE_STATUS: str = "idle"  # idle, checking, downloading, installing, ready_to
 # convention this follows). It's reached over SSH (the git protocol), not
 # HTTPS, so this can't go through requests/urllib the way the old GitHub API
 # check did - every operation below shells out to the system `git` instead.
-UPDATE_REMOTE_URL = "shoup@100.118.148.112:E:/Git/smash-ultimate-blender-animation-workflow"
+#
+# Two addresses for the same box: the LAN one only answers from the home
+# network, the Tailscale one answers from anywhere (laptop off-network) but
+# is slower and occasionally unreachable itself. There's no cheap way to know
+# which applies without asking the network, so fetch_latest() below races both
+# instead of guessing - whichever answers first wins, and the check stays
+# bounded by GIT_TIMEOUT_CHECK total rather than doubling when tried in turn.
+UPDATE_REMOTE_URLS = [
+    ("LAN", "shoup@10.0.0.46:E:/Git/smash-ultimate-blender-animation-workflow"),
+    ("Tailscale", "shoup@100.118.148.112:E:/Git/smash-ultimate-blender-animation-workflow"),
+]
 UPDATE_REMOTE_BRANCH = "main"
 
 GIT_TIMEOUT_CHECK = 8       # seconds - this runs on every Blender startup, keep it short
@@ -63,7 +74,7 @@ GIT_TIMEOUT_INSTALL = 30    # seconds - only runs when the user clicks the butto
 # it was disabled outright.
 #
 # It's safe to re-enable now that it points at THIS fork's own repo instead:
-# pulling from UPDATE_REMOTE_URL *is* the intended way to receive this fork's
+# pulling from UPDATE_REMOTE_URLS *is* the intended way to receive this fork's
 # changes (whatever gets pushed there from the editable copy under Hype Bros
 # Studios), not a hazard to them. It still refuses to run over uncommitted
 # local edits in THIS folder specifically - see SUB_OP_download_update.
@@ -83,11 +94,32 @@ def _git_exe():
 
 
 def _run_git(args, cwd, timeout):
-    """Run git quietly - no console window, raises with stderr on failure."""
+    """Run git quietly - no console window, raises with stderr on failure.
+
+    Sets GIT_SSH_COMMAND to bound the SSH connection attempt itself, not just
+    rely on subprocess.run's own `timeout`. Measured on this machine: without
+    it, fetching from an unreachable host took 21s wall-clock even with
+    timeout=3 passed here. `git fetch` over SSH spawns ssh.exe as a
+    grandchild; Python's timeout only terminates the immediate child
+    (git.exe), and Popen.communicate() then blocks reading stdout/stderr
+    until every handle to that pipe closes - including the orphaned ssh.exe's,
+    which doesn't happen until SSH's own much longer OS-default connect
+    timeout finally gives up. `ConnectTimeout` makes ssh give up on its own
+    well before that, so git.exe (and therefore this call) exits promptly.
+    BatchMode=yes matters independently of the timeout: with CREATE_NO_WINDOW
+    hiding the console, a host-key or password prompt would be invisible and
+    block forever with no way to answer it.
+    """
     creationflags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+    env = os.environ.copy()
+    ssh_connect_timeout = max(1, int(timeout) - 1)
+    env["GIT_SSH_COMMAND"] = (
+        f"ssh -o BatchMode=yes -o ConnectTimeout={ssh_connect_timeout} "
+        f"-o StrictHostKeyChecking=accept-new"
+    )
     result = subprocess.run(
         [_git_exe(), *args], cwd=cwd, capture_output=True, text=True,
-        timeout=timeout, creationflags=creationflags,
+        timeout=timeout, creationflags=creationflags, env=env,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")
@@ -111,14 +143,66 @@ def commit_info(addon_path, ref, timeout=GIT_TIMEOUT_CHECK):
 
 
 def fetch_latest(addon_path, timeout):
-    """Fetch UPDATE_REMOTE_BRANCH straight from UPDATE_REMOTE_URL into FETCH_HEAD.
+    """Race every address in UPDATE_REMOTE_URLS, take whichever answers first.
 
-    Doesn't touch the working tree or the index, and doesn't depend on a
-    locally-configured remote (named 'origin' or otherwise) actually pointing
-    at UPDATE_REMOTE_URL - it fetches directly from the URL every time.
+    Each attempt fetches into its OWN ref (refs/_update_check/<label>) rather
+    than the shared FETCH_HEAD - two `git fetch` calls running at once would
+    otherwise both be writing that same file, which is exactly the kind of
+    race this function exists to avoid. Since every address points at the
+    same underlying repo, whichever wins carries the same commit, so there's
+    no "wrong" one to pick - only a faster or slower one.
+
+    Doesn't touch the working tree or the index. Returns
+    (sha, message, iso_date, label, winning_ref).
     """
-    _run_git(["fetch", UPDATE_REMOTE_URL, UPDATE_REMOTE_BRANCH], addon_path, timeout)
-    return commit_info(addon_path, "FETCH_HEAD", timeout)
+    result = {}
+    lock = threading.Lock()
+    all_done = threading.Event()
+    remaining = len(UPDATE_REMOTE_URLS)
+
+    def attempt(label, url):
+        nonlocal remaining
+        ref = f"refs/_update_check/{label}"
+        try:
+            _run_git(["fetch", url, f"{UPDATE_REMOTE_BRANCH}:{ref}"], addon_path, timeout)
+            with lock:
+                result.setdefault("winner", (label, url, ref))
+        except Exception as e:
+            with lock:
+                result.setdefault("errors", []).append(f"{label} ({url}): {e}")
+        finally:
+            with lock:
+                remaining -= 1
+                if remaining == 0:
+                    all_done.set()
+
+    threads = [threading.Thread(target=attempt, args=(label, url), daemon=True)
+               for label, url in UPDATE_REMOTE_URLS]
+    for t in threads:
+        t.start()
+
+    # Wake as soon as anyone wins rather than waiting for every attempt to
+    # finish; a losing fetch may still be mid-timeout in the background, but
+    # nothing after this point depends on it.
+    while True:
+        with lock:
+            if "winner" in result or remaining == 0:
+                break
+        if all_done.wait(0.1):
+            break
+
+    with lock:
+        winner = result.get("winner")
+        errors = list(result.get("errors", []))
+
+    if winner is None:
+        raise RuntimeError(" | ".join(errors) or "no update remotes configured")
+
+    label, url, ref = winner
+    if label != UPDATE_REMOTE_URLS[0][0]:
+        print(f"Smash_ultimate_blender: reached the update server via {label} ({url})")
+    sha, message, date = commit_info(addon_path, ref, timeout)
+    return sha, message, date, label, ref
 
 
 # =============================================================================
@@ -139,15 +223,17 @@ def check_for_newer_version():
     addon_path = get_addon_path()
 
     if not is_git_repo(addon_path):
+        urls = " or ".join(url for _, url in UPDATE_REMOTE_URLS)
         print(f"Smash_ultimate_blender: {addon_path} is not a git checkout - can't "
-              f"check for updates. Re-clone it from {UPDATE_REMOTE_URL}.")
+              f"check for updates. Re-clone it from {urls}.")
         UPDATE_STATUS = "idle"
         UPDATE_AVAILABLE = False
         return
 
     try:
         current_sha, current_message, _ = commit_info(addon_path, "HEAD")
-        latest_sha, latest_message, latest_date = fetch_latest(addon_path, GIT_TIMEOUT_CHECK)
+        latest_sha, latest_message, latest_date, _label, _ref = fetch_latest(
+            addon_path, GIT_TIMEOUT_CHECK)
 
         CURRENT_COMMIT_SHA, CURRENT_COMMIT_MESSAGE = current_sha, current_message
         LATEST_COMMIT_SHA = latest_sha
@@ -161,12 +247,11 @@ def check_for_newer_version():
         else:
             print("Smash_ultimate_blender: plugin is up to date")
 
-    except subprocess.TimeoutExpired:
-        print(f"Smash_ultimate_blender: timed out reaching {UPDATE_REMOTE_URL} "
-              f"(server unreachable, or not on the network right now)")
-        UPDATE_AVAILABLE = False
     except Exception as e:
-        print(f"Smash_ultimate_blender: couldn't check for updates: {e}")
+        # fetch_latest() already tried every address in UPDATE_REMOTE_URLS and
+        # folded each one's error (including any timeout) into this message,
+        # so there's nothing a narrower except clause would add here.
+        print(f"Smash_ultimate_blender: couldn't check for updates - {e}")
         UPDATE_AVAILABLE = False
 
     UPDATE_STATUS = "idle"
@@ -237,17 +322,18 @@ class SUB_OP_download_update(Operator):
         def thread_func():
             global UPDATE_DOWNLOAD_PROGRESS, UPDATE_STATUS, LATEST_COMMIT_SHA
             try:
-                fetch_latest(addon_path, GIT_TIMEOUT_INSTALL)
+                _sha, _msg, _date, _label, winning_ref = fetch_latest(
+                    addon_path, GIT_TIMEOUT_INSTALL)
                 UPDATE_DOWNLOAD_PROGRESS = 0.5
                 self._stage = "installing"
                 UPDATE_STATUS = "installing"
 
-                _run_git(["reset", "--hard", "FETCH_HEAD"], addon_path, GIT_TIMEOUT_INSTALL)
+                # Reset to the ref fetch_latest() actually populated, not
+                # FETCH_HEAD - a second, still-running attempt against the
+                # other address could overwrite FETCH_HEAD after this point.
+                _run_git(["reset", "--hard", winning_ref], addon_path, GIT_TIMEOUT_INSTALL)
                 UPDATE_DOWNLOAD_PROGRESS = 1.0
                 self._stage = "done"
-            except subprocess.TimeoutExpired:
-                self._error = f"Timed out reaching {UPDATE_REMOTE_URL}"
-                self._stage = "error"
             except Exception as e:
                 self._error = str(e)
                 self._stage = "error"
