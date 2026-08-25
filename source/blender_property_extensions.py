@@ -538,6 +538,14 @@ class SubSceneProperties(PropertyGroup):
                     "Preview only - Bake still has to run to create the keyframes export reads",
         default=True,
     )
+    eye_look_pupil_from_scale: BoolProperty(
+        name="Pupil Size From Bone Scale",
+        description="Also drive CustomVector31 X/Y (the eye's UV scale) from the control "
+                    "bone's scale. Shrink the bone to shrink the pupil; scale 1.0 is neutral. "
+                    "Changing size also nudges the pupil's position, since the UV scale is "
+                    "applied about the UV origin",
+        default=False,
+    )
     eye_look_invert_x: BoolProperty(
         name="Invert X",
         description="Flip which way the eyes look horizontally, if your model's eye UVs "

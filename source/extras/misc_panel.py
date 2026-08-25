@@ -387,6 +387,12 @@ class SUB_PT_misc_utilities(Panel):
         rowinv = eye_box.row(align=True)
         rowinv.prop(ssp, "eye_look_invert_x", toggle=True)
         rowinv.prop(ssp, "eye_look_invert_y", toggle=True)
+        eye_box.prop(ssp, "eye_look_pupil_from_scale")
+        if ssp.eye_look_pupil_from_scale:
+            pupil_box = eye_box.box()
+            pupil_box.label(text="Scale the control bone (S) to resize", icon="INFO")
+            pupil_box.label(text="the pupil. Smaller bone = smaller pupil.")
+            pupil_box.label(text="Resizing also shifts it slightly.")
         eye_box.operator("sub.bake_eye_look", icon="ACTION")
         hint = eye_box.box()
         hint.label(text="Move the control in Pose Mode to preview,", icon="INFO")

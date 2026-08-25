@@ -132,7 +132,26 @@ def look_values_from_control(pbone, sensitivity, clamp, invert_x=False, invert_y
     return dx, -dx, dz
 
 
-def apply_look_to_tracks(arma, sensitivity, clamp, invert_x=False, invert_y=False):
+def pupil_scale_from_control(pbone, min_cv=0.1, max_cv=10.0):
+    """CV31.X/Y (UV layer 2 scale) from the control bone's scale.
+
+    The UV transform node computes  UV' = scale * (UV - translate), so a
+    LARGER CV31.X/Y tiles the eye texture more and the pupil comes out
+    SMALLER. Inverting the bone scale here keeps the control intuitive:
+    shrink the control bone and the pupil shrinks with it, scale 1.0 is
+    neutral.
+
+    Note the scale is applied about the UV origin rather than the pupil's
+    centre, so changing size also nudges where the pupil sits - expect to
+    re-touch the look offset after a big size change.
+    """
+    average = (pbone.scale.x + pbone.scale.y + pbone.scale.z) / 3.0
+    average = max(1e-3, average)
+    return max(min_cv, min(max_cv, 1.0 / average))
+
+
+def apply_look_to_tracks(arma, sensitivity, clamp, invert_x=False, invert_y=False,
+                         use_pupil_scale=False):
     """Push the control bone's pose into CV31. Returns True if anything moved."""
     pbone = arma.pose.bones.get(EYE_CTRL_BONE)
     if pbone is None:
@@ -140,6 +159,7 @@ def apply_look_to_tracks(arma, sensitivity, clamp, invert_x=False, invert_y=Fals
     sap = arma.data.sub_anim_properties
     left_z, right_z, shared_w = look_values_from_control(
         pbone, sensitivity, clamp, invert_x, invert_y)
+    pupil = pupil_scale_from_control(pbone) if use_pupil_scale else None
     changed = False
     for name, z in (('EyeL', left_z), ('EyeR', right_z)):
         track = sap.mat_tracks.get(name)
@@ -149,6 +169,11 @@ def apply_look_to_tracks(arma, sensitivity, clamp, invert_x=False, invert_y=Fals
         if abs(prop.custom_vector[2] - z) > 1e-7 or abs(prop.custom_vector[3] - shared_w) > 1e-7:
             prop.custom_vector[2] = z
             prop.custom_vector[3] = shared_w
+            changed = True
+        if pupil is not None and (abs(prop.custom_vector[0] - pupil) > 1e-7
+                                  or abs(prop.custom_vector[1] - pupil) > 1e-7):
+            prop.custom_vector[0] = pupil
+            prop.custom_vector[1] = pupil
             changed = True
     return changed
 
@@ -173,7 +198,8 @@ def _eye_look_live_handler(scene, depsgraph=None):
             if obj.type != 'ARMATURE' or EYE_CTRL_BONE not in obj.pose.bones:
                 continue
             apply_look_to_tracks(obj, ssp.eye_look_sensitivity, ssp.eye_look_clamp,
-                                 ssp.eye_look_invert_x, ssp.eye_look_invert_y)
+                                 ssp.eye_look_invert_x, ssp.eye_look_invert_y,
+                                 ssp.eye_look_pupil_from_scale)
     except Exception as ex:
         print(f"[eye look live] disabled after error: {ex}")
         try:
@@ -417,10 +443,15 @@ class SUB_OT_bake_eye_look(Operator):
                 left_z, right_z, shared_w = look_values_from_control(
                     pbone, self.sensitivity, self.clamp,
                     ssp.eye_look_invert_x, ssp.eye_look_invert_y)
+                pupil = (pupil_scale_from_control(pbone)
+                         if ssp.eye_look_pupil_from_scale else None)
                 for name, (track_index, track, prop_index) in tracks.items():
                     prop = track.properties[prop_index]
                     prop.custom_vector[2] = left_z if name == 'EyeL' else right_z
                     prop.custom_vector[3] = shared_w
+                    if pupil is not None:
+                        prop.custom_vector[0] = pupil
+                        prop.custom_vector[1] = pupil
                     arma.data.keyframe_insert(
                         data_path=(f'sub_anim_properties.mat_tracks[{track_index}]'
                                    f'.properties[{prop_index}].custom_vector'),
