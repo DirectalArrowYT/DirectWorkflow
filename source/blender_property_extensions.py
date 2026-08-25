@@ -532,6 +532,19 @@ class SubSceneProperties(PropertyGroup):
                     "'SHair_R=SHair_L, Tail_R=Tail_L'. Applied before the built-in defaults",
         default="",
     )
+    bone_sym_roll_preset: EnumProperty(
+        name="Roll Preset",
+        description="Which vanilla fighter's reference bone rolls to apply",
+        items=[
+            ("EFLAME", "eflame", "Bone rolls read from an untouched import of fighter/eflame"),
+        ],
+        default="EFLAME",
+    )
+    bone_sym_preset_selected_only: BoolProperty(
+        name="Selected Bones Only",
+        description="Only apply the preset to bones selected in Edit Mode",
+        default=False,
+    )
     mirror_animation_expanded: BoolProperty(
         name="Mirror Animation Expanded",
         description="Whether the Mirror Animation section is expanded",

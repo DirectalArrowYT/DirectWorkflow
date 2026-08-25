@@ -298,9 +298,80 @@ class SUB_OT_bone_symmetry_audit(Operator):
         return {"FINISHED"}
 
 
+class SUB_OT_apply_roll_preset(Operator):
+    """Set bone rolls to a vanilla fighter's reference values"""
+    bl_idname = "sub.apply_roll_preset"
+    bl_label = "Apply Roll Preset"
+    bl_description = ("Set every matching bone's roll to the value the vanilla fighter uses. "
+                      "Bones not in the preset - a mod's own scarves, coats, IK helpers - are "
+                      "left alone, since there is no vanilla value for them")
+    bl_options = {"REGISTER", "UNDO"}
+
+    dry_run: bpy.props.BoolProperty(
+        name="Preview Only",
+        description="Report what would change without touching any bone",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "ARMATURE"
+
+    def execute(self, context):
+        from . import smash_roll_presets
+
+        ssp = context.scene.sub_scene_properties
+        arm_obj = context.active_object
+        preset_key = ssp.bone_sym_roll_preset
+        label, table = smash_roll_presets.ROLL_PRESETS[preset_key]
+
+        selected_only = ssp.bone_sym_preset_selected_only
+        prev_mode = arm_obj.mode
+        if context.mode != "EDIT_ARMATURE":
+            bpy.ops.object.mode_set(mode="EDIT")
+
+        changed, already, not_in_preset, skipped_unselected = [], 0, [], 0
+        try:
+            for bone in arm_obj.data.edit_bones:
+                target_deg = table.get(bone.name)
+                if target_deg is None:
+                    not_in_preset.append(bone.name)
+                    continue
+                if selected_only and not bone.select:
+                    skipped_unselected += 1
+                    continue
+                target = math.radians(target_deg)
+                if abs(_normalize_angle(bone.roll - target)) < 1e-6:
+                    already += 1
+                    continue
+                changed.append((bone.name, math.degrees(bone.roll), target_deg))
+                if not self.dry_run:
+                    bone.roll = target
+        finally:
+            if arm_obj.mode != prev_mode:
+                bpy.ops.object.mode_set(mode=prev_mode)
+
+        for name, was, now in changed[:12]:
+            print(f"[sub.apply_roll_preset] {name}: {was:.4f} -> {now}")
+        if len(changed) > 12:
+            print(f"[sub.apply_roll_preset] ... and {len(changed) - 12} more")
+
+        verb = "Would change" if self.dry_run else "Set"
+        msg = (f"{verb} {len(changed)} roll(s) to the {label} preset. "
+               f"{already} already matched, {len(not_in_preset)} bone(s) are not in the "
+               f"preset and were left alone")
+        if skipped_unselected:
+            msg += f", {skipped_unselected} skipped as unselected"
+        msg += ". See the console for the per-bone list."
+        self.report({"INFO"}, msg)
+        return {"FINISHED"}
+
+
 classes = (
     SUB_OT_bone_symmetrize,
     SUB_OT_bone_symmetry_audit,
+    SUB_OT_apply_roll_preset,
 )
 
 

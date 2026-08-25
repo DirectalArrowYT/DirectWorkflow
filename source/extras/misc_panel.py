@@ -318,6 +318,21 @@ class SUB_PT_model_tools(Panel):
             sym_box.label(text="roll rule (180 - roll), not a plain mirror.")
         sym_box.label(text="Geometry and parenting only - no constraints,")
         sym_box.label(text="custom shapes or vertex weights.")
+        col = layout.column(align=True)
+        col.separator()
+        col.label(text="Vanilla Roll Preset", icon="PRESET")
+        col.prop(ssp, "bone_sym_roll_preset")
+        col.prop(ssp, "bone_sym_preset_selected_only")
+        preset_row = layout.row(align=True)
+        preset_row.enabled = active is not None and active.type == "ARMATURE"
+        preset_row.operator("sub.apply_roll_preset", text="Preview", icon="VIEWZOOM").dry_run = True
+        preset_row.operator("sub.apply_roll_preset", text="Apply", icon="CHECKMARK").dry_run = False
+        preset_box = layout.box()
+        preset_box.label(text="Sets shared bones to the vanilla rig's", icon="INFO")
+        preset_box.label(text="rolls, so vanilla animations drive them")
+        preset_box.label(text="correctly. Bones the vanilla rig doesn't")
+        preset_box.label(text="have (scarves, coats, IK) are untouched.")
+
         adv = layout.box()
         adv.label(text="Advanced", icon="PREFERENCES")
         adv.prop(ssp, "bone_sym_extra_pairs")
