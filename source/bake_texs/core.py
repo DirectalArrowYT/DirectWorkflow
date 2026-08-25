@@ -1152,6 +1152,59 @@ def resolve_channels(mat, kind, payload, path):
 # =============================================================================
 # IMAGE ASSEMBLY
 # =============================================================================
+_NORMAL_DETAIL_NODES = {'BUMP', 'NORMAL_MAP', 'DISPLACEMENT', 'VECTOR_DISPLACEMENT'}
+_NORMAL_DETAIL_MODIFIERS = {'MULTIRES', 'DISPLACE'}
+
+
+def normal_bake_would_be_flat(materials, objects):
+    """True when a tangent-space normal bake provably can't capture anything.
+
+    Baking an object's tangent normals onto its own UVs yields flat
+    (0.5, 0.5, 1.0) unless something perturbs the surface normal: a Bump or
+    Normal Map node, something wired into a shader's Normal input, or a
+    modifier that adds geometry detail the bake could pick up. If none of
+    that exists there is nothing to find, so the bake is pure cost.
+
+    Deliberately conservative - it only returns True when it has walked every
+    material (groups included) and every modifier and found nothing at all.
+    Any doubt falls through to a real bake.
+    """
+    for obj in objects:
+        for modifier in obj.modifiers:
+            if modifier.type in _NORMAL_DETAIL_MODIFIERS and modifier.show_render:
+                return False
+
+    def tree_has_detail(tree, depth=0, seen=None):
+        if tree is None or depth > 12:
+            return False
+        seen = set() if seen is None else seen
+        if tree.name in seen:
+            return False
+        seen.add(tree.name)
+        for node in tree.nodes:
+            if node.type in _NORMAL_DETAIL_NODES:
+                return True
+            # Only a *shader's* Normal input redirects the shading normal.
+            # Plenty of other nodes have a socket of that name that has
+            # nothing to do with surface detail - an Ambient Occlusion node's
+            # Normal just aims its hemisphere, and these toon groups wire
+            # Geometry.Normal straight into one, which made an earlier version
+            # of this check fire on every single material and never skip a
+            # thing.
+            if node.type.startswith('BSDF_') or node.type == 'SUBSURFACE_SCATTERING':
+                normal_input = node.inputs.get('Normal')
+                if normal_input is not None and normal_input.is_linked:
+                    return True
+            if node.type == 'GROUP' and tree_has_detail(node.node_tree, depth + 1, seen):
+                return True
+        return False
+
+    for material in materials:
+        if material.use_nodes and tree_has_detail(material.node_tree):
+            return False
+    return True
+
+
 def resolve_channel_image(scene, objects, members, name, size, colorspace,
                           scratch, default_rgba=(0.0, 0.0, 0.0, 1.0)):
     """Turn a channel into an image, baking only when it has to."""
@@ -1163,9 +1216,19 @@ def resolve_channel_image(scene, objects, members, name, size, colorspace,
         fill_image_const(img, default_rgba)
         return img
 
-    if len(live) == 1 and live[0][1].mode == 'CONST':
-        fill_image_const(img, live[0][1].value)
-        return img
+    # Flood-fill instead of baking whenever every member resolves to the SAME
+    # constant. Each bpy.ops.object.bake call costs ~0.5s of fixed setup on
+    # this machine before it traces a single ray (measured: a 128px 1-sample
+    # bake takes 0.53s, a 2048px one 1.69s), so skipping a whole call is worth
+    # far more than making it cheaper. Used to only skip for a lone member, so
+    # a bundle whose members happen to agree - which is most of them, since
+    # Shiny variants usually differ only in metalness - still paid for a full
+    # bake per channel to paint one flat value.
+    if all(c.mode == 'CONST' for _, c in live):
+        distinct = {tuple(round(float(v), 6) for v in c.value) for _, c in live}
+        if len(distinct) == 1:
+            fill_image_const(img, live[0][1].value)
+            return img
 
     fill_image_const(img, default_rgba)
     bake_members(scene, objects, live, img, colorspace, scratch)
@@ -1458,9 +1521,22 @@ def _bake_all():
                 else:
                     img_norm = create_or_get_image(f"{mat_key}__normBake", BAKE_SIZE)
                     set_colorspace(img_norm, "Non-Color")
-                    scene.render.bake.normal_space = "TANGENT"
-                    bake_pass(scene, objects, materials, 'NORMAL', img_norm,
-                              "Non-Color", scratch, samples=1)
+                    if normal_bake_would_be_flat(materials, objects):
+                        # Nothing drives a Normal input and no modifier adds
+                        # surface detail, so a tangent-space bake of these
+                        # objects onto themselves can only produce flat
+                        # (0.5, 0.5, 1.0) everywhere. Filling it directly
+                        # skips a bake call that could never have found
+                        # anything - and every call costs ~0.5s before it
+                        # traces a ray. Anything that CAN carry detail (a
+                        # Bump/Normal Map node, a linked Normal socket, a
+                        # multires/displace modifier) falls through to a real
+                        # bake below.
+                        fill_image_const(img_norm, (0.5, 0.5, 1.0, 1.0))
+                    else:
+                        scene.render.bake.normal_space = "TANGENT"
+                        bake_pass(scene, objects, materials, 'NORMAL', img_norm,
+                                  "Non-Color", scratch, samples=1)
                     made.append(img_norm)
 
                     if NOR_ALPHA_MODE == "FROM_CAVITY":
