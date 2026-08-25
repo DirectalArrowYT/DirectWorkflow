@@ -1532,7 +1532,11 @@ def _bake_all():
                         # Bump/Normal Map node, a linked Normal socket, a
                         # multires/displace modifier) falls through to a real
                         # bake below.
-                        fill_image_const(img_norm, (0.5, 0.5, 1.0, 1.0))
+                        # 128/255, not 0.5. That is the exact byte value a
+                        # real tangent-space bake writes for a flat normal;
+                        # plain 0.5 lands on 127 after quantisation and makes
+                        # the skipped result differ from a baked one by 1/255.
+                        fill_image_const(img_norm, (128.0 / 255.0, 128.0 / 255.0, 1.0, 1.0))
                     else:
                         scene.render.bake.normal_space = "TANGENT"
                         bake_pass(scene, objects, materials, 'NORMAL', img_norm,
