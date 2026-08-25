@@ -97,6 +97,32 @@ class SUB_PT_matl_data_master(MaterialPanel):
 
         box.prop(sub_matl_data, "shader_label", emboss=False)
 
+        # A side-loaded twin quietly overrides this material at export, so it
+        # has to be visible from here - otherwise you edit the live material,
+        # see nothing change in the exported file, and have no clue why.
+        from .create_matl_from_blender_materials import get_side_loaded_twin
+        from ...material_grouping import SIDE_LOAD_SUFFIX
+        material = context.object.active_material
+        scene_props = context.scene.sub_scene_properties
+
+        if material.name.endswith(SIDE_LOAD_SUFFIX):
+            note = layout.box()
+            note.label(text='This is a side-loaded material.', icon='DUPLICATE')
+            note.label(text='Not assigned to any mesh; edited for export only.')
+        else:
+            twin = get_side_loaded_twin(material)
+            if twin is not None:
+                note = layout.box()
+                note.label(text=f'Has a side-loaded twin: "{twin.name}"', icon='DUPLICATE')
+                twin_data = getattr(twin, 'sub_matl_data', None)
+                if twin_data is not None and twin_data.shader_label:
+                    note.label(text=f'Twin shader: {twin_data.shader_label}')
+                if scene_props.export_prefer_sideloaded_materials:
+                    note.label(text='Export uses the twin, not this material.', icon='EXPORT')
+                else:
+                    note.label(text='Export uses THIS material - the twin is idle.')
+                note.prop(scene_props, 'export_prefer_sideloaded_materials')
+
         row = layout.row(align=True)
         row.operator_context = 'INVOKE_DEFAULT'
         row.operator(operators.SUB_OP_apply_material_preset.bl_idname,

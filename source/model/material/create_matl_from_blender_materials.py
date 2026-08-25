@@ -149,6 +149,36 @@ def has_sub_matl_data(material: bpy.types.Material) -> bool:
         return False
     return True
 
+def get_side_loaded_twin(material: bpy.types.Material) -> bpy.types.Material | None:
+    """The existing side-loaded twin of a material, or None."""
+    return bpy.data.materials.get(side_loaded_name(material.name))
+
+
+def get_or_create_side_loaded_twin(material: bpy.types.Material) -> tuple[bpy.types.Material, bool]:
+    """The side-loaded twin of a material, making one if there isn't one yet.
+
+    A new twin starts as a full copy of the live material, so it inherits its
+    textures and parameters and only diverges where you change it afterwards.
+    Starting from an empty material instead would mean re-assigning every
+    texture by hand, which defeats the point.
+
+    Returns (twin, was_created).
+    """
+    existing = get_side_loaded_twin(material)
+    if existing is not None:
+        return existing, False
+
+    twin = material.copy()
+    twin.name = side_loaded_name(material.name)
+    # A twin is deliberately assigned to no mesh, so it has zero users and
+    # Blender would discard it on the next save/reload - taking the whole
+    # side-load with it and silently falling back to the live material's data
+    # at export. The fake user is what keeps it alive. Same reasoning as the
+    # side-load path in reimport_materials.py.
+    twin.use_fake_user = True
+    return twin, True
+
+
 def resolve_material_data_source(material: bpy.types.Material, prefer_side_loaded: bool) -> bpy.types.Material:
     """Which material's sub_matl_data should actually be read for `material`.
 

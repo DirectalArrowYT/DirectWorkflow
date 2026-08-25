@@ -7,6 +7,7 @@ from .load_from_shader_label import (
 from . import presets as material_presets
 from . import shader_info
 from . import validate
+from ...material_grouping import SIDE_LOAD_SUFFIX, side_loaded_name
 
 
 def _active_smash_material(context):
@@ -100,6 +101,21 @@ class SUB_OP_apply_material_preset(Operator):
         ),
         default=False,
     )
+    target: EnumProperty(
+        name='Apply To',
+        description='Which material data the preset is written into',
+        items=(
+            ('LIVE', 'Live Material',
+             'Change the material assigned to the mesh. What you see in the '
+             'viewport updates immediately'),
+            ('SIDE_LOADED', 'Side-Loaded Copy',
+             'Leave the mesh material completely alone and write into its '
+             '"(Side-Loaded)" twin instead, creating one if it does not exist. '
+             'Export reads from the twin when "Prefer Side-Loaded Materials" '
+             'is on'),
+        ),
+        default='LIVE',
+    )
 
     @classmethod
     def poll(cls, context):
@@ -130,6 +146,28 @@ class SUB_OP_apply_material_preset(Operator):
                 for line in _wrap(preset.notes, 62):
                     note_box.label(text=line)
 
+        layout.separator()
+        layout.prop(self, 'target', expand=True)
+
+        if self.target == 'SIDE_LOADED':
+            from .create_matl_from_blender_materials import get_side_loaded_twin
+            side_box = layout.box()
+            material = context.object.active_material
+            twin = get_side_loaded_twin(material) if material else None
+            if twin is None:
+                side_box.label(text=f'Will create "{side_loaded_name(material.name)}"',
+                               icon='DUPLICATE')
+                side_box.label(text='Copied from the live material, so it keeps its textures.')
+            else:
+                side_box.label(text=f'Updating existing "{twin.name}"', icon='FILE_REFRESH')
+
+            scene_props = context.scene.sub_scene_properties
+            if not scene_props.export_prefer_sideloaded_materials:
+                warn = layout.box()
+                warn.label(text='"Prefer Side-Loaded Materials" is off,', icon='ERROR')
+                warn.label(text='so export will still use the live material.')
+                warn.prop(scene_props, 'export_prefer_sideloaded_materials')
+
         layout.prop(self, 'apply_to_selected')
 
     def execute(self, context):
@@ -153,11 +191,36 @@ class SUB_OP_apply_material_preset(Operator):
             self.report({'WARNING'}, 'No materials to apply the preset to.')
             return {'CANCELLED'}
 
+        # Side-loading redirects the write to each material's twin, so the
+        # material actually assigned to the mesh is never touched.
+        created = 0
+        if self.target == 'SIDE_LOADED':
+            from .create_matl_from_blender_materials import get_or_create_side_loaded_twin
+            targets = []
+            for material in materials:
+                # A twin of a twin would be meaningless, so a material that is
+                # already side-loaded is written to directly.
+                if material.name.endswith(SIDE_LOAD_SUFFIX):
+                    targets.append(material)
+                    continue
+                twin, was_created = get_or_create_side_loaded_twin(material)
+                created += int(was_created)
+                targets.append(twin)
+            materials = targets
+
         notes = []
         for material in materials:
             notes.extend(apply_material_preset(material, preset))
 
-        message = f'Applied "{preset.name}" to {len(materials)} material(s).'
+        if self.target == 'SIDE_LOADED':
+            message = (f'Applied "{preset.name}" to {len(materials)} side-loaded '
+                       f'material(s)' + (f', {created} newly created' if created else '')
+                       + '. Mesh materials unchanged.')
+            if not context.scene.sub_scene_properties.export_prefer_sideloaded_materials:
+                notes.append('turn on "Prefer Side-Loaded Materials" for export to use them')
+        else:
+            message = f'Applied "{preset.name}" to {len(materials)} material(s).'
+
         if notes:
             self.report({'WARNING'}, message + ' ' + '; '.join(dict.fromkeys(notes)))
         else:

@@ -237,8 +237,19 @@ def check_materials(materials_to_meshes):
     return sorted(issues, key=_sort_key)
 
 
-def collect_materials(objects):
-    """Map every material on these objects to the meshes that use it."""
+def collect_materials(objects, include_side_loaded=True):
+    """Map every material on these objects to the meshes that use it.
+
+    Side-loaded twins are included by default. They are assigned to no mesh, so
+    walking material slots alone never finds them - but when "Prefer
+    Side-Loaded Materials" is on they are what actually gets exported, which
+    makes them the materials most worth checking. A twin inherits its base
+    material's meshes so the vertex attribute checks still have geometry to
+    compare against.
+    """
+    import bpy
+    from ...material_grouping import side_loaded_name
+
     result = {}
     for obj in objects:
         if obj.type != 'MESH':
@@ -247,6 +258,13 @@ def collect_materials(objects):
             if slot.material is None:
                 continue
             result.setdefault(slot.material, []).append(obj)
+
+    if include_side_loaded:
+        for material, mesh_objects in list(result.items()):
+            twin = bpy.data.materials.get(side_loaded_name(material.name))
+            if twin is not None and twin not in result:
+                result[twin] = list(mesh_objects)
+
     return result
 
 
