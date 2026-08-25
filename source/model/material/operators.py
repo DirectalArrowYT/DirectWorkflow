@@ -228,6 +228,12 @@ class SUB_OP_apply_material_preset(Operator):
         return {'FINISHED'}
 
     def invoke(self, context, event):
+        # If the panels are currently showing side-loaded data, default to
+        # writing there too - otherwise the preset lands on the live material
+        # while you are looking at the twin, and nothing appears to happen.
+        scene_props = getattr(context.scene, 'sub_scene_properties', None)
+        if scene_props is not None and getattr(scene_props, 'matl_panel_edit_side_loaded', False):
+            self.target = 'SIDE_LOADED'
         return context.window_manager.invoke_props_dialog(self, width=460)
 
 

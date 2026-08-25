@@ -167,6 +167,19 @@ class SUB_OP_model_exporter(Operator):
         description="Export .NUTEXB",
         default=True,
     )
+    merge_bundled_materials: BoolProperty(
+        name="Merge Bundled Materials",
+        description=(
+            "Collapse a bundled material into the material it belongs to - "
+            "BodyShiny becomes Body - so the model exports one material "
+            "instead of two. The baker already writes every member of a bundle "
+            "into one texture set, so Body's PRM map already carries "
+            "BodyShiny's metalness and roughness in the texels it covers, and "
+            "the second material has nothing left to contribute. Off: export "
+            "each material separately, sharing textures as before"
+        ),
+        default=True,
+    )
     include_wol_matls: BoolProperty(
         name="Export World of Light Materials",
         description=(
@@ -263,7 +276,8 @@ class SUB_OP_model_exporter(Operator):
             export_model(self, context, self.directory, self.include_numdlb, self.include_numshb, self.include_numshexb,
                     self.include_nusktb, self.include_numatb, self.include_nuhlpb, self.include_nutexb, self.linked_nusktb_settings,
                     self.optimize_mesh_weights_to_parent_bone, self.armature_position, self.apply_modifiers,
-                    self.split_shape_keys, self.ignore_underscore_meshes, self.include_wol_matls)
+                    self.split_shape_keys, self.ignore_underscore_meshes, self.include_wol_matls,
+                    self.merge_bundled_materials)
         if self.use_debug_timer:
             stats = pstats.Stats(pr)
             stats.sort_stats(pstats.SortKey.TIME)
@@ -360,7 +374,7 @@ def weights_to_parent_bones(ssbh_mesh_data: ssbh_data_py.mesh_data.MeshData, ssb
 def export_model(operator: bpy.types.Operator, context, directory, include_numdlb, include_numshb, include_numshexb, include_nusktb,
                 include_numatb, include_nuhlpb, include_nutexb, linked_nusktb_settings, optimize_mesh_weights:str, armature_position: str,
                 apply_modifiers: str, split_shape_keys: str, ignore_underscore_meshes:str,
-                include_wol_matls: bool = True):
+                include_wol_matls: bool = True, merge_bundled_materials: bool = True):
     # Prepare the scene for export and find the meshes to export.
     arma: bpy.types.Object = context.scene.sub_scene_properties.model_export_arma
     context.view_layer.objects.active = arma
@@ -422,27 +436,38 @@ def export_model(operator: bpy.types.Operator, context, directory, include_numdl
                 except Exception as e:
                     operator.report({'ERROR'}, f'Failed to make ssbh mesh data, but will try to make the rest. Error="{e}" ; Traceback=\n{traceback.format_exc()}')
 
+            # Which materials collapse into which (BodyShiny -> Body). Worked
+            # out once here and handed to the modl, matl and nutexb steps, so
+            # all three agree on the material list. Empty unless the scene
+            # actually has bundled materials.
+            all_export_meshes = set()
+            for unprocessed_meshes_to_export_meshes in group_name_to_unprocessed_meshes_to_export_meshes.values():
+                for export_meshes in unprocessed_meshes_to_export_meshes.values():
+                    all_export_meshes.update(export_meshes)
+
+            bundled_map = get_export_bundled_map(all_export_meshes) if merge_bundled_materials else {}
+            if bundled_map:
+                merged = ', '.join(sorted(f'{bundled.name} -> {base.name}'
+                                          for bundled, base in bundled_map.items()))
+                operator.report({'INFO'}, f'Merged bundled material(s): {merged}')
+
             if include_numdlb:
                 try:
-                    ssbh_modl_data = make_ssbh_modl_data(operator, context, group_name_to_unprocessed_meshes_to_export_meshes)
+                    ssbh_modl_data = make_ssbh_modl_data(operator, context, group_name_to_unprocessed_meshes_to_export_meshes, bundled_map)
                 except Exception as e:
                     operator.report({'ERROR'}, f'Failed to make modl_data (.NUMDLB), but will try to make the rest. Error="{e}" ; Traceback=\n{traceback.format_exc()}')
-            
+
             if include_numatb:
-                just_export_meshes = set()
-                for unprocessed_meshes_to_export_meshes in group_name_to_unprocessed_meshes_to_export_meshes.values():
-                    for export_meshes in unprocessed_meshes_to_export_meshes.values():
-                        for export_mesh in export_meshes:
-                            just_export_meshes.add(export_mesh)
-                
-                ssbh_matl_data = create_matl(operator, just_export_meshes)
+                just_export_meshes = all_export_meshes
+
+                ssbh_matl_data = create_matl(operator, just_export_meshes, bundled_map)
                 if ssbh_matl_data is not None:
                     trim_matl_texture_names(operator, ssbh_matl_data)
                 if ssbh_modl_data is not None and ssbh_matl_data is not None:
                     trim_material_labels(operator, ssbh_modl_data, ssbh_matl_data)
                 if include_nutexb:
                     try:
-                        materials = get_mesh_materials(operator, just_export_meshes)
+                        materials = get_mesh_materials(operator, just_export_meshes, bundled_map)
                         from .material.texture.export_nutexb import export_nutexb_from_blender_materials
                         export_nutexb_from_blender_materials(operator, materials, folder)
                     except Exception as e:
@@ -639,7 +664,29 @@ def create_and_save_meshex(operator, folder, ssbh_mesh_data):
         operator.report({'ERROR'}, f'Failed to save {path}: {e}')
 
 
-def get_mesh_materials(operator, export_meshes) -> set[bpy.types.Material]:
+def get_export_bundled_map(export_meshes) -> dict:
+    """{bundled material -> base material} across the meshes being exported.
+
+    Empty when the scene has no bundled materials, so every caller below is a
+    no-op in the ordinary case.
+    """
+    from ..material_grouping import bundled_material_map
+
+    materials = set()
+    for mesh in export_meshes:
+        if len(mesh.material_slots) > 0 and mesh.material_slots[0].material is not None:
+            materials.add(mesh.material_slots[0].material)
+    return bundled_material_map(materials)
+
+
+def resolve_export_material(material, bundled_map):
+    """The material a mesh should actually be exported as."""
+    if not bundled_map:
+        return material
+    return bundled_map.get(material, material)
+
+
+def get_mesh_materials(operator, export_meshes, bundled_map=None) -> set[bpy.types.Material]:
     #  Gather Material Info
     #
     # Reads through mesh.material_slots, NOT mesh.data.materials directly.
@@ -661,7 +708,9 @@ def get_mesh_materials(operator, export_meshes) -> set[bpy.types.Material]:
                     message = f'The mesh {mesh.name} has more than one material slot. Only the first material will be exported.'
                     operator.report({'WARNING'}, message)
 
-                materials.add(first_material)
+                # A bundled material (BodyShiny) contributes its base (Body)
+                # instead of itself, so no matl entry is written for it.
+                materials.add(resolve_export_material(first_material, bundled_map))
             else:
                 message = f'The mesh {mesh.name} has no material created for the first material slot.'
                 message += ' Cannot create model.numatb. Create a material or disable .NUMATB export.'
@@ -670,10 +719,10 @@ def get_mesh_materials(operator, export_meshes) -> set[bpy.types.Material]:
     return materials
 
 
-def create_matl(operator, export_meshes) -> ssbh_data_py.matl_data.MatlData | None:
+def create_matl(operator, export_meshes, bundled_map=None) -> ssbh_data_py.matl_data.MatlData | None:
     from .material.create_matl_from_blender_materials import create_matl_from_blender_materials
     try:
-        materials = get_mesh_materials(operator, export_meshes)
+        materials = get_mesh_materials(operator, export_meshes, bundled_map)
         ssbh_matl = create_matl_from_blender_materials(operator, materials)
     except RuntimeError as e:
         operator.report({'ERROR'}, f'Failed to prepare .numatb, Error="{e}" ; Traceback=\n{traceback.format_exc()}')
@@ -698,7 +747,7 @@ def create_and_save_matl(operator, folder, export_meshes):
         operator.report({'ERROR'}, f'Failed to save .numatb, Error="{e}" ; Traceback=\n{traceback.format_exc()}')
 
 
-def get_material_label_from_mesh(operator, mesh):
+def get_material_label_from_mesh(operator, mesh, bundled_map=None):
     if len(mesh.material_slots) == 0:
         message = f'No material assigned for {mesh.name}. Cannot create model.numdlb. Assign a material or disable .NUMDLB export.'
         raise RuntimeError(message)
@@ -706,9 +755,13 @@ def get_material_label_from_mesh(operator, mesh):
     material = mesh.material_slots[0].material
 
     if material is None:
-        message = f'The mesh {mesh.name} has no material created for the first material slot.' 
+        message = f'The mesh {mesh.name} has no material created for the first material slot.'
         message += ' Cannot create model.numdlb. Create a material or disable .NUMDLB export.'
         raise RuntimeError(message)
+
+    # A mesh assigned a bundled material is listed against its base material,
+    # so the modl and the matl agree on which materials exist.
+    material = resolve_export_material(material, bundled_map)
 
     """mat_label = None
     try:
@@ -1525,7 +1578,7 @@ def split_duplicate_loop_attributes(mesh: bpy.types.Object):
     return len(edges_to_split) > 0
 
 
-def make_ssbh_modl_data(operator, context, group_name_to_unprocessed_meshes_to_export_meshes: dict[str, dict[Object, set[Object]]]):
+def make_ssbh_modl_data(operator, context, group_name_to_unprocessed_meshes_to_export_meshes: dict[str, dict[Object, set[Object]]], bundled_map=None):
     ssbh_modl_data = ssbh_data_py.modl_data.ModlData()
 
     ssbh_modl_data.model_name = 'model'
@@ -1538,7 +1591,7 @@ def make_ssbh_modl_data(operator, context, group_name_to_unprocessed_meshes_to_e
         sub_index = 0
         for unprocessed_mesh, export_meshes in unprocessed_meshes_to_export_meshes.items():
             for export_mesh in export_meshes:
-                mat_label = get_material_label_from_mesh(operator, export_mesh)
+                mat_label = get_material_label_from_mesh(operator, export_mesh, bundled_map)
                 ssbh_modl_entry = ssbh_data_py.modl_data.ModlEntryData(group_name, sub_index, mat_label)
                 ssbh_modl_data.entries.append(ssbh_modl_entry)
                 sub_index += 1

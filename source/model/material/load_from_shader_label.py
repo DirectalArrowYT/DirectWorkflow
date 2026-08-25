@@ -19,6 +19,23 @@ def get_shader_db_file_path():
     return this_file_path.parent.parent.parent.joinpath('shader_file').joinpath('Nufx.db').resolve()
 """
 
+def _sort_collection_by_param_id(collection):
+    """Reorder a matl CollectionProperty into ascending ParamId order.
+
+    Selection sort via CollectionProperty.move(), which is the only reordering
+    operation Blender exposes. These collections hold at most a couple of dozen
+    entries, so the quadratic cost is irrelevant.
+    """
+    count = len(collection)
+    for target_index in range(count):
+        best_index = target_index
+        for candidate_index in range(target_index + 1, count):
+            if collection[candidate_index].param_id_value < collection[best_index].param_id_value:
+                best_index = candidate_index
+        if best_index != target_index:
+            collection.move(best_index, target_index)
+
+
 def is_valid_shader_label(operator: bpy.types.Operator, shader_label: str) -> bool:
     if len(shader_label) > len("SFX_PBS_0100000008008269_opaque"):
         operator.report({'ERROR'}, f'Shader Label "{shader_label}" was too long!')
@@ -93,7 +110,11 @@ def create_sub_matl_data_from_shader_label(material: bpy.types.Material, shader_
 
     # Add Missing ones
     current_param_ids: set[int] = {sub_matl_prop.param_id_value for c in collections for sub_matl_prop in c}
-    missing_param_ids = needed_param_ids - current_param_ids
+    # Sorted, so the panel lists parameters in ParamId order instead of
+    # whatever order a set happened to iterate in. Unsorted, a freshly set up
+    # skin material listed CustomVector30 above CustomVector0, which reads as
+    # the wrong parameters being present rather than the right ones shuffled.
+    missing_param_ids = sorted(needed_param_ids - current_param_ids)
     for missing_param_id in missing_param_ids:
         if missing_param_id in bool_param_id_values:
             sub_matl_data.add_bool(
@@ -173,6 +194,14 @@ def create_sub_matl_data_from_shader_label(material: bpy.types.Material, shader_
         placeholder = bpy.data.images.get(placeholder_name)
         if placeholder is not None:
             sub_matl_texture.image = placeholder
+
+    # Put every collection in ParamId order. Params that survived a shader
+    # change keep their original positions otherwise, so a material that has
+    # been switched between presets a few times ends up listing its parameters
+    # in the order they happened to be added rather than any order a reader
+    # would expect.
+    for collection in collections:
+        _sort_collection_by_param_id(collection)
 
     # Refresh needed vertex attributes
     sub_matl_data.vertex_attributes.clear()

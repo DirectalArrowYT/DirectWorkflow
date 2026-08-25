@@ -293,6 +293,69 @@ class SubSceneProperties(PropertyGroup):
         ),
         default=False,
     )
+    # --- Swing bone physics (source/swing/physics.py) ------------------------
+    # Tuning knobs rather than swing parameters: the per-bone values come
+    # straight from the swing data, and these scale the whole rig, because
+    # Blender's solver and Smash's swing do not agree on how strong "the same"
+    # damping or stiffness feels.
+    swing_physics_damping_scale: FloatProperty(
+        name='Damping',
+        description=(
+            "Scales the drag derived from every bone's Air Resistance. Raise it "
+            "if chains keep swinging too long, lower it if they feel dead"
+        ),
+        default=1.0, min=0.0, max=10.0,
+    )
+    swing_physics_stiffness_scale: FloatProperty(
+        name='Stiffness',
+        description=(
+            "Scales the springs derived from every bone's Goal Strength - how "
+            "hard a chain is pulled back towards its rest pose"
+        ),
+        default=1.0, min=0.0, max=10.0,
+    )
+    swing_physics_friction: FloatProperty(
+        name='Friction',
+        description='Surface friction between swing bones and collision shapes',
+        default=0.5, min=0.0, max=1.0,
+    )
+    swing_physics_substeps: IntProperty(
+        name='Substeps',
+        description=(
+            "Physics substeps per frame. Chains with tight angle limits or "
+            "small collision shapes need more of these to stop jittering or "
+            "passing through"
+        ),
+        default=10, min=1, max=100,
+    )
+    swing_physics_solver_iterations: IntProperty(
+        name='Solver Iterations',
+        description=(
+            "How hard the solver works to satisfy the joints each step. Raise "
+            "it if chains stretch apart or the angle limits are ignored"
+        ),
+        default=10, min=1, max=100,
+    )
+    swing_physics_ground: BoolProperty(
+        name='Collide With Ground',
+        description=(
+            "Let bones whose swing data has Ground Hit enabled collide with "
+            "passive rigid bodies you have put on the ground collision layer"
+        ),
+        default=False,
+    )
+
+    matl_panel_edit_side_loaded: BoolProperty(
+        name='Edit Side-Loaded Data',
+        description=(
+            "Point the Ultimate Material Data panels at the active material's "
+            "side-loaded twin instead of the material itself. A twin is "
+            "assigned to no mesh, so it cannot be selected in the material "
+            "slot list - this is the only way to see or edit the data that "
+            "actually gets exported when 'Prefer Side-Loaded Materials' is on"
+        ),
+        default=False,
+    )
     export_prefer_sideloaded_materials: BoolProperty(
         name='Prefer Side-Loaded Materials',
         description=(

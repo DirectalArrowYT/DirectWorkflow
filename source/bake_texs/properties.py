@@ -79,6 +79,33 @@ class SUB_PG_bake_texs_settings(PropertyGroup):
         default='AUTO',
     )
 
+    prm_skin_mask_mode: EnumProperty(
+        name='Skin PRM.r',
+        description=(
+            "How the PRM red channel is filled on a subsurface (skin) shader, "
+            "where it is the SSS mask rather than metalness"
+        ),
+        items=(
+            ('AUTO', 'Vanilla SSS Mask',
+             "Write the vanilla mask value unless something in the material "
+             "actually drives subsurface. Keeps a stylised shader's Metallic "
+             "knob feeding the COL bake without it leaking into PRM.r"),
+            ('BLENDER', 'From Blender',
+             "Always take PRM.r from the node graph - Subsurface Weight if "
+             "present, otherwise Metallic"),
+        ),
+        default='AUTO',
+    )
+    prm_skin_mask_const: FloatProperty(
+        name='SSS Mask Value',
+        description=(
+            "The PRM red value written for skin. Vanilla skin uses 1.0 - see "
+            "Textures.md, which notes skin has a PRM metalness of 1 that masks "
+            "the fake subsurface rather than making the material metallic"
+        ),
+        default=1.0, min=0.0, max=1.0,
+    )
+
     emi_mode: EnumProperty(
         name='EMI Mode',
         items=(

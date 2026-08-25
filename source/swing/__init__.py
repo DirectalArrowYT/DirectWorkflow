@@ -1,7 +1,9 @@
 from . import operators
 from . import sub_swing_data
-from . import ui    
+from . import ui
 from . import preset_handler
+from . import physics
+from . import physics_operators
 
 # Install presets on import
 preset_handler.install_presets()

@@ -64,6 +64,12 @@ class SUB_PT_bake_texs_channels(Panel):
 
         layout.prop(props, 'prm_ao_mode')
 
+        skin = layout.column(align=True)
+        skin.prop(props, 'prm_skin_mask_mode')
+        sub = skin.row()
+        sub.enabled = props.prm_skin_mask_mode == 'AUTO'
+        sub.prop(props, 'prm_skin_mask_const')
+
         emi = layout.column(align=True)
         emi.enabled = props.write_emi
         emi.prop(props, 'emi_mode')

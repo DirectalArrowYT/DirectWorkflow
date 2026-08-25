@@ -30,6 +30,12 @@ NON_COLOR_TEXTURE_PARAMS = {'Texture2', 'Texture4', 'Texture6', 'Texture7', 'Tex
 # expected state rather than something to warn about.
 _CUBE_MAP_TEXTURES = {'Texture2', 'Texture7', 'Texture8'}
 
+# Material name prefixes that mean "this is skin". "skin" is the vanilla
+# convention Textures.md documents; face and neck are added because they are
+# the parts modders usually split skin into, and a false positive here costs a
+# dismissable warning while a false negative costs metallic-looking skin.
+_SKIN_NAME_PREFIXES = ('skin', 'face', 'neck')
+
 
 class Issue:
     def __init__(self, severity, message, material_name='', fix_hint=''):
@@ -161,6 +167,19 @@ def check_material(material, mesh_objects=()):
     # On an SSS shader the PRM red channel stops being metalness and becomes
     # the SSS mask, so the two settings have to agree.
     has_sss = shader_info.uses_param(shader_label, 'CustomVector30')
+
+    # Skin on a plain PBR shader is the single most common way to get skin that
+    # renders wrong, and nothing about the export complains. 1,476 of the 1,592
+    # vanilla fighter materials named "skin*" - 92.7% - are on a subsurface
+    # shader; the naming convention itself is documented in Textures.md.
+    if not has_sss and any(name.lower().startswith(prefix) for prefix in _SKIN_NAME_PREFIXES):
+        add(WARNING,
+            f'Named like a skin material but "{shader_info.base_label(shader_label)}" '
+            f'has no subsurface scattering.',
+            'Apply the "Skin (Subsurface)" preset. On a plain shader the PRM red '
+            'channel is metalness, so any value there makes skin look metallic '
+            'instead of masking subsurface.')
+
     if has_sss:
         cv30 = sub_matl_data.vectors.get('CustomVector30')
         if cv30 is not None and abs(cv30.value[0]) < 1e-6:

@@ -225,6 +225,57 @@ class SUB_PT_swing_data_master(Panel, SwingPropertyPanel):
         layout.operator('sub.swing_copy_chain_collisions', icon='COPYDOWN',
                         text='Copy Collisions From Another Chain')
 
+class SUB_PT_swing_physics(Panel, SwingPropertyPanel):
+    bl_label = "Blender Physics"
+    bl_parent_id = "SUB_PT_swing_data_master"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        from . import physics
+        layout = self.layout
+        arma_obj = context.object
+        ssp = context.scene.sub_scene_properties
+        sub_swing_data = arma_obj.data.sub_swing_data
+
+        if len(sub_swing_data.swing_bone_chains) == 0:
+            layout.label(text='No swing bone chains to simulate.', icon='INFO')
+            return
+
+        live = physics.has_physics(arma_obj)
+
+        col = layout.column()
+        col.scale_y = 1.4
+        if live:
+            col.operator('sub.swing_physics_remove', icon='X')
+        else:
+            col.operator('sub.swing_physics_build', icon='PHYSICS')
+
+        if live:
+            box = layout.box()
+            box.label(text='Simulation is live.', icon='PLAY')
+            box.label(text='Play from the first frame to see it settle.')
+            bake = layout.column()
+            bake.scale_y = 1.3
+            bake.operator_context = 'INVOKE_DEFAULT'
+            bake.operator('sub.swing_physics_bake', icon='KEYFRAME_HLT')
+
+        layout.separator()
+        settings = layout.column(align=True)
+        settings.label(text='Tuning')
+        settings.prop(ssp, 'swing_physics_damping_scale')
+        settings.prop(ssp, 'swing_physics_stiffness_scale')
+        settings.prop(ssp, 'swing_physics_friction')
+
+        solver = layout.column(align=True)
+        solver.label(text='Solver')
+        solver.prop(ssp, 'swing_physics_substeps')
+        solver.prop(ssp, 'swing_physics_solver_iterations')
+        solver.prop(ssp, 'swing_physics_ground')
+
+        if live:
+            layout.label(text='Rebuild after changing these.', icon='INFO')
+
+
 class SUB_PT_swing_bone_chains(Panel, SwingPropertyPanel):
     bl_label = "Swing Bone Chains"
     bl_parent_id = "SUB_PT_swing_data_master"

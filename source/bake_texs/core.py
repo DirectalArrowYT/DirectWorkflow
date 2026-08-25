@@ -135,6 +135,26 @@ PRM_FALLBACK_METAL = 0.0
 PRM_FALLBACK_ROUGH = 0.5
 PRM_FALLBACK_SPEC  = 0.16 / PRM_SPECULAR_SCALE
 
+# ---- PRM.r on a subsurface shader -------------------------------------------
+# A Blender material's inputs serve the Blender render. In a stylised or toon
+# setup, Metallic is frequently turned up because of what it does to the shaded
+# result that gets baked into COL - it is a look knob, and its value is a
+# statement about colour, not about metal.
+#
+# Smash reads the same channel very differently. On a subsurface shader PRM.r
+# is the SSS mask, and Textures.md records vanilla skin setting it to 1. Piping
+# a Blender look knob into it produces a mask of 0.35 - subsurface almost off -
+# while the COL bake that the knob was actually for comes out fine, so nothing
+# looks wrong until the model is in game.
+#
+# "AUTO" keeps the two apart: COL bakes from the Blender shader exactly as
+# before, and PRM.r gets the vanilla mask unless something in the material
+# genuinely drives subsurface (a texture in Subsurface Weight, or a non-zero
+# constant there). "BLENDER" restores the old behaviour of taking whatever the
+# node graph offers.
+PRM_SKIN_MASK_MODE  = "AUTO"
+PRM_SKIN_MASK_CONST = 1.0
+
 # Flat per-material constants, the last word over everything else.
 #   "Hair": dict(metal=0.0, rough=0.35, spec=0.5, ior=1.5)
 MATERIAL_PRESETS = {}
@@ -337,6 +357,7 @@ def apply_settings(props):
     global CHAR_TAG, NAME_FROM, USE_SELECTION_ONLY, DRY_RUN
     global WRITE_COL, WRITE_NOR, WRITE_PRM, WRITE_EMI, WRITE_COMPONENT_DEBUG_MAPS
     global PRM_AO_MODE, COMPILE_NUTEXB, EMI_MODE, EMI_NORMALIZE_TO_CV3
+    global PRM_SKIN_MASK_MODE, PRM_SKIN_MASK_CONST
 
     BAKE_SIZE = int(props.bake_size)
     BAKE_MARGIN = props.bake_margin
@@ -356,6 +377,8 @@ def apply_settings(props):
     WRITE_COMPONENT_DEBUG_MAPS = props.write_component_debug_maps
 
     PRM_AO_MODE = props.prm_ao_mode
+    PRM_SKIN_MASK_MODE = props.prm_skin_mask_mode
+    PRM_SKIN_MASK_CONST = props.prm_skin_mask_const
     EMI_MODE = props.emi_mode
     EMI_NORMALIZE_TO_CV3 = props.emi_normalize_to_cv3
     COMPILE_NUTEXB = props.compile_nutexb
@@ -1218,7 +1241,32 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
         if ctx.is_subsurface:
             sss = channel_from_input(node.inputs.get("Subsurface Weight"),
                                      f"{label} Subsurface Weight", node_path)
-            if sss.mode != 'NONE':
+
+            # A textured weight, or a non-zero constant, is someone actually
+            # saying how much subsurface they want. A zero or absent one is
+            # not - it is just Blender's default - and neither is Metallic,
+            # which in a stylised setup is a look knob feeding the COL bake.
+            # Baking either into PRM.r writes a mask that switches the
+            # subsurface off, on the very shader that was chosen for it.
+            explicit = sss.mode == 'SOCKET' or (
+                sss.mode == 'CONST' and abs(float(sss.value[0])) > 1e-6)
+
+            if explicit:
+                m = sss
+                ch['sss_note'] = (
+                    f"PRM.r from Subsurface Weight, not Metallic - "
+                    f"{ctx.shader_label} reads it as the SSS mask")
+            elif PRM_SKIN_MASK_MODE == 'AUTO':
+                m = scalar_channel_raw(
+                    PRM_SKIN_MASK_CONST,
+                    f"vanilla SSS mask for {ctx.shader_label} - nothing in the "
+                    f"material drives subsurface, so Blender's Metallic is left "
+                    f"to the COL bake instead of being written here")
+                ch['sss_note'] = (
+                    f"PRM.r = {PRM_SKIN_MASK_CONST:g} (vanilla SSS mask). Blender's "
+                    f"Metallic is a look knob for COL and is NOT written to PRM.r "
+                    f"on a subsurface shader.")
+            elif sss.mode != 'NONE':
                 m = sss
                 ch['sss_note'] = (
                     f"PRM.r from Subsurface Weight, not Metallic - "
@@ -1330,6 +1378,33 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
 
     if metal.mode == 'NONE':
         metal = scalar_channel(PRM_FALLBACK_METAL, "fallback (no metallic source)")
+
+    # --- Is PRM.r going to mean anything sensible? ---------------------------
+    # Two different mistakes, both of which bake a perfectly valid-looking
+    # texture that renders wrong, and neither of which is visible afterwards
+    # without knowing what the channel is for.
+    if metal.mode == 'CONST':
+        metal_value = float(metal.value[0])
+        if ctx.is_subsurface:
+            # PRM.r is the SSS mask here. Textures.md: vanilla skin sets it to
+            # 1. Near zero means the subsurface the shader was chosen for never
+            # appears - and Blender's Subsurface Weight defaults to 0, so this
+            # is the state a skin material lands in by simply not being told.
+            if metal_value < 0.05:
+                ch['prm_r_note'] = (
+                    f"PRM.r is the SSS mask on {ctx.shader_label} but bakes to "
+                    f"{metal_value:.3g} - subsurface will not show. Vanilla skin "
+                    f"uses 1.0; raise the Principled's Subsurface Weight.")
+        elif 0.1 < metal_value < 0.9:
+            # Textures.md: "Metalness is usually either 0 (not metallic) or 1
+            # (metallic)." A constant in between is almost always someone using
+            # Metallic as a sheen knob in Blender, which in game reads as a
+            # partly-metal surface - dark diffuse and albedo-tinted specular.
+            ch['prm_r_note'] = (
+                f"PRM.r bakes to a flat {metal_value:.3g}. In game this channel is "
+                f"metalness, which vanilla keeps at 0 or 1 - a middle value renders "
+                f"as a half-metal surface. If this is skin, use the Skin preset so "
+                f"PRM.r becomes the SSS mask instead.")
     if rough.mode == 'NONE':
         rough = scalar_channel(PRM_FALLBACK_ROUGH, "fallback (no roughness source)")
     if spec.mode == 'NONE':
@@ -1734,7 +1809,7 @@ def _bake_all():
             shader_line = f"    shader:  {member_ctx.describe()}"
             print(shader_line)
             lines.append(shader_line.strip())
-            for note_key in ('sss_note', 'aniso_note'):
+            for note_key in ('sss_note', 'aniso_note', 'prm_r_note'):
                 note = channels.get(note_key)
                 if note:
                     print(f"    ! {note}")

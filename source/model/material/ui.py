@@ -4,6 +4,38 @@ from bpy.types import Panel, Menu
 from . import operators
 from .sub_matl_data import SUB_PG_sub_matl_data
  
+def panel_material(context):
+    """The material whose data the parameter panels should show.
+
+    Normally the active material. When "Edit Side-Loaded Data" is on and the
+    active material has a side-loaded twin, the twin instead - because a twin
+    is assigned to no mesh, so it can never be picked in the material slot
+    list, and without this there is no way to see or edit the data that is
+    actually going to be exported. Applying a preset to a side-loaded copy and
+    then finding the panel still showing the live material's parameters looks
+    exactly like the preset failed to apply.
+    """
+    obj = getattr(context, 'object', None)
+    if obj is None:
+        return None
+    material = obj.active_material
+    if material is None:
+        return None
+
+    scene_props = getattr(context.scene, 'sub_scene_properties', None)
+    if scene_props is None or not getattr(scene_props, 'matl_panel_edit_side_loaded', False):
+        return material
+
+    from .create_matl_from_blender_materials import get_side_loaded_twin
+    twin = get_side_loaded_twin(material)
+    return twin if twin is not None else material
+
+
+def panel_sub_matl_data(context):
+    material = panel_material(context)
+    return material.sub_matl_data if material is not None else None
+
+
 class MaterialPanel(Panel):
     '''
     This class is made to avoid repeating these lines in every single panel
@@ -22,7 +54,7 @@ class MaterialPanel(Panel):
             return False
         if context.object.active_material.sub_matl_data is None:
             return False
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         if sub_matl_data.shader_label == "":
             return False 
         return True
@@ -42,7 +74,7 @@ class SUB_PT_matl_data_master(MaterialPanel):
         return True
     
     def draw(self, context):
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         layout = self.layout
         if sub_matl_data.shader_label == "":
             box = layout.box()
@@ -113,14 +145,20 @@ class SUB_PT_matl_data_master(MaterialPanel):
             twin = get_side_loaded_twin(material)
             if twin is not None:
                 note = layout.box()
-                note.label(text=f'Has a side-loaded twin: "{twin.name}"', icon='DUPLICATE')
-                twin_data = getattr(twin, 'sub_matl_data', None)
-                if twin_data is not None and twin_data.shader_label:
-                    note.label(text=f'Twin shader: {twin_data.shader_label}')
+                editing_twin = scene_props.matl_panel_edit_side_loaded
+                note.label(
+                    text=('Showing the side-loaded twin below.' if editing_twin
+                          else f'Has a side-loaded twin: "{twin.name}"'),
+                    icon='DUPLICATE')
+                if not editing_twin:
+                    twin_data = getattr(twin, 'sub_matl_data', None)
+                    if twin_data is not None and twin_data.shader_label:
+                        note.label(text=f'Twin shader: {twin_data.shader_label}')
                 if scene_props.export_prefer_sideloaded_materials:
                     note.label(text='Export uses the twin, not this material.', icon='EXPORT')
                 else:
                     note.label(text='Export uses THIS material - the twin is idle.')
+                note.prop(scene_props, 'matl_panel_edit_side_loaded', toggle=True)
                 note.prop(scene_props, 'export_prefer_sideloaded_materials')
 
         row = layout.row(align=True)
@@ -154,7 +192,7 @@ class SUB_PT_matl_data_bools(MaterialPanel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         layout = self.layout
         box = layout.box()
         for matl_bool in sub_matl_data.bools:
@@ -172,7 +210,7 @@ class SUB_PT_matl_data_floats(MaterialPanel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         layout = self.layout
         box = layout.box()
         for matl_float in sub_matl_data.floats:
@@ -189,7 +227,7 @@ class SUB_PT_matl_data_vectors(MaterialPanel):
 
     def draw(self, context):
         layout = self.layout
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         box = layout.box()
         for vector in sub_matl_data.vectors:
             row = box.row()
@@ -209,7 +247,7 @@ class SUB_PT_matl_data_textures(MaterialPanel):
     bl_parent_id = SUB_PT_matl_data_master.bl_idname
 
     def draw(self, context):
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         layout = self.layout
 
         box = layout.box()
@@ -232,7 +270,7 @@ class SUB_PT_matl_data_samplers(MaterialPanel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         layout = self.layout
 
         for sampler in sub_matl_data.samplers:
@@ -269,7 +307,7 @@ class SUB_PT_matl_data_blend_states(MaterialPanel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         layout = self.layout
 
         for blend_state in sub_matl_data.blend_states:
@@ -293,7 +331,7 @@ class SUB_PT_matl_data_rasterizer_states(MaterialPanel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         layout = self.layout
 
         for rasterizer_state in sub_matl_data.rasterizer_states:
@@ -316,7 +354,7 @@ class SUB_PT_matl_data_linked_materials(MaterialPanel):
     bl_options = {'DEFAULT_CLOSED'}
     
     def draw(self, context):
-        sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
+        sub_matl_data: SUB_PG_sub_matl_data = panel_sub_matl_data(context)
         layout = self.layout
 
         box = layout.box()
