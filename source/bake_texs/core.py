@@ -174,8 +174,26 @@ SKIP_EMPTY_MATERIALS = True
 # ---- Sampling ---------------------------------------------------------------
 EMIT_SAMPLES_FLAT       = 1
 EMIT_SAMPLES_STOCHASTIC = 256
+# AO is genuinely ray-bound - measured against a 1024-sample reference:
+#   32spp  1.4s  5.03/255 error      128spp  3.8s  2.07/255
+#   64spp  2.2s  3.17/255            256spp  6.4s  1.30/255
+# Roughly linear in both time and accuracy, so there is no free lunch here;
+# drop it only if you want the speed and can live with the error. Adaptive
+# sampling made no measurable difference to AO either way.
 AO_SAMPLES              = 256
 BAKE_ADAPTIVE_SAMPLING  = False
+
+# Skip the tangent-space normal bake when nothing in the material can perturb
+# the shading normal (see normal_bake_would_be_flat). Each bake call costs
+# ~0.5s of fixed setup before tracing a ray, so this is worth real time on a
+# character whose materials carry no normal detail.
+#
+# Not quite free: geometry can still bake a hair off flat where a UV seam
+# flips the tangent basis. Measured on this character's hair - 14 texels out
+# of 262,144 (0.005%) came back 129 instead of 128 in the red channel. Every
+# other map was bit-identical. Set this False if you want the bake to be
+# exact rather than 1/255 off on a handful of seam texels.
+SKIP_FLAT_NORMAL_BAKE   = True
 BAKE_ADAPTIVE_THRESHOLD = 0.002
 
 # ---- Debug --------------------------------------------------------------
@@ -1521,7 +1539,7 @@ def _bake_all():
                 else:
                     img_norm = create_or_get_image(f"{mat_key}__normBake", BAKE_SIZE)
                     set_colorspace(img_norm, "Non-Color")
-                    if normal_bake_would_be_flat(materials, objects):
+                    if SKIP_FLAT_NORMAL_BAKE and normal_bake_would_be_flat(materials, objects):
                         # Nothing drives a Normal input and no modifier adds
                         # surface detail, so a tangent-space bake of these
                         # objects onto themselves can only produce flat
