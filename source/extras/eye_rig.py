@@ -56,6 +56,129 @@ CV31_DEFAULT = (1.0, 1.0, 0.0, 0.0)
 EYE_CTRL_BONE = 'BL_EyeLook'
 
 
+def eye_meshes(arma):
+    """Meshes whose first material is an eye - used to locate the face."""
+    from ..model.export_model import trim_name
+    found = []
+    for child in arma.children:
+        if child.type != 'MESH' or not child.material_slots:
+            continue
+        mat = child.material_slots[0].material
+        if mat is not None and trim_name(mat.name) in EYE_TRACKS:
+            found.append(child)
+    return found
+
+
+def face_forward(arma, anchor_bone):
+    """Which way the character faces, in armature space, measured not assumed.
+
+    Smash rigs face -Y, but rather than hardcode that this compares the eye
+    meshes' centre against the head bone. Measured on this rig the head sits
+    at Y=-0.035 and the eyes at Y=-0.96, so forward really is -Y; an earlier
+    version of this assumed +Y and planted the control behind the head.
+    Falls back to -Y only when there is nothing to measure from.
+    """
+    from mathutils import Vector
+    meshes = eye_meshes(arma)
+    if meshes and anchor_bone is not None:
+        centre = Vector((0.0, 0.0, 0.0))
+        n = 0
+        for mesh in meshes:
+            local = arma.matrix_world.inverted() @ mesh.matrix_world
+            for corner in mesh.bound_box:
+                centre += local @ Vector(corner)
+                n += 1
+        if n:
+            centre /= n
+            direction = centre - anchor_bone.head
+            direction.z = 0.0            # horizontal only; keep the control at eye height
+            if direction.length > 1e-6:
+                return direction.normalized()
+    return Vector((0.0, -1.0, 0.0))
+
+
+def control_offset_armature_space(pbone):
+    """The animator's push on the control, as an armature-space vector.
+
+    pbone.location is expressed in the BONE's own axes, which for a Smash head
+    chain are nothing like world XYZ - Head's local X is world +Y and its
+    local Z is world +X. Reading .x/.z straight off it, as an earlier version
+    did, mapped 'move right' onto the wrong look direction entirely. Rotating
+    by the bone's rest matrix puts it back into armature space, where X really
+    is left/right and Z really is up/down whatever the bone's roll.
+    """
+    return pbone.bone.matrix_local.to_3x3() @ pbone.location
+
+
+def look_values_from_control(pbone, sensitivity, clamp):
+    """(left_z, right_z, shared_w) CV31 components for the control's pose."""
+    offset = control_offset_armature_space(pbone)
+    dx = max(-clamp, min(clamp, offset.x * sensitivity))
+    dz = max(-clamp, min(clamp, offset.z * sensitivity))
+    # X is mirrored between the eyes, matching the existing CV31 mouse modal.
+    return -dx, dx, dz
+
+
+def apply_look_to_tracks(arma, sensitivity, clamp):
+    """Push the control bone's pose into CV31. Returns True if anything moved."""
+    pbone = arma.pose.bones.get(EYE_CTRL_BONE)
+    if pbone is None:
+        return False
+    sap = arma.data.sub_anim_properties
+    left_z, right_z, shared_w = look_values_from_control(pbone, sensitivity, clamp)
+    changed = False
+    for name, z in (('EyeL', left_z), ('EyeR', right_z)):
+        track = sap.mat_tracks.get(name)
+        prop = track.properties.get(CV31) if track else None
+        if prop is None:
+            continue
+        if abs(prop.custom_vector[2] - z) > 1e-7 or abs(prop.custom_vector[3] - shared_w) > 1e-7:
+            prop.custom_vector[2] = z
+            prop.custom_vector[3] = shared_w
+            changed = True
+    return changed
+
+
+# Live preview. Writing CV31 from inside a depsgraph handler retriggers the
+# depsgraph, so this reentrancy guard is what stops it looping forever, and
+# apply_look_to_tracks only writes when a value actually differs.
+_live_sync_running = False
+
+
+@bpy.app.handlers.persistent
+def _eye_look_live_handler(scene, depsgraph=None):
+    global _live_sync_running
+    if _live_sync_running:
+        return
+    ssp = getattr(scene, 'sub_scene_properties', None)
+    if ssp is None or not getattr(ssp, 'eye_look_live_preview', False):
+        return
+    _live_sync_running = True
+    try:
+        for obj in scene.objects:
+            if obj.type != 'ARMATURE' or EYE_CTRL_BONE not in obj.pose.bones:
+                continue
+            apply_look_to_tracks(obj, ssp.eye_look_sensitivity, ssp.eye_look_clamp)
+    except Exception as ex:
+        print(f"[eye look live] disabled after error: {ex}")
+        try:
+            scene.sub_scene_properties.eye_look_live_preview = False
+        except Exception:
+            pass
+    finally:
+        _live_sync_running = False
+
+
+def _register_live_handler():
+    if _eye_look_live_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_eye_look_live_handler)
+
+
+def _unregister_live_handler():
+    if _eye_look_live_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_eye_look_live_handler)
+
+
 def get_or_create_track(sap, name):
     track = sap.mat_tracks.get(name)
     if track is None:
@@ -183,10 +306,21 @@ class SUB_OT_add_eye_look_control(Operator):
                 if base is None:
                     self.report({'ERROR'}, "Armature has no bones to anchor the control to")
                     return {'CANCELLED'}
+            forward = face_forward(arma, anchor)
+            # Sit at eye height rather than the head bone's root, so the
+            # control lands in front of the face instead of the forehead.
+            eyes = eye_meshes(arma)
+            if eyes:
+                from mathutils import Vector
+                zs = []
+                for mesh in eyes:
+                    local = arma.matrix_world.inverted() @ mesh.matrix_world
+                    zs += [(local @ Vector(c)).z for c in mesh.bound_box]
+                base.z = sum(zs) / len(zs)
+            offset = forward * (self.distance * size)
             ctrl = ebs.new(EYE_CTRL_BONE)
-            # +Y is forward for Smash rigs (the face looks down +Y in rest).
-            ctrl.head = (base.x, base.y + self.distance * size, base.z)
-            ctrl.tail = (base.x, base.y + self.distance * size + size, base.z)
+            ctrl.head = base + offset
+            ctrl.tail = base + offset + forward * size
             ctrl.roll = 0.0
             ctrl.use_deform = False
             if anchor is not None:
@@ -257,20 +391,20 @@ class SUB_OT_bake_eye_look(Operator):
         pbone = arma.pose.bones[EYE_CTRL_BONE]
 
         baked = 0
+        # Live preview writes CV31 on every depsgraph update; leaving it on
+        # during a bake would fight the frame-by-frame values being inserted.
+        ssp = context.scene.sub_scene_properties
+        prev_live = ssp.eye_look_live_preview
+        ssp.eye_look_live_preview = False
         try:
             for frame in range(start, end + 1):
                 scene.frame_set(frame)
-                # Location relative to the bone's own rest position, so a
-                # control sitting still writes the neutral (0, 0) look.
-                offset = pbone.matrix_basis.translation
-                dx = max(-self.clamp, min(self.clamp, offset.x * self.sensitivity))
-                dz = max(-self.clamp, min(self.clamp, offset.z * self.sensitivity))
+                left_z, right_z, shared_w = look_values_from_control(
+                    pbone, self.sensitivity, self.clamp)
                 for name, (track_index, track, prop_index) in tracks.items():
                     prop = track.properties[prop_index]
-                    # X is mirrored between the eyes - the same convention the
-                    # existing CV31 modal uses (left subtracts, right adds).
-                    prop.custom_vector[2] = -dx if name == 'EyeL' else dx
-                    prop.custom_vector[3] = dz
+                    prop.custom_vector[2] = left_z if name == 'EyeL' else right_z
+                    prop.custom_vector[3] = shared_w
                     arma.data.keyframe_insert(
                         data_path=(f'sub_anim_properties.mat_tracks[{track_index}]'
                                    f'.properties[{prop_index}].custom_vector'),
@@ -279,6 +413,7 @@ class SUB_OT_bake_eye_look(Operator):
                 baked += 1
         finally:
             scene.frame_set(original_frame)
+            ssp.eye_look_live_preview = prev_live
 
         self.report({'INFO'},
                     f"Baked {baked} frame(s) of eye look into {', '.join(sorted(tracks))} "
@@ -299,9 +434,11 @@ def register():
             bpy.utils.register_class(cls)
         except ValueError:
             pass
+    _register_live_handler()
 
 
 def unregister():
+    _unregister_live_handler()
     for cls in reversed(classes):
         try:
             bpy.utils.unregister_class(cls)

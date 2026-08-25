@@ -532,6 +532,22 @@ class SubSceneProperties(PropertyGroup):
                     "'SHair_R=SHair_L, Tail_R=Tail_L'. Applied before the built-in defaults",
         default="",
     )
+    eye_look_live_preview: BoolProperty(
+        name="Live Preview",
+        description="Update the eyes in the viewport as you move the control bone. "
+                    "Preview only - Bake still has to run to create the keyframes export reads",
+        default=True,
+    )
+    eye_look_sensitivity: FloatProperty(
+        name="Sensitivity",
+        description="UV units the eye moves per Blender unit the control moves",
+        default=0.05, soft_min=0.0, soft_max=1.0,
+    )
+    eye_look_clamp: FloatProperty(
+        name="Clamp",
+        description="Largest UV offset allowed, so the pupil can't slide off the eye",
+        default=0.5, min=0.0,
+    )
     bone_sym_roll_preset: EnumProperty(
         name="Roll Preset",
         description="Which vanilla fighter's reference bone rolls to apply",
