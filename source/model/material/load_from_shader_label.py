@@ -9,7 +9,7 @@ from .sub_matl_data import *
 from .matl_params import vector_param_id_values, param_id_to_ui_name, vector_param_id_value_to_default_value
 from ..export_model import default_texture
 from .matl_params import *
-from .create_blender_materials_from_matl import setup_blender_material_settings, setup_blender_material_node_tree, get_shader_db_file_path, get_vertex_attributes
+from .create_blender_materials_from_matl import setup_blender_material_settings, setup_blender_material_node_tree, get_shader_db_file_path, get_vertex_attributes, create_default_textures
 
 """
 def get_shader_db_file_path():
@@ -74,6 +74,16 @@ def create_sub_matl_data_from_shader_label(material: bpy.types.Material, shader_
         sub_matl_data.rasterizer_states,
     )
     needed_param_ids: set[int] = get_material_parameter_ids(shader_label)
+
+    # The placeholder images the new texture slots point at only exist in a
+    # .blend that has imported a model, because that is the only thing that
+    # used to call this. Setting a material up from a shader label or a preset
+    # can happen in a file that never imported anything, and then every
+    # bpy.data.images.get() below returns None and the slots come out empty -
+    # which export then has to paper over with default texture paths, and which
+    # crashed .nutexb export outright before it learned to skip them. Creating
+    # them up front costs nothing when they already exist.
+    create_default_textures()
     # Remove Un-Needed Attributes
     for collection in collections:
         prop_names_to_remove: set[str] = set(name for name,prop in collection.items() if prop.param_id_value not in needed_param_ids)
@@ -149,6 +159,20 @@ def create_sub_matl_data_from_shader_label(material: bpy.types.Material, shader_
             new_rasterizer_state.ui_name = param_id_to_ui_name[param_id.value]
             new_rasterizer_state.param_id_name = param_id.name
             new_rasterizer_state.param_id_value = param_id.value
+
+    # Repair texture slots that already existed but have no image. The loop
+    # above only touches params the material was MISSING, so a slot left empty
+    # by an earlier run - before create_default_textures() was called up front -
+    # would stay empty no matter how many times a preset was re-applied. Since
+    # re-applying the preset is the obvious thing to try when a material looks
+    # wrong, it should actually fix it.
+    for sub_matl_texture in sub_matl_data.textures:
+        if sub_matl_texture.image is not None:
+            continue
+        placeholder_name = default_texture(sub_matl_texture.param_id_name)
+        placeholder = bpy.data.images.get(placeholder_name)
+        if placeholder is not None:
+            sub_matl_texture.image = placeholder
 
     # Refresh needed vertex attributes
     sub_matl_data.vertex_attributes.clear()

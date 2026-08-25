@@ -167,6 +167,17 @@ class SUB_OP_model_exporter(Operator):
         description="Export .NUTEXB",
         default=True,
     )
+    include_wol_matls: BoolProperty(
+        name="Export World of Light Materials",
+        description=(
+            "Also write light_model.numatb and dark_model.numatb, the red and "
+            "purple puppet clone materials used in World of Light. Derived "
+            "automatically from the materials being exported - every fighter in "
+            "the game ships these, and clones show up with missing materials "
+            "without them"
+        ),
+        default=True,
+    )
 
     linked_nusktb_settings: EnumProperty(
         name="Bone Linkage",
@@ -252,7 +263,7 @@ class SUB_OP_model_exporter(Operator):
             export_model(self, context, self.directory, self.include_numdlb, self.include_numshb, self.include_numshexb,
                     self.include_nusktb, self.include_numatb, self.include_nuhlpb, self.include_nutexb, self.linked_nusktb_settings,
                     self.optimize_mesh_weights_to_parent_bone, self.armature_position, self.apply_modifiers,
-                    self.split_shape_keys, self.ignore_underscore_meshes)
+                    self.split_shape_keys, self.ignore_underscore_meshes, self.include_wol_matls)
         if self.use_debug_timer:
             stats = pstats.Stats(pr)
             stats.sort_stats(pstats.SortKey.TIME)
@@ -348,7 +359,8 @@ def weights_to_parent_bones(ssbh_mesh_data: ssbh_data_py.mesh_data.MeshData, ssb
 
 def export_model(operator: bpy.types.Operator, context, directory, include_numdlb, include_numshb, include_numshexb, include_nusktb,
                 include_numatb, include_nuhlpb, include_nutexb, linked_nusktb_settings, optimize_mesh_weights:str, armature_position: str,
-                apply_modifiers: str, split_shape_keys: str, ignore_underscore_meshes:str):
+                apply_modifiers: str, split_shape_keys: str, ignore_underscore_meshes:str,
+                include_wol_matls: bool = True):
     # Prepare the scene for export and find the meshes to export.
     arma: bpy.types.Object = context.scene.sub_scene_properties.model_export_arma
     context.view_layer.objects.active = arma
@@ -517,6 +529,27 @@ def export_model(operator: bpy.types.Operator, context, directory, include_numdl
                 ssbh_matl_data.save(path)
             except Exception as e:
                 operator.report({'ERROR'}, f'Failed to save .numatb, Error="{e}" ; Traceback=\n{traceback.format_exc()}')
+
+            # The World of Light clone materials. Derived from the matl just
+            # written, so they always stay in step with it - and written after
+            # it, so a failure here cannot cost you the real model.numatb.
+            if include_wol_matls:
+                from .material import world_of_light
+                for variant in world_of_light.VARIANTS:
+                    file_name = world_of_light.VARIANT_FILE_NAMES[variant]
+                    try:
+                        clone_matl, converted, unchanged = world_of_light.create_wol_matl(
+                            operator, ssbh_matl_data, variant)
+                        clone_matl.save(str(folder.joinpath(file_name)))
+                        operator.report(
+                            {'INFO'},
+                            f'Wrote {file_name}: {converted} material(s) converted to the '
+                            f'{variant} clone shader, {unchanged} left as-is.')
+                    except Exception as e:
+                        operator.report(
+                            {'WARNING'},
+                            f'Failed to save {file_name}, Error="{e}" ; '
+                            f'Traceback=\n{traceback.format_exc()}')
     
     # Create adjb, if needed
     if include_numdlb and include_numshb and include_numatb:
