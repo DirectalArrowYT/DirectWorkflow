@@ -12,6 +12,7 @@ from subprocess import CalledProcessError
 from ....dependencies import ssbh_data_py
 from .matl_params import texture_param_name_to_socket_params, vec4_param_name_to_socket_params
 from .sub_matl_data import *
+from . import shader_info
 from .texture.convert_nutexb_to_png import convert_nutexb_to_png
 from .texture.default_textures import generated_default_texture_name_value
 
@@ -141,26 +142,17 @@ def import_material_images(operator: bpy.types.Operator, ssbh_matl: ssbh_data_py
 
     return texture_name_to_image_dict
 
-def get_discard_shaders():
-    global discard_shaders
-    try:
-        discard_shaders
-    except NameError:
-        this_file_path = Path(__file__)
-        discard_shaders_file = this_file_path.parent.joinpath('shader_file').joinpath('shaders_discard_v13.0.1.txt').resolve()
-        with open(discard_shaders_file, 'r') as f:
-            discard_shaders = {line.strip() for line in f.readlines()}
-    return discard_shaders
-
 def get_blend_method(shader_label: str, blend_states: list[SUB_PG_matl_blend_state]):
     # TODO: Access blenders internal enum instead? Or use a cleaner enum method
     BlendMethod = Enum('BlendMethod', 'OPAQUE HASHED CLIP BLEND')
     if len(blend_states) != 1: # no vanilla ultimate shader has more than one blend state
         return BlendMethod.OPAQUE.name
-    
-    discard_shaders = get_discard_shaders()
-    # Trims the trailing '_OPAQUE', '_SORT', etc.
-    if shader_label[:len('SFX_PBS_0000000000000080')] in discard_shaders:
+
+    # Was a lookup in shaders_discard_v13.0.1.txt, which listed the 676 shaders
+    # that alpha test. That file was one boolean column of the shader info dump
+    # this now reads instead - verified to give the identical 676 shaders - and
+    # the dump carries the rest of the per-shader data besides.
+    if shader_info.is_discard(shader_label):
         return BlendMethod.CLIP.name
     
     blend_state_0 = blend_states[0]

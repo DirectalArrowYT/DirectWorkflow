@@ -59,6 +59,10 @@ class SUB_PG_bake_texs_settings(PropertyGroup):
     write_col: BoolProperty(name='COL', default=True)
     write_nor: BoolProperty(name='NOR', default=True)
     write_prm: BoolProperty(name='PRM', default=True)
+    write_emi: BoolProperty(
+        name='EMI', default=True,
+        description="Bake an emissive map from the material's Emission Color",
+    )
     write_component_debug_maps: BoolProperty(
         name='Write Component Debug Maps',
         default=False,
@@ -73,6 +77,29 @@ class SUB_PG_bake_texs_settings(PropertyGroup):
             ('CONST', 'Flat', 'Always use a flat PRM.b value'),
         ),
         default='AUTO',
+    )
+
+    emi_mode: EnumProperty(
+        name='EMI Mode',
+        items=(
+            ('AUTO', 'Auto',
+             'Write an emissive map only when the material emits AND its Smash '
+             'shader actually reads Texture5'),
+            ('ALWAYS', 'Always',
+             'Write one whenever the material emits, even if the current shader '
+             'has no Texture5 slot to put it in'),
+            ('NEVER', 'Never', 'Never write an emissive map'),
+        ),
+        default='AUTO',
+    )
+    emi_normalize_to_cv3: BoolProperty(
+        name='Normalize To CustomVector3',
+        default=True,
+        description=(
+            "An Emission Strength above 1 does not fit in an 8-bit texture. "
+            "Divide the map down to fit and report the CustomVector3 value "
+            "that restores it, instead of clipping the highlights"
+        ),
     )
 
     compile_nutexb: BoolProperty(

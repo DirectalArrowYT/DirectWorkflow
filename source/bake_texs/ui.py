@@ -60,8 +60,15 @@ class SUB_PT_bake_texs_channels(Panel):
         row.prop(props, 'write_col', toggle=True)
         row.prop(props, 'write_nor', toggle=True)
         row.prop(props, 'write_prm', toggle=True)
+        row.prop(props, 'write_emi', toggle=True)
 
         layout.prop(props, 'prm_ao_mode')
+
+        emi = layout.column(align=True)
+        emi.enabled = props.write_emi
+        emi.prop(props, 'emi_mode')
+        emi.prop(props, 'emi_normalize_to_cv3')
+
         layout.prop(props, 'write_component_debug_maps')
 
 

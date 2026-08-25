@@ -6,6 +6,7 @@ from subprocess import run, CalledProcessError
 from .convert_nutexb_to_png import get_ultimate_tex_path
 from ..create_matl_from_blender_materials import has_sub_matl_data, get_linked_materials, resolve_material_data_source
 from .default_textures import generated_default_texture_name_value
+from .. import validate
 from ....material_grouping import group_key_for
 from ...export_model import would_trimmed_names_be_unique, get_problematic_names, trim_name
 
@@ -21,7 +22,13 @@ from ...export_model import would_trimmed_names_be_unique, get_problematic_names
 # the format primarily from which texture param the image actually is - a
 # deterministic Smash Ultimate convention, not per-image Blender state -
 # falling back to the image's own colorspace only for slots outside this set.
-LINEAR_TEXTURE_PARAM_NAMES = {'Texture4', 'Texture6'}
+#
+# Texture2/7 (cube maps) and Texture16 (ink normal) are data slots too, and
+# used to be missing from this set - the same silent mis-format described above
+# for COL was possible for them in reverse. The list now comes from validate.py
+# so that the exporter and the material linter cannot disagree about which
+# slots hold colour; it matches expects_srgb() in SSBH Editor's validation.rs.
+LINEAR_TEXTURE_PARAM_NAMES = validate.NON_COLOR_TEXTURE_PARAMS
 
 def export_nutexb_from_blender_materials(operator: bpy.types.Operator, materials: set[bpy.types.Material], export_dir: Path):
     # image -> every param_id_name (Texture0, Texture4, ...) it's plugged into,

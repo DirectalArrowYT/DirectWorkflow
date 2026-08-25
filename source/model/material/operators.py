@@ -1,14 +1,373 @@
 import bpy
 from bpy.types import Operator
-from bpy.props import StringProperty
-from .load_from_shader_label import is_valid_shader_label, create_sub_matl_data_from_shader_label
+from bpy.props import StringProperty, EnumProperty, BoolProperty
+from .load_from_shader_label import (
+    is_valid_shader_label, create_sub_matl_data_from_shader_label, apply_material_preset,
+)
+from . import presets as material_presets
+from . import shader_info
+from . import validate
+
+
+def _active_smash_material(context):
+    """The active material, if it is a set-up Smash material."""
+    obj = getattr(context, 'object', None)
+    if obj is None or obj.type != 'MESH':
+        return None
+    material = obj.active_material
+    if material is None:
+        return None
+    sub_matl_data = getattr(material, 'sub_matl_data', None)
+    if sub_matl_data is None or not sub_matl_data.shader_label:
+        return None
+    return material
+
 
 class SUB_OP_change_render_pass(Operator):
+    """Move a material between render passes without touching anything else"""
     bl_idname = 'sub.change_render_pass'
     bl_label = 'Change Render Pass'
+    bl_description = (
+        'Switch which render pass this material draws in. Same shader program '
+        'and same parameter values - only the pass tag on the end of the '
+        'shader label changes'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    render_pass: EnumProperty(
+        name='Render Pass',
+        description='Which pass this material draws in',
+        items=(
+            ('_opaque', 'Opaque',
+             'Drawn first, before any transparency. Correct for solid surfaces'),
+            ('_far', 'Far',
+             'Alpha blending pass, drawn before _sort. For transparent geometry '
+             'meant to sit behind other transparent geometry'),
+            ('_sort', 'Sort',
+             'Alpha blending pass, drawn after _far. The usual choice for '
+             'transparent surfaces'),
+            ('_near', 'Near',
+             'Drawn after the bloom pass, so this material never contributes to '
+             'bloom. Use for bright surfaces that should not glow'),
+        ),
+        default='_opaque',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _active_smash_material(context) is not None
 
     def execute(self, context):
-        return {'FINISHED'} 
+        material = _active_smash_material(context)
+        sub_matl_data = material.sub_matl_data
+        new_label = shader_info.with_render_pass(sub_matl_data.shader_label, self.render_pass)
+        sub_matl_data.set_shader_label(new_label)
+
+        from .create_blender_materials_from_matl import setup_blender_material_settings
+        setup_blender_material_settings(material)
+
+        self.report({'INFO'}, f'{material.name} now renders in the {self.render_pass[1:]} pass.')
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        material = _active_smash_material(context)
+        current = shader_info.render_pass_of(material.sub_matl_data.shader_label)
+        if current:
+            self.render_pass = current
+        return context.window_manager.invoke_props_dialog(self)
+
+
+class SUB_OP_apply_material_preset(Operator):
+    """Set this material up as a ready-made Smash material"""
+    bl_idname = 'sub.apply_material_preset'
+    bl_label = 'Apply Material Preset'
+    bl_description = (
+        'Set the shader and parameter values from a ready-made preset. Your '
+        'assigned textures are kept - only the shader and its parameters change'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preset_name: EnumProperty(
+        name='Preset',
+        description='Which material setup to apply',
+        items=lambda self, context: material_presets.enum_items(),
+    )
+    apply_to_selected: BoolProperty(
+        name='All Selected Objects',
+        description=(
+            'Apply to every material on every selected mesh, instead of just '
+            'the active material'
+        ),
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = getattr(context, 'object', None)
+        return obj is not None and obj.type == 'MESH' and obj.active_material is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, 'preset_name')
+
+        preset = material_presets.get(self.preset_name)
+        if preset is not None:
+            box = layout.box()
+            box.label(text=preset.description, icon='INFO')
+
+            textures = sorted(preset.textures,
+                              key=lambda t: int(t.replace('Texture', '')))
+            if textures:
+                box.label(text='Uses: ' + ', '.join(textures), icon='TEXTURE')
+
+            uses = preset.fighter_usage
+            if uses:
+                box.label(text=f'{uses} vanilla fighter materials use this shader.')
+
+            if preset.notes:
+                note_box = layout.box()
+                note_box.label(text='Note', icon='QUESTION')
+                for line in _wrap(preset.notes, 62):
+                    note_box.label(text=line)
+
+        layout.prop(self, 'apply_to_selected')
+
+    def execute(self, context):
+        preset = material_presets.get(self.preset_name)
+        if preset is None:
+            self.report({'ERROR'}, f'Unknown preset "{self.preset_name}".')
+            return {'CANCELLED'}
+
+        if self.apply_to_selected:
+            materials = []
+            for obj in context.selected_objects:
+                if obj.type != 'MESH':
+                    continue
+                for slot in obj.material_slots:
+                    if slot.material is not None and slot.material not in materials:
+                        materials.append(slot.material)
+        else:
+            materials = [context.object.active_material]
+
+        if not materials:
+            self.report({'WARNING'}, 'No materials to apply the preset to.')
+            return {'CANCELLED'}
+
+        notes = []
+        for material in materials:
+            notes.extend(apply_material_preset(material, preset))
+
+        message = f'Applied "{preset.name}" to {len(materials)} material(s).'
+        if notes:
+            self.report({'WARNING'}, message + ' ' + '; '.join(dict.fromkeys(notes)))
+        else:
+            self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=460)
+
+
+def _wrap(text, width):
+    """Break a string into lines that fit a Blender dialog."""
+    words = text.split()
+    lines = []
+    current = ''
+    for word in words:
+        candidate = f'{current} {word}'.strip()
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+class SUB_OP_find_shader_label(Operator):
+    """Search the shader database instead of typing a label by hand"""
+    bl_idname = 'sub.find_shader_label'
+    bl_label = 'Find Shader'
+    bl_description = (
+        'Search all 4008 shader programs for one matching the features you '
+        'need, ranked by how heavily vanilla fighters use it'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    use_col: BoolProperty(name='Col Map', default=True,
+                          description='Shader must read Texture0, the base colour map')
+    use_nor: BoolProperty(name='Nor Map', default=True,
+                          description='Shader must read Texture4, the normal map')
+    use_prm: BoolProperty(name='PRM Map', default=True,
+                          description='Shader must read Texture6, the PRM map')
+    use_emi: BoolProperty(name='Emi Map', default=False,
+                          description='Shader must read Texture5, the emissive map')
+
+    lighting: EnumProperty(
+        name='Lighting',
+        items=(
+            ('ANY', 'Any', ''),
+            ('LIT', 'Lit', 'Shaded by stage lighting'),
+            ('SHADELESS', 'Shadeless', 'Ignores stage lighting entirely'),
+        ),
+        default='LIT',
+    )
+    transparency: EnumProperty(
+        name='Transparency',
+        items=(
+            ('ANY', 'Any', ''),
+            ('OPAQUE', 'Opaque', 'No alpha testing'),
+            ('ALPHA_TEST', 'Alpha Test', 'Hard cutout transparency'),
+        ),
+        default='OPAQUE',
+    )
+    exact: BoolProperty(
+        name='Exact Texture Set',
+        default=True,
+        description=(
+            'Only shaders using exactly these maps. Off also returns shaders '
+            'that read additional maps'
+        ),
+    )
+
+    result: EnumProperty(
+        name='Match',
+        description='Shader programs matching the search',
+        items=lambda self, context: self._results(context),
+    )
+
+    def _search(self):
+        textures = []
+        excluded = []
+        for enabled, param in ((self.use_col, 'Texture0'), (self.use_nor, 'Texture4'),
+                               (self.use_prm, 'Texture6'), (self.use_emi, 'Texture5')):
+            (textures if enabled else excluded).append(param)
+        # Only exclude the emissive maps - excluding col/nor/prm when unticked
+        # would be surprising, since "I did not ask for a PRM map" rarely means
+        # "and it must not have one".
+        exclude = ['Texture5', 'Texture14'] if not self.use_emi else []
+
+        return shader_info.find_shader_labels(
+            textures=textures,
+            exclude_textures=exclude,
+            lighting={'LIT': True, 'SHADELESS': False}.get(self.lighting),
+            discard={'OPAQUE': False, 'ALPHA_TEST': True}.get(self.transparency),
+            exact_textures=self.exact,
+            limit=20,
+        )
+
+    def _results(self, context):
+        labels = self._search()
+        if not labels:
+            return [('NONE', 'No matching shader', '')]
+        items = []
+        for label in labels:
+            uses = shader_info.fighter_usage_count(label)
+            items.append((label, f'{label}  ({uses} uses)', shader_info.describe(label)))
+        return items
+
+    @classmethod
+    def poll(cls, context):
+        return _active_smash_material(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+
+        box = layout.box()
+        box.label(text='Maps this material needs', icon='TEXTURE')
+        row = box.row(align=True)
+        row.prop(self, 'use_col', toggle=True)
+        row.prop(self, 'use_nor', toggle=True)
+        row.prop(self, 'use_prm', toggle=True)
+        row.prop(self, 'use_emi', toggle=True)
+        box.prop(self, 'exact')
+
+        row = layout.row(align=True)
+        row.prop(self, 'lighting', expand=True)
+        row = layout.row(align=True)
+        row.prop(self, 'transparency', expand=True)
+
+        layout.separator()
+        layout.prop(self, 'result')
+
+        label = self.result
+        if label and label != 'NONE':
+            info_box = layout.box()
+            for line in _wrap(shader_info.describe(label), 62):
+                info_box.label(text=line)
+
+    def execute(self, context):
+        if not self.result or self.result == 'NONE':
+            self.report({'WARNING'}, 'No shader selected.')
+            return {'CANCELLED'}
+
+        material = _active_smash_material(context)
+        # Keep the pass the material is already in; the search matches on
+        # shader features, which are the same across all four passes.
+        current_pass = shader_info.render_pass_of(material.sub_matl_data.shader_label) or '_opaque'
+        create_sub_matl_data_from_shader_label(material, self.result + current_pass)
+        self.report({'INFO'}, f'{material.name} now uses {self.result}{current_pass}.')
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+
+class SUB_OP_validate_materials(Operator):
+    """Check materials for problems that only show up in game"""
+    bl_idname = 'sub.validate_materials'
+    bl_label = 'Check Materials'
+    bl_description = (
+        'Look for material problems that export will happily write but the '
+        'game renders wrong - sRGB normal maps, missing vertex attributes, '
+        'double-applied alpha, and so on'
+    )
+    bl_options = {'REGISTER'}
+
+    whole_file: BoolProperty(
+        name='Every Mesh In The File',
+        default=False,
+        description='Check every mesh, not just the selected ones',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.selected_objects) or bool(bpy.data.objects)
+
+    def execute(self, context):
+        objects = bpy.data.objects if self.whole_file else context.selected_objects
+        materials_to_meshes = validate.collect_materials(objects)
+
+        if not materials_to_meshes:
+            self.report({'WARNING'}, 'No Smash materials found to check.')
+            return {'CANCELLED'}
+
+        issues = validate.check_materials(materials_to_meshes)
+        errors, warnings, infos = validate.counts(issues)
+
+        print('\n' + '=' * 70)
+        print(f'Smash material check - {len(materials_to_meshes)} material(s)')
+        print('=' * 70)
+        if not issues:
+            print('No problems found.')
+        for issue in issues:
+            print(f'[{issue.severity:7s}] {issue.material_name}: {issue.message}')
+            if issue.fix_hint:
+                print(f'{"":10s}  -> {issue.fix_hint}')
+        print('=' * 70 + '\n')
+
+        validate.store_results(issues, len(materials_to_meshes))
+
+        if not issues:
+            self.report({'INFO'},
+                        f'Checked {len(materials_to_meshes)} material(s) - no problems found.')
+        else:
+            level = 'ERROR' if errors else ('WARNING' if warnings else 'INFO')
+            self.report({level},
+                        f'{errors} error(s), {warnings} warning(s), {infos} note(s). '
+                        f'See the console for details.')
+        return {'FINISHED'}
 
 class SUB_OP_create_sub_matl_data_from_shader_label(Operator):
     bl_idname = 'sub.create_sub_matl_data_from_shader_label'
@@ -44,13 +403,6 @@ class SUB_OP_create_sub_matl_data_from_shader_label(Operator):
         self.new_shader_label = context.object.active_material.sub_matl_data.shader_label
         return wm.invoke_props_dialog(self)
 
-class SUB_OP_apply_material_preset(Operator):
-    bl_idname = 'sub.change_shader_label'
-    bl_label = 'Change Shader Label'
-
-    def execute(self, context):
-        return {'FINISHED'} 
-    
 from .convert_blender_material import convert_blender_material, rename_mesh_attributes_of_meshes_using_material
 from .convert_smash_material import (
     convert_smash_material_to_principled,

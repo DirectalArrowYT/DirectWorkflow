@@ -17,14 +17,29 @@ def update_active_material(self, context):
     '''
     Manually setting the PointerProperties, such as during model import, will call
     this update method, so the None check is necesary.
+
+    The material updated is the one that OWNS the property being set, via
+    self.id_data - not whatever happens to be active in the viewport. Reading
+    bpy.context.object.active_material here meant that setting a property on any
+    non-active material pushed its images onto the active one instead, and that
+    the callback raised whenever there was no active object at all - during a
+    background render, or any script that edits materials without selecting
+    anything. Neither showed as a failure, because Blender only prints
+    exceptions raised inside a property callback and carries on, so this filled
+    the console with tracebacks while quietly doing nothing.
     '''
-    active_mat:bpy.types.Material = bpy.context.object.active_material
-    if active_mat is None:
+    material = self.id_data
+    if material is None or not isinstance(material, bpy.types.Material):
         return
-    sub_matl_data: SUB_PG_sub_matl_data = active_mat.sub_matl_data
-    
+    # No node tree yet - the material is mid-rebuild, and the rebuild assigns
+    # every image itself once it finishes.
+    if not material.use_nodes or material.node_tree is None:
+        return
+
+    sub_matl_data: SUB_PG_sub_matl_data = material.sub_matl_data
+
     for texture in sub_matl_data.textures:
-        texture_node = active_mat.node_tree.nodes.get(texture.node_name)
+        texture_node = material.node_tree.nodes.get(texture.node_name)
         if texture_node is not None:
             texture_node.image = texture.image
 

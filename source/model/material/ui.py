@@ -45,26 +45,68 @@ class SUB_PT_matl_data_master(MaterialPanel):
         sub_matl_data: SUB_PG_sub_matl_data = context.object.active_material.sub_matl_data
         layout = self.layout
         if sub_matl_data.shader_label == "":
-            row = layout.row()
-            row.label(text="The current blender material is not an ultimate material!")
-            row = layout.row()
-            row.label(text="The blender material will be replaced with a default smash material on export")
-            row = layout.row()
-            row.label(text="You can alternatively choose to convert the existing material to an ultimate material.")
-            row = layout.row()
+            box = layout.box()
+            box.label(text="Not a Smash material yet.", icon='INFO')
+            box.label(text="Exporting as-is replaces it with a default material.")
+
+            col = layout.column()
+            col.scale_y = 2.0
+            col.operator_context = 'INVOKE_DEFAULT'
+            col.operator(operators.SUB_OP_apply_material_preset.bl_idname,
+                         text="Set Up From Preset", icon='PRESET')
+
+            sub = layout.column()
+            sub.label(text="Or convert what is already in the node tree:")
+            row = sub.row()
             row.operator_context = 'INVOKE_DEFAULT'
             row.operator(operators.SUB_OP_convert_blender_material.bl_idname)
-            row.scale_y = 2
-            row.scale_x = 2
-            row = layout.row()
+            row.scale_y = 1.5
+            row = sub.row()
             row.operator(operators.SUB_OP_convert_blender_material_no_textures.bl_idname)
             row.scale_y = 1.5
-            row.scale_x = 2
             return
+
+        # What this shader actually does, rather than just its label. The raw
+        # label stays visible and copyable underneath.
+        from . import shader_info
+        label = sub_matl_data.shader_label
+
         box = layout.box()
+        if not shader_info.exists(label):
+            box.label(text="Shader label is not in the shader database!", icon='ERROR')
+        else:
+            header = box.row()
+            header.label(
+                text='Lit' if shader_info.is_lighting(label) else 'Shadeless',
+                icon='LIGHT' if shader_info.is_lighting(label) else 'LIGHT_DATA')
+            render_pass = shader_info.render_pass_of(label) or '_opaque'
+            header.label(text=f'{render_pass[1:].title()} pass', icon='RENDERLAYERS')
+
+            traits = []
+            if shader_info.is_discard(label):
+                traits.append('alpha test')
+            if shader_info.is_premultiplied(label):
+                traits.append('premultiplied alpha')
+            if traits:
+                box.label(text=', '.join(traits).capitalize(), icon='IMAGE_ALPHA')
+
+            textures = sorted(shader_info.used_textures(label),
+                              key=lambda t: int(t.replace('Texture', '')))
+            if textures:
+                box.label(text='Reads: ' + ', '.join(textures), icon='TEXTURE')
+
         box.prop(sub_matl_data, "shader_label", emboss=False)
-        box.menu(SUB_MT_material_specials.bl_idname)
-        
+
+        row = layout.row(align=True)
+        row.operator_context = 'INVOKE_DEFAULT'
+        row.operator(operators.SUB_OP_apply_material_preset.bl_idname,
+                     text="Preset", icon='PRESET')
+        row.operator(operators.SUB_OP_find_shader_label.bl_idname,
+                     text="Find Shader", icon='VIEWZOOM')
+        row.scale_y = 1.3
+
+        layout.menu(SUB_MT_material_specials.bl_idname)
+
         # Check if material has been converted to Principled BSDF
         from .convert_smash_material import is_converted_to_principled
         material = context.object.active_material
@@ -266,15 +308,70 @@ class SUB_PT_matl_data_linked_materials(MaterialPanel):
             # TODO: Allow Editing?
 
 
+class SUB_PT_matl_data_validation(MaterialPanel):
+    bl_label = "Check Materials"
+    bl_parent_id = SUB_PT_matl_data_master.bl_idname
+    bl_options = {'DEFAULT_CLOSED'}
+
+    # Anything above INFO. Notes are printed to the console but not shown
+    # here, so a clean model reads as clean instead of as a wall of remarks.
+    MAX_ROWS = 12
+
+    def draw(self, context):
+        from . import validate
+        layout = self.layout
+
+        col = layout.column()
+        col.scale_y = 1.3
+        col.operator(operators.SUB_OP_validate_materials.bl_idname,
+                     text="Check Materials", icon='CHECKMARK')
+
+        if not validate.last_results['has_run']:
+            layout.label(text="Not checked yet.", icon='INFO')
+            return
+
+        issues = validate.last_results['issues']
+        material_count = validate.last_results['material_count']
+        errors, warnings, infos = validate.counts(issues)
+
+        summary = layout.box()
+        if not issues:
+            summary.label(text=f'{material_count} material(s), no problems.', icon='CHECKMARK')
+            return
+        summary.label(
+            text=f'{material_count} material(s): {errors} error(s), '
+                 f'{warnings} warning(s), {infos} note(s)',
+            icon='ERROR' if errors else 'INFO')
+
+        shown = [i for i in issues if i.severity != validate.INFO][:self.MAX_ROWS]
+        for issue in shown:
+            row = layout.box()
+            row.label(text=f'{issue.material_name}: {issue.message}',
+                      icon='ERROR' if issue.severity == validate.ERROR else 'INFO')
+            if issue.fix_hint:
+                row.label(text=issue.fix_hint, icon='BLANK1')
+
+        remaining = (errors + warnings) - len(shown)
+        if remaining > 0:
+            layout.label(text=f'...and {remaining} more. See the console.', icon='CONSOLE')
+        if infos:
+            layout.label(text=f'{infos} note(s) in the console.', icon='CONSOLE')
+
+
 class SUB_MT_material_specials(Menu):
     bl_label = "Material Specials"
     bl_idname = "SUB_MT_material_specials"
 
     def draw(self, context):
         layout = self.layout
-        
+
+        layout.operator(operators.SUB_OP_apply_material_preset.bl_idname, icon="PRESET")
+        layout.operator(operators.SUB_OP_find_shader_label.bl_idname, icon="VIEWZOOM")
+        layout.separator()
         layout.operator(operators.SUB_OP_change_render_pass.bl_idname, icon="RENDERLAYERS")
         layout.operator(operators.SUB_OP_create_sub_matl_data_from_shader_label.bl_idname, icon="SHADERFX")
+        layout.separator()
+        layout.operator(operators.SUB_OP_validate_materials.bl_idname, icon="CHECKMARK")
 
 
 class PG_PT_smash_texture_materials(Panel):

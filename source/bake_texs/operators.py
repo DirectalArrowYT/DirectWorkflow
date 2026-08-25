@@ -159,6 +159,7 @@ class SUB_OP_bake_texs_apply_to_materials(Operator):
                 ('_col', 'Texture0', 'sRGB'),
                 ('_nor', 'Texture4', 'Non-Color'),
                 ('_prm', 'Texture6', 'Non-Color'),
+                ('_emi', 'Texture5', 'sRGB'),
             ):
                 png_path = os.path.join(core.BAKE_DIR, f'{stem}{suffix}.png')
                 if not os.path.isfile(png_path):
@@ -169,6 +170,27 @@ class SUB_OP_bake_texs_apply_to_materials(Operator):
                     continue
                 slot.image = _load_or_refresh_image(png_path, f'{stem}{suffix}', colorspace)
                 applied += 1
+
+            # An EMI map baked from an Emission Strength above 1 was divided
+            # down to fit in 8 bits, and CustomVector3 is what puts the
+            # brightness back. Applying the texture without it would render the
+            # glow dimmer than it was authored.
+            bake_info = core.LAST_BAKE_INFO.get(stem)
+            if bake_info and 'custom_vector_3' in bake_info:
+                cv3_value = bake_info['custom_vector_3']
+                sub_matl_data = getattr(base_material, 'sub_matl_data', None)
+                cv3 = sub_matl_data.vectors.get('CustomVector3') if sub_matl_data else None
+                if cv3 is not None:
+                    cv3.value = cv3_value
+                    if max(cv3_value[:3]) > 1.0:
+                        notes.append(
+                            f'{base_material.name}: CustomVector3 set to '
+                            f'{cv3_value[0]:.3f} to restore EMI brightness')
+                elif max(cv3_value[:3]) > 1.0:
+                    notes.append(
+                        f'{base_material.name}: needs CustomVector3 = '
+                        f'{cv3_value[0]:.3f} for the EMI map, but has no such '
+                        f'parameter - apply the Emissive preset')
 
         msg = f'Applied {applied} texture(s) to material slots.'
         if notes:

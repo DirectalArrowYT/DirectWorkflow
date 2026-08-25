@@ -87,7 +87,27 @@ DRY_RUN = False
 WRITE_COL = True
 WRITE_NOR = True
 WRITE_PRM = True
+WRITE_EMI = True
 WRITE_COMPONENT_DEBUG_MAPS = False
+
+# ---- Smash EMI ---------------------------------------------------------------
+# Texture5 / Texture14. 27,567 of the 108,192 vanilla fighter materials carry an
+# emissive map, so this is not a niche channel - but the bake pipeline had no
+# way to produce one, and any emission authored in Blender was silently dropped.
+#
+# EMI is written only for materials whose shader actually reads Texture5; a
+# material on a plain PRM shader has nowhere to put one. "AUTO" follows the
+# shader, "ALWAYS" writes one regardless (useful when you intend to move the
+# material onto an emissive shader afterwards), "NEVER" disables the channel.
+EMI_MODE = "AUTO"
+
+# The Principled's Emission Strength routinely exceeds 1.0, which an 8-bit
+# texture cannot hold. Rather than clipping, the map is divided by its own peak
+# and that peak is reported as the CustomVector3 value which restores it -
+# which is exactly what CustomVector3 is for, and why vanilla emissive
+# materials so often carry values above 1. Turn this off to clamp instead.
+EMI_NORMALIZE_TO_CV3 = True
+EMI_DEFAULT = (0.0, 0.0, 0.0, 1.0)
 
 # ---- Smash PRM --------------------------------------------------------------
 # PRM.r -> Principled Metallic (1:1). PRM.g -> Roughness (1:1, no remap).
@@ -137,6 +157,10 @@ NUTEXB_FORMATS = {
     "_col": "BC7RgbaUnormSrgb",
     "_nor": "BC7RgbaUnorm",
     "_prm": "BC7RgbaUnorm",
+    # Emissive maps hold colour, so they take the sRGB variant like _col.
+    # Matches expects_srgb() in SSBH Editor, which treats every texture slot
+    # except Texture2/4/6/7/16 as colour.
+    "_emi": "BC7RgbaUnormSrgb",
 }
 
 # The bundled ultimate_tex_cli (0.3.1) accepts an unknown --format silently:
@@ -216,6 +240,90 @@ SUB_SOCKET_NOR_RGB   = "Texture4 RGB (NOR Map)"
 SUB_SOCKET_NOR_A     = "Texture4 Alpha (NOR Map Cavity Channel)"
 SUB_SOCKET_PRM_RGB   = "Texture6 RGB (PRM Map)"
 SUB_SOCKET_PRM_A     = "Texture6 Alpha (PRM Map Specular)"
+SUB_SOCKET_EMI_RGB   = "Texture5 RGB (Emissive Map Layer 1)"
+
+
+# =============================================================================
+# WHAT THE TARGET MATERIAL'S SHADER EXPECTS
+#
+# The baker used to be purely a Blender-node -> PNG converter: it read the node
+# graph and wrote col/nor/prm the same way for every material, never looking at
+# the Smash shader those files were about to be used by. That is wrong for
+# three documented cases, all of which change what a PRM channel MEANS:
+#
+#   PRM.a   is the specular value only while CustomBoolean1 is on and
+#           CustomFloat10 (anisotropy) is zero. With anisotropy on, the shader
+#           reads it as a highlight rotation angle instead, so a specular map
+#           baked there becomes a field of random rotations.
+#   PRM.r   is metalness on a normal shader, but on a subsurface shader it is
+#           the SSS mask. Baking Metallic there leaves skin at 0 and the
+#           subsurface effect never appears.
+#   EMI     only exists if the shader reads Texture5.
+#
+# See Smush-Material-Research/Textures.md and Material Parameters.md.
+# =============================================================================
+from ..model.material import shader_info
+
+
+class MatlContext:
+    """What the material's Smash shader expects from the maps being baked.
+
+    Every field degrades to the plain PBR interpretation when the material has
+    no sub_matl_data yet, so an un-set-up material bakes exactly as it did
+    before this existed.
+    """
+
+    def __init__(self, material):
+        self.material = material
+        self.shader_label = ''
+        self.anisotropy = 0.0
+        self.prm_alpha_is_used = True
+        self.is_subsurface = False
+        self.reads_emissive = False
+        self.notes = []
+
+        sub_matl_data = getattr(material, 'sub_matl_data', None)
+        if sub_matl_data is None or not sub_matl_data.shader_label:
+            return
+
+        self.shader_label = sub_matl_data.shader_label
+        if not shader_info.exists(self.shader_label):
+            self.notes.append(
+                f"shader label '{self.shader_label}' is not in the shader "
+                f"database - baking with plain PBR rules")
+            return
+
+        # CustomFloat10: anisotropy strength. Non-zero repurposes PRM.a.
+        aniso = sub_matl_data.floats.get('CustomFloat10')
+        if aniso is not None:
+            self.anisotropy = float(aniso.value)
+
+        # CustomBoolean1 off means the shader substitutes a flat 0.16 for PRM.a.
+        cb1 = sub_matl_data.bools.get('CustomBoolean1')
+        if cb1 is not None:
+            self.prm_alpha_is_used = bool(cb1.value)
+
+        # A shader that reads CustomVector30 is doing fake subsurface.
+        self.is_subsurface = shader_info.uses_param(self.shader_label, 'CustomVector30')
+        self.reads_emissive = shader_info.uses_param(self.shader_label, 'Texture5')
+
+    @property
+    def prm_alpha_is_rotation(self):
+        return abs(self.anisotropy) > 1e-6
+
+    def describe(self):
+        if not self.shader_label:
+            return "no Smash material data - baking with plain PBR rules"
+        bits = [self.shader_label]
+        if self.is_subsurface:
+            bits.append("subsurface (PRM.r = SSS mask)")
+        if self.prm_alpha_is_rotation:
+            bits.append(f"anisotropic CF10={self.anisotropy:g} (PRM.a = rotation)")
+        elif not self.prm_alpha_is_used:
+            bits.append("CustomBoolean1 off (PRM.a unused)")
+        if self.reads_emissive:
+            bits.append("reads Texture5 (EMI)")
+        return "  |  ".join(bits)
 
 
 def apply_settings(props):
@@ -227,8 +335,8 @@ def apply_settings(props):
     """
     global BAKE_SIZE, BAKE_MARGIN, BAKE_MARGIN_TYPE, BAKE_DIR, OVERWRITE_FILES
     global CHAR_TAG, NAME_FROM, USE_SELECTION_ONLY, DRY_RUN
-    global WRITE_COL, WRITE_NOR, WRITE_PRM, WRITE_COMPONENT_DEBUG_MAPS
-    global PRM_AO_MODE, COMPILE_NUTEXB
+    global WRITE_COL, WRITE_NOR, WRITE_PRM, WRITE_EMI, WRITE_COMPONENT_DEBUG_MAPS
+    global PRM_AO_MODE, COMPILE_NUTEXB, EMI_MODE, EMI_NORMALIZE_TO_CV3
 
     BAKE_SIZE = int(props.bake_size)
     BAKE_MARGIN = props.bake_margin
@@ -244,9 +352,12 @@ def apply_settings(props):
     WRITE_COL = props.write_col
     WRITE_NOR = props.write_nor
     WRITE_PRM = props.write_prm
+    WRITE_EMI = props.write_emi
     WRITE_COMPONENT_DEBUG_MAPS = props.write_component_debug_maps
 
     PRM_AO_MODE = props.prm_ao_mode
+    EMI_MODE = props.emi_mode
+    EMI_NORMALIZE_TO_CV3 = props.emi_normalize_to_cv3
     COMPILE_NUTEXB = props.compile_nutexb
 
 
@@ -1031,15 +1142,62 @@ def scalar_channel_raw(value, origin):
     v = float(value)
     return Channel('CONST', value=(v, v, v, 1.0), origin=origin)
 
-def resolve_channels(mat, kind, payload, path):
+def channel_from_emission(node, node_path, label):
+    """The emissive colour off a Principled, plus its strength as a multiplier.
+
+    Emission Color and Emission Strength are separate inputs and the map wants
+    their product, but a bake can only capture one socket. So the colour is
+    baked and the strength is carried alongside as a scalar applied afterwards
+    - the same split the specular channel already uses for its scale.
+
+    Returns (channel, strength). A strength of 0 - the Blender default - means
+    the material does not emit, and returns a NONE channel.
+    """
+    colour_input = node.inputs.get("Emission Color")
+    strength_input = node.inputs.get("Emission Strength")
+    if colour_input is None:
+        return NONE_CHANNEL, 0.0
+
+    strength = 1.0
+    if strength_input is not None:
+        if strength_input.is_linked:
+            # A textured strength cannot be folded into a scalar. Bake the
+            # colour at full strength and let CustomVector3 carry the level.
+            strength = 1.0
+        else:
+            try:
+                strength = float(strength_input.default_value)
+            except (TypeError, ValueError):
+                strength = 1.0
+
+    if strength <= 0.0:
+        return NONE_CHANNEL, 0.0
+
+    channel = channel_from_input(colour_input, f"{label} Emission Color", node_path)
+    if channel.mode == 'NONE':
+        return NONE_CHANNEL, 0.0
+
+    # A constant black emission colour is "no emission" however strong it is.
+    if channel.mode == 'CONST' and max(float(v) for v in channel.value[:3]) <= 0.0:
+        return NONE_CHANNEL, 0.0
+
+    return channel, strength
+
+
+def resolve_channels(mat, kind, payload, path, ctx=None):
     """Decide, per channel, exactly where the data will come from."""
     ch = {}
     preset = MATERIAL_PRESETS.get(mat.name, {})
+    if ctx is None:
+        ctx = MatlContext(mat)
+    ch['matl_context'] = ctx
 
     col = alpha = metal = rough = spec = NONE_CHANNEL
     ch['prm_rgb'] = NONE_CHANNEL
     ch['nor_rgb'] = NONE_CHANNEL
     ch['nor_a']   = NONE_CHANNEL
+    ch['emi']       = NONE_CHANNEL
+    ch['emi_scale'] = 0.0
 
     ior = NONE_CHANNEL
 
@@ -1052,12 +1210,49 @@ def resolve_channels(mat, kind, payload, path):
         s = (channel_from_input(node.inputs.get(spec_name), f"{label} {spec_name}", node_path)
              if spec_name else NONE_CHANNEL)
         i = channel_from_input(node.inputs.get("IOR"), f"{label} IOR", node_path)
+
+        # On a subsurface shader PRM.r carries the SSS mask rather than
+        # metalness, so the Principled's Subsurface Weight is what belongs
+        # there. Skin authored the ordinary way has Metallic 0, which would
+        # otherwise bake a mask of zeroes and switch the effect off entirely.
+        if ctx.is_subsurface:
+            sss = channel_from_input(node.inputs.get("Subsurface Weight"),
+                                     f"{label} Subsurface Weight", node_path)
+            if sss.mode != 'NONE':
+                m = sss
+                ch['sss_note'] = (
+                    f"PRM.r from Subsurface Weight, not Metallic - "
+                    f"{ctx.shader_label} reads it as the SSS mask")
+
+        # While anisotropy is on, PRM.a is a rotation angle, so the specular
+        # value has no channel to live in and Anisotropic Rotation takes its
+        # place. Blender stores rotation as 0-1 over a full turn; Smash maps
+        # 0-1 onto half a turn, so the conversion is a doubling, wrapped
+        # because an anisotropic highlight repeats every 180 degrees.
+        # The Blender-to-Smash conversion itself lives in pack_prm(), so that
+        # a constant rotation and a textured one go through exactly the same
+        # arithmetic. What is carried here is the raw Blender value.
+        if ctx.prm_alpha_is_rotation:
+            rot = channel_from_input(node.inputs.get("Anisotropic Rotation"),
+                                     f"{label} Anisotropic Rotation", node_path)
+            if rot.mode == 'NONE':
+                s = scalar_channel_raw(0.0, "PRM.a rotation (no rotation input, 0 deg)")
+            else:
+                s = rot
+                s.origin += " -> PRM.a rotation"
+            ch['spec_scale'] = 1.0
+            ch['prm_alpha_is_rotation'] = True
+            ch['aniso_note'] = (
+                f"PRM.a is anisotropic rotation, not specular "
+                f"(CustomFloat10={ctx.anisotropy:g})")
+
         return m, r, s, i
 
     if kind == 'PRINCIPLED':
         node = payload
         col   = channel_from_input(node.inputs.get("Base Color"), "Principled Base Color", path)
         alpha = channel_from_input(node.inputs.get("Alpha"), "Principled Alpha", path)
+        ch['emi'], ch['emi_scale'] = channel_from_emission(node, path, "Principled")
         d_kind, d_node, d_path, why = pick_prm_donor(mat, kind, node, path)
         if d_node is not None and d_kind == 'PRINCIPLED':
             label = "Principled" if d_node is node else f"'{d_node.name}'"
@@ -1079,6 +1274,11 @@ def resolve_channels(mat, kind, payload, path):
         spec          = channel_from_group_input(node, SUB_SOCKET_PRM_A,   "master shader Texture6 Alpha")
         ch['nor_rgb'] = channel_from_group_input(node, SUB_SOCKET_NOR_RGB, "master shader Texture4 RGB")
         ch['nor_a']   = channel_from_group_input(node, SUB_SOCKET_NOR_A,   "master shader Texture4 Alpha")
+        # The master shader already holds a real Emi map on its own socket, so
+        # it passes straight through at strength 1 - it is emissive data, not
+        # a Blender emission colour that needs converting.
+        ch['emi'] = channel_from_group_input(node, SUB_SOCKET_EMI_RGB, "master shader Texture5 RGB")
+        ch['emi_scale'] = 1.0
         if spec.mode != 'NONE':
             spec.origin += " (already PRM-space)"
             ch['spec_scale'] = 1.0
@@ -1089,6 +1289,10 @@ def resolve_channels(mat, kind, payload, path):
         d_kind, d_node, d_path = find_pbr_donor(mat)
         if d_kind == 'PRINCIPLED':
             metal, rough, spec, ior = pull_principled(d_node, d_path, "donor Principled")
+            # A toon setup routes colour into Surface directly, but its
+            # Principled still carries the emission the material wants.
+            ch['emi'], ch['emi_scale'] = channel_from_emission(
+                d_node, d_path, "donor Principled")
         elif d_kind == 'GLOSSY':
             rough = channel_from_input(d_node.inputs.get("Roughness"),
                                        "donor Glossy Roughness", d_path)
@@ -1130,6 +1334,20 @@ def resolve_channels(mat, kind, payload, path):
         rough = scalar_channel(PRM_FALLBACK_ROUGH, "fallback (no roughness source)")
     if spec.mode == 'NONE':
         spec = scalar_channel(PRM_FALLBACK_SPEC, "fallback (no specular source)")
+
+    # With CustomBoolean1 off the shader ignores PRM.a and substitutes a flat
+    # 0.16, so whatever gets baked there is dead data. Writing that constant
+    # directly says so in the report and skips a bake call that could not have
+    # affected the render either way. Anisotropy wins over this - a rotation
+    # is still read from PRM.a regardless of CustomBoolean1.
+    if not ctx.prm_alpha_is_used and not ctx.prm_alpha_is_rotation:
+        spec = scalar_channel_raw(
+            0.16,
+            f"CustomBoolean1 is off on '{mat.name}', so the shader ignores "
+            f"PRM.a and uses a flat 0.16")
+        ch['spec_scale'] = 1.0
+        ch.pop('ior', None)
+        ior = NONE_CHANNEL
 
     if 'spec_scale' not in ch:
         ch['spec_scale'] = float(PRM_SPECULAR_SCALE)
@@ -1252,8 +1470,51 @@ def resolve_channel_image(scene, objects, members, name, size, colorspace,
     bake_members(scene, objects, live, img, colorspace, scratch)
     return img
 
+def pack_emi(emi_img, out_name, size, strength, alpha_img=None):
+    """Emissive map, with the Principled's Emission Strength folded in.
+
+    Returns (image, custom_vector_3). An 8-bit texture cannot store a value
+    above 1.0, so when the emission exceeds that the map is divided down to fit
+    and the divisor comes back as the CustomVector3 the material needs to
+    restore the intended brightness. That is exactly what CustomVector3 is for
+    - Material Parameters.md describes it as the emission multiplier, "often
+    higher than 1 to increase bloom" - so this loses nothing and is how vanilla
+    stores bright emission too.
+    """
+    out = create_or_get_image(out_name, size)
+    set_colorspace(out, "sRGB")
+
+    px = img_to_np(emi_img).copy()
+    rgb = np.nan_to_num(px[:, 0:3]) * float(strength)
+
+    custom_vector_3 = (1.0, 1.0, 1.0, 1.0)
+    peak = float(rgb.max()) if rgb.size else 0.0
+    if peak > 1.0:
+        if EMI_NORMALIZE_TO_CV3:
+            rgb = rgb / peak
+            custom_vector_3 = (peak, peak, peak, 1.0)
+            print(f"    EMI peaks at {peak:.3f}; map normalised and "
+                  f"CustomVector3 = {peak:.3f} restores it.")
+        else:
+            print(f"    ! EMI clips: peak {peak:.3f} > 1.0. Enable "
+                  f"'Normalize To CustomVector3' to keep the range.")
+
+    if alpha_img is not None:
+        a = gray_of(img_to_np(alpha_img))
+    else:
+        a = np.ones(rgb.shape[0], dtype=np.float32)
+
+    np_to_img(out, np.stack([
+        np.clip(rgb[:, 0], 0.0, 1.0),
+        np.clip(rgb[:, 1], 0.0, 1.0),
+        np.clip(rgb[:, 2], 0.0, 1.0),
+        np.clip(a, 0.0, 1.0),
+    ], axis=1))
+    return out, custom_vector_3
+
+
 def pack_prm(metal_img, rough_img, ao_img, spec_img, prm_rgb_img, out_name,
-             size, spec_scale):
+             size, spec_scale, alpha_is_rotation=False):
     out = create_or_get_image(out_name, size)
     set_colorspace(out, "Non-Color")
 
@@ -1272,11 +1533,19 @@ def pack_prm(metal_img, rough_img, ao_img, spec_img, prm_rgb_img, out_name,
         rough = np.sqrt(rough)
 
     spec = gray_of(img_to_np(spec_img))
-    spec = spec * float(spec_scale)
-    if spec.max() > 1.0:
-        print(f"    ! PRM.a clips: peak {spec.max():.2f} > 1.0, so the specular "
-              f"channel saturates. Lower the IOR or Specular IOR Level - "
-              f"vanilla Smash sits around 0.16.")
+    if alpha_is_rotation:
+        # PRM.a is a rotation angle here, not a reflectance. Blender's
+        # Anisotropic Rotation covers a full turn over 0-1 and Smash covers
+        # half a turn, so the value doubles; the wrap is safe because an
+        # anisotropic highlight is symmetric every 180 degrees. No specular
+        # scale applies, and clipping would be wrong - 1.2 turns is 0.2 turns.
+        spec = np.mod(spec * 2.0, 1.0)
+    else:
+        spec = spec * float(spec_scale)
+        if spec.max() > 1.0:
+            print(f"    ! PRM.a clips: peak {spec.max():.2f} > 1.0, so the specular "
+                  f"channel saturates. Lower the IOR or Specular IOR Level - "
+                  f"vanilla Smash sits around 0.16.")
 
     np_to_img(out, np.stack([
         np.clip(metal, 0.0, 1.0),
@@ -1389,8 +1658,15 @@ def bake_all():
             print(f"Render engine restored to {state.get('engine')}.")
 
 
+# Per-texture-set results the bake wants to hand back to whoever applies the
+# textures afterwards - currently just the CustomVector3 an EMI map needs to
+# restore its brightness. Keyed by output stem. Rewritten on every bake.
+LAST_BAKE_INFO = {}
+
+
 def _bake_all():
     ensure_cycles()
+    LAST_BAKE_INFO.clear()
     if not bpy.data.filepath:
         raise RuntimeError("Save the .blend first so the bake output folder resolves to a real path.")
     ensure_dir(BAKE_DIR)
@@ -1424,14 +1700,14 @@ def _bake_all():
         mat = materials[0]
         mat_key = safe_filename(group_name)
         stem = make_stem(objects[0], mat)
-        out_col = out_nor = out_prm = None
+        out_col = out_nor = out_prm = out_emi = None
 
         bundled = len(materials) > 1
         lines = [
             f"Texture set: {group_name}" + (
                 f"   (bundled: {', '.join(m.name for m in materials)})" if bundled else ""),
             f"Objects:  {', '.join(o.name for o in objects)}",
-            f"Output:   {stem}_col / _nor / _prm",
+            f"Output:   {stem}_col / _nor / _prm / _emi",
         ]
         print(f"\n=== {group_name}" + (f"  + {len(materials)-1} bundled" if bundled else "")
               + f"  [{', '.join(o.name for o in objects)}]")
@@ -1445,14 +1721,30 @@ def _bake_all():
                 print(msg)
                 lines.append(msg)
                 continue
-            channels = resolve_channels(member, kind, payload, path)
+            member_ctx = MatlContext(member)
+            channels = resolve_channels(member, kind, payload, path, ctx=member_ctx)
             resolved.append((member, channels))
             label = f"  {member.name} [{kind}]" if bundled else f"  Surface: {kind}"
             print(label)
             lines.append(label.strip())
+
+            # What the target shader expects, and every place that changed how
+            # a channel was resolved. This is the part that used to be
+            # invisible - the baker wrote the same PRM for every material.
+            shader_line = f"    shader:  {member_ctx.describe()}"
+            print(shader_line)
+            lines.append(shader_line.strip())
+            for note_key in ('sss_note', 'aniso_note'):
+                note = channels.get(note_key)
+                if note:
+                    print(f"    ! {note}")
+                    lines.append(f"! {note}")
+            for note in member_ctx.notes:
+                print(f"    ! {note}")
+                lines.append(f"! {note}")
             if DEBUG_PRINT_GRAPH:
                 for key in ('col', 'alpha', 'metal', 'rough', 'spec', 'ior', 'ao',
-                            'prm_rgb', 'nor_rgb', 'nor_a'):
+                            'prm_rgb', 'nor_rgb', 'nor_a', 'emi'):
                     c = channels.get(key)
                     if c is None or not isinstance(c, Channel) or c.mode == 'NONE':
                         continue
@@ -1469,6 +1761,26 @@ def _bake_all():
         materials = [m for m, _ in resolved]
         channels = resolved[0][1]
         spec_scale = float(channels.get('spec_scale', PRM_SPECULAR_SCALE))
+
+        # An EMI map is only written when something can actually use it: the
+        # material has emission to bake, AND (on AUTO) its shader reads
+        # Texture5. Writing one for a plain PRM shader would produce a file
+        # nothing references.
+        has_emission = any(
+            ch.get('emi') is not None and ch['emi'].mode != 'NONE' for _, ch in resolved)
+        emi_ctx = channels.get('matl_context')
+        if EMI_MODE == 'NEVER':
+            emi_wanted = False
+        elif EMI_MODE == 'ALWAYS':
+            emi_wanted = has_emission
+        else:  # AUTO
+            emi_wanted = has_emission and bool(emi_ctx and emi_ctx.reads_emissive)
+            if has_emission and not emi_wanted:
+                msg = ("  EMI: material emits, but its shader does not read "
+                       "Texture5 - no _emi written. Apply the Emissive preset "
+                       "to give it one.")
+                print(msg)
+                lines.append(msg.strip())
 
         def members_for(key):
             return [(m, ch.get(key)) for m, ch in resolved]
@@ -1627,7 +1939,9 @@ def _bake_all():
 
                 img_prm = pack_prm(img_metal, img_rough, img_ao, img_spec,
                                    prm_rgb, f"{mat_key}__prm", BAKE_SIZE,
-                                   spec_scale)
+                                   spec_scale,
+                                   alpha_is_rotation=channels.get(
+                                       'prm_alpha_is_rotation', False))
                 made.append(img_prm)
                 apply_coverage_default(img_prm, mask, PRM_DEFAULT)
                 out_prm = unique_path(os.path.join(BAKE_DIR, f"{stem}_prm.png"))
@@ -1641,10 +1955,29 @@ def _bake_all():
                         if comp is not None:
                             save_image(comp, os.path.join(BAKE_DIR, f"{stem}_{tag}.png"))
 
+            if WRITE_EMI and emi_wanted:
+                img_emi_src = resolve_channel_image(
+                    scene, objects, members_for('emi'), f"{mat_key}__emiSrc",
+                    BAKE_SIZE, "sRGB", scratch, default_rgba=EMI_DEFAULT)
+                made.append(img_emi_src)
+
+                img_emi, cv3 = pack_emi(img_emi_src, f"{mat_key}__emi", BAKE_SIZE,
+                                        channels.get('emi_scale', 1.0))
+                made.append(img_emi)
+                apply_coverage_default(img_emi, mask, EMI_DEFAULT)
+                out_emi = unique_path(os.path.join(BAKE_DIR, f"{stem}_emi.png"))
+                save_image(img_emi, out_emi)
+                written.append(out_emi)
+                LAST_BAKE_INFO[stem] = {'custom_vector_3': cv3}
+                print(f"    EMI -> {os.path.basename(out_emi)}")
+                lines.append(f"EMI: {stem}_emi.png   CustomVector3 = "
+                             f"({cv3[0]:.3f}, {cv3[1]:.3f}, {cv3[2]:.3f}, {cv3[3]:.3f})")
+
             if DEBUG_SAMPLE_PIXELS:
                 for label, filepath, cs in (("COL", out_col, "sRGB"),
                                             ("NOR", out_nor, "Non-Color"),
-                                            ("PRM", out_prm, "Non-Color")):
+                                            ("PRM", out_prm, "Non-Color"),
+                                            ("EMI", out_emi, "sRGB")):
                     if filepath is None:
                         continue
                     check = load_fresh_image(filepath, cs)

@@ -103,7 +103,13 @@ def create_sub_matl_data_from_shader_label(material: bpy.types.Material, shader_
             sub_matl_data.add_vector(
                 ssbh_data_py.matl_data.Vector4Param(
                     param_id=ssbh_data_py.matl_data.ParamId.from_value(missing_param_id),
-                    data=vector_param_id_value_to_default_value[missing_param_id],
+                    # The defaults table stores tuples, but ssbh_data_py's
+                    # Vector4Param only accepts a list and raises TypeError on
+                    # anything else. Without this conversion, adding any missing
+                    # vector param fails - which is every vector param when the
+                    # material is new, so setting a material up from a shader
+                    # label could never work at all.
+                    data=list(vector_param_id_value_to_default_value[missing_param_id]),
                 )
             )
         elif missing_param_id in texture_param_id_values:
@@ -158,3 +164,52 @@ def create_sub_matl_data_from_shader_label(material: bpy.types.Material, shader_
     setup_blender_material_settings(material)
     setup_blender_material_node_tree(material)
     return
+
+
+def apply_material_preset(material: bpy.types.Material, preset) -> list[str]:
+    """Switch a material onto a preset's shader and write the preset's values.
+
+    Textures survive this. create_sub_matl_data_from_shader_label() keeps every
+    param the incoming shader still wants and only drops the ones it doesn't,
+    and the node tree rebuild re-reads its image pointers out of sub_matl_data
+    - so moving Body from Standard to Alpha Blend keeps the col/nor/prm you
+    already assigned and only changes how they are rendered.
+
+    Returns a list of notes about anything the preset could not set, for the
+    operator to report. An empty list means everything applied.
+    """
+    notes = []
+
+    create_sub_matl_data_from_shader_label(material, preset.shader_label)
+    sub_matl_data: SUB_PG_sub_matl_data = material.sub_matl_data
+
+    # Only params the new shader kept are present, so a miss here means the
+    # preset named something this shader has no slot for - worth surfacing
+    # rather than silently dropping.
+    for collection, values, kind in (
+        (sub_matl_data.vectors, preset.vectors, 'vector'),
+        (sub_matl_data.floats, preset.floats, 'float'),
+        (sub_matl_data.bools, preset.bools, 'bool'),
+    ):
+        for param_name, value in values.items():
+            prop = collection.get(param_name)
+            if prop is None:
+                notes.append(f'{param_name} ({kind}) is not used by {preset.shader_label}')
+                continue
+            prop.value = value
+
+    if preset.blend is not None:
+        source_color, destination_color, alpha_to_coverage = preset.blend
+        for blend_state in sub_matl_data.blend_states:
+            blend_state.source_color = source_color
+            blend_state.destination_color = destination_color
+            blend_state.alpha_sample_to_coverage = alpha_to_coverage
+
+    for rasterizer_state in sub_matl_data.rasterizer_states:
+        rasterizer_state.cull_mode = preset.cull_mode
+
+    # Values were written after create_sub_matl_data_from_shader_label() did
+    # its own rebuild, so the node tree has to be rebuilt again to pick them up.
+    setup_blender_material_settings(material)
+    setup_blender_material_node_tree(material)
+    return notes
