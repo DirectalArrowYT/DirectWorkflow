@@ -381,14 +381,19 @@ class SUB_PT_misc_utilities(Panel):
         eye_box.label(text="Look Control Rig", icon="BONE_DATA")
         eye_box.operator("sub.add_eye_look_control", icon="PLUS")
         eye_box.prop(ssp, "eye_look_live_preview")
+        eye_box.prop(ssp, "eye_look_mode")
         rowlc = eye_box.row(align=True)
-        rowlc.prop(ssp, "eye_look_sensitivity")
+        if ssp.eye_look_mode == 'LOOK_AT':
+            rowlc.prop(ssp, "eye_look_gain")
+        else:
+            rowlc.prop(ssp, "eye_look_sensitivity")
         rowlc.prop(ssp, "eye_look_clamp")
         rowinv = eye_box.row(align=True)
         rowinv.prop(ssp, "eye_look_invert_x", toggle=True)
         rowinv.prop(ssp, "eye_look_invert_y", toggle=True)
         eye_box.prop(ssp, "eye_look_pupil_from_scale")
         if ssp.eye_look_pupil_from_scale:
+            eye_box.prop(ssp, "eye_look_scale_about_pupil")
             pupil_box = eye_box.box()
             pupil_box.label(text="Scale the control bone (S) to resize", icon="INFO")
             pupil_box.label(text="the pupil. Smaller bone = smaller pupil.")

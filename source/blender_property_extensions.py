@@ -538,6 +538,32 @@ class SubSceneProperties(PropertyGroup):
                     "Preview only - Bake still has to run to create the keyframes export reads",
         default=True,
     )
+    eye_look_mode: EnumProperty(
+        name="Aim Mode",
+        description="How the control bone's position becomes an eye direction",
+        items=[
+            ("LOOK_AT", "Look At (3D)",
+             "Aim at wherever the control actually sits in 3D - park it on the camera and "
+             "the character looks at the camera. Distance along the same line doesn't "
+             "change the gaze, and turning the head keeps it locked on the target"),
+            ("OFFSET", "Flat Offset (2D)",
+             "Map the control's sideways and vertical offset straight onto the eye UVs. "
+             "Simpler and fully manual, but ignores depth and head rotation"),
+        ],
+        default="LOOK_AT",
+    )
+    eye_look_gain: FloatProperty(
+        name="Gain",
+        description="How far the eyes travel for a given look angle, in Look At mode",
+        default=0.35, soft_min=0.0, soft_max=2.0,
+    )
+    eye_look_scale_about_pupil: BoolProperty(
+        name="Scale About Pupil",
+        description="Compensate the UV translate so resizing the pupil keeps it centred and "
+                    "still aimed at the target, instead of sliding it toward the UV origin. "
+                    "Has no effect at scale 1.0",
+        default=True,
+    )
     eye_look_pupil_from_scale: BoolProperty(
         name="Pupil Size From Bone Scale",
         description="Also drive CustomVector31 X/Y (the eye's UV scale) from the control "

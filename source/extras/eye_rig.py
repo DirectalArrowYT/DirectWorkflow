@@ -132,6 +132,100 @@ def look_values_from_control(pbone, sensitivity, clamp, invert_x=False, invert_y
     return dx, -dx, dz
 
 
+def head_frame(arma):
+    """(origin, right, up, forward) in armature space, following the head's pose.
+
+    Anchored on the head bone rather than the eye meshes. Per-eye anchors
+    would allow convergence on close targets, but the eye objects in real
+    files are not reliably placed - in this one both EyeL and EyeR sit on the
+    same side of X - and a wrong anchor makes the character go cross-eyed. One
+    head-centred origin gives both eyes the same direction, which is what you
+    want for anything further away than arm's reach anyway.
+    """
+    from mathutils import Vector
+    pbone = None
+    for candidate in ('Head', 'Face', 'Neck'):
+        pbone = arma.pose.bones.get(candidate)
+        if pbone is not None:
+            break
+    if pbone is None:
+        return None
+
+    rest = pbone.bone.matrix_local.to_3x3()
+    delta = pbone.matrix.to_3x3() @ rest.inverted()
+    forward = (delta @ face_forward(arma, pbone.bone)).normalized()
+    up = (delta @ Vector((0.0, 0.0, 1.0))).normalized()
+    right = forward.cross(up).normalized()
+    up = right.cross(forward).normalized()      # re-orthogonalise
+    return pbone.matrix.translation.copy(), right, up, forward
+
+
+def look_at_values(arma, ctrl_pbone, gain, clamp, invert_x=False, invert_y=False):
+    """(left_u, right_u, v) from actually aiming at where the control sits.
+
+    Unlike the flat offset mode this uses the 3D direction from the head to
+    the control, so the character tracks a target the way an eye would:
+    moving the control further away along the same line changes nothing,
+    moving it off to the side does, and rotating the head keeps the gaze
+    locked on the target instead of dragging it along.
+    """
+    frame = head_frame(arma)
+    if frame is None:
+        return 0.0, 0.0, 0.0
+    origin, right, up, _forward = frame
+    direction = ctrl_pbone.matrix.translation - origin
+    if direction.length < 1e-6:
+        return 0.0, 0.0, 0.0
+    direction.normalize()
+
+    # Projections onto the head's own right/up axes: effectively sin(yaw) and
+    # sin(pitch), so both stay in -1..1 no matter how far the target is.
+    du = max(-clamp, min(clamp, direction.dot(right) * gain))
+    dv = max(-clamp, min(clamp, direction.dot(up) * gain))
+    if invert_x:
+        du = -du
+    if invert_y:
+        dv = -dv
+    return du, -du, dv
+
+
+def eye_uv_centre(arma):
+    """Average UV of the eye meshes - where the pupil sits in texture space."""
+    from mathutils import Vector
+    total = Vector((0.0, 0.0))
+    n = 0
+    for mesh_obj in eye_meshes(arma):
+        me = mesh_obj.data
+        uv_layer = me.uv_layers.active
+        if uv_layer is None:
+            continue
+        for loop in me.loops:
+            uv = uv_layer.data[loop.index].uv
+            total += Vector((uv[0], uv[1]))
+            n += 1
+    if n == 0:
+        return Vector((0.5, 0.5))
+    return total / n
+
+
+def compensate_scale_about_pupil(look_u, look_v, scale, uv_centre):
+    """Re-centre the UV scale on the pupil instead of the UV origin.
+
+    The transform node computes  UV' = S * (UV - T), so S scales about UV
+    (0,0) and resizing the pupil also slides it away from where it was
+    pointing. Solving for the translate that keeps the looked-at point fixed:
+
+        S * (M - T) = M + L    ->    T = M - (M - look) / S
+
+    with M the eye's UV centre. At S = 1 this collapses back to T = look, so
+    turning scaling off changes nothing.
+    """
+    if abs(scale) < 1e-6:
+        return look_u, look_v
+    return (uv_centre.x - (uv_centre.x - look_u) / scale,
+            uv_centre.y - (uv_centre.y - look_v) / scale)
+
+
 def pupil_scale_from_control(pbone, min_cv=0.1, max_cv=10.0):
     """CV31.X/Y (UV layer 2 scale) from the control bone's scale.
 
@@ -150,30 +244,47 @@ def pupil_scale_from_control(pbone, min_cv=0.1, max_cv=10.0):
     return max(min_cv, min(max_cv, 1.0 / average))
 
 
-def apply_look_to_tracks(arma, sensitivity, clamp, invert_x=False, invert_y=False,
-                         use_pupil_scale=False):
+def compute_cv31(arma, pbone, ssp):
+    """(left_u, right_u, v, scale_or_None) to write for this control pose."""
+    if ssp.eye_look_mode == 'LOOK_AT':
+        left_u, right_u, v = look_at_values(
+            arma, pbone, ssp.eye_look_gain, ssp.eye_look_clamp,
+            ssp.eye_look_invert_x, ssp.eye_look_invert_y)
+    else:
+        left_u, right_u, v = look_values_from_control(
+            pbone, ssp.eye_look_sensitivity, ssp.eye_look_clamp,
+            ssp.eye_look_invert_x, ssp.eye_look_invert_y)
+
+    scale = pupil_scale_from_control(pbone) if ssp.eye_look_pupil_from_scale else None
+    if scale is not None and ssp.eye_look_scale_about_pupil:
+        centre = eye_uv_centre(arma)
+        left_u, v_l = compensate_scale_about_pupil(left_u, v, scale, centre)
+        right_u, v_r = compensate_scale_about_pupil(right_u, v, scale, centre)
+        v = v_l if abs(v_l - v_r) < 1e-9 else (v_l + v_r) * 0.5
+    return left_u, right_u, v, scale
+
+
+def apply_look_to_tracks(arma, ssp):
     """Push the control bone's pose into CV31. Returns True if anything moved."""
     pbone = arma.pose.bones.get(EYE_CTRL_BONE)
     if pbone is None:
         return False
     sap = arma.data.sub_anim_properties
-    left_z, right_z, shared_w = look_values_from_control(
-        pbone, sensitivity, clamp, invert_x, invert_y)
-    pupil = pupil_scale_from_control(pbone) if use_pupil_scale else None
+    left_u, right_u, v, scale = compute_cv31(arma, pbone, ssp)
     changed = False
-    for name, z in (('EyeL', left_z), ('EyeR', right_z)):
+    for name, u in (('EyeL', left_u), ('EyeR', right_u)):
         track = sap.mat_tracks.get(name)
         prop = track.properties.get(CV31) if track else None
         if prop is None:
             continue
-        if abs(prop.custom_vector[2] - z) > 1e-7 or abs(prop.custom_vector[3] - shared_w) > 1e-7:
-            prop.custom_vector[2] = z
-            prop.custom_vector[3] = shared_w
+        if abs(prop.custom_vector[2] - u) > 1e-7 or abs(prop.custom_vector[3] - v) > 1e-7:
+            prop.custom_vector[2] = u
+            prop.custom_vector[3] = v
             changed = True
-        if pupil is not None and (abs(prop.custom_vector[0] - pupil) > 1e-7
-                                  or abs(prop.custom_vector[1] - pupil) > 1e-7):
-            prop.custom_vector[0] = pupil
-            prop.custom_vector[1] = pupil
+        if scale is not None and (abs(prop.custom_vector[0] - scale) > 1e-7
+                                  or abs(prop.custom_vector[1] - scale) > 1e-7):
+            prop.custom_vector[0] = scale
+            prop.custom_vector[1] = scale
             changed = True
     return changed
 
@@ -197,9 +308,7 @@ def _eye_look_live_handler(scene, depsgraph=None):
         for obj in scene.objects:
             if obj.type != 'ARMATURE' or EYE_CTRL_BONE not in obj.pose.bones:
                 continue
-            apply_look_to_tracks(obj, ssp.eye_look_sensitivity, ssp.eye_look_clamp,
-                                 ssp.eye_look_invert_x, ssp.eye_look_invert_y,
-                                 ssp.eye_look_pupil_from_scale)
+            apply_look_to_tracks(obj, ssp)
     except Exception as ex:
         print(f"[eye look live] disabled after error: {ex}")
         try:
@@ -440,15 +549,11 @@ class SUB_OT_bake_eye_look(Operator):
         try:
             for frame in range(start, end + 1):
                 scene.frame_set(frame)
-                left_z, right_z, shared_w = look_values_from_control(
-                    pbone, self.sensitivity, self.clamp,
-                    ssp.eye_look_invert_x, ssp.eye_look_invert_y)
-                pupil = (pupil_scale_from_control(pbone)
-                         if ssp.eye_look_pupil_from_scale else None)
+                left_u, right_u, v, pupil = compute_cv31(arma, pbone, ssp)
                 for name, (track_index, track, prop_index) in tracks.items():
                     prop = track.properties[prop_index]
-                    prop.custom_vector[2] = left_z if name == 'EyeL' else right_z
-                    prop.custom_vector[3] = shared_w
+                    prop.custom_vector[2] = left_u if name == 'EyeL' else right_u
+                    prop.custom_vector[3] = v
                     if pupil is not None:
                         prop.custom_vector[0] = pupil
                         prop.custom_vector[1] = pupil
