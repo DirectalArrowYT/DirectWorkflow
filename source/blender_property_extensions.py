@@ -538,6 +538,31 @@ class SubSceneProperties(PropertyGroup):
                     "Preview only - Bake still has to run to create the keyframes export reads",
         default=True,
     )
+    eye_look_gain_y: FloatProperty(
+        name="Gain Y",
+        description="Vertical travel per look angle, in Look At mode. Separate from the "
+                    "horizontal gain because the eye's UV island is not square and the pupil "
+                    "has far less room to move up and down than side to side - equal gains "
+                    "make looking up or down feel dead by comparison",
+        default=0.70, soft_min=0.0, soft_max=4.0,
+    )
+    eye_look_sensitivity_y: FloatProperty(
+        name="Sensitivity Y",
+        description="Vertical UV movement per Blender unit, in Flat Offset mode",
+        default=0.10, soft_min=0.0, soft_max=2.0,
+    )
+    eye_pupil_centre_auto: BoolProperty(
+        name="Auto Pupil Centre",
+        description="Measure the scale pivot from the eye meshes' average UV. Turn off to "
+                    "place it by hand, which you want whenever the pupil is not in the middle "
+                    "of the eye island",
+        default=True,
+    )
+    eye_pupil_centre: FloatVectorProperty(
+        name="Pupil Centre UV",
+        description="The UV the pupil scales about, when Auto Pupil Centre is off",
+        size=2, default=(0.5, 0.5), soft_min=0.0, soft_max=1.0,
+    )
     eye_look_mode: EnumProperty(
         name="Aim Mode",
         description="How the control bone's position becomes an eye direction",

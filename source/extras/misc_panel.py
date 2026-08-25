@@ -384,20 +384,26 @@ class SUB_PT_misc_utilities(Panel):
         eye_box.prop(ssp, "eye_look_mode")
         rowlc = eye_box.row(align=True)
         if ssp.eye_look_mode == 'LOOK_AT':
-            rowlc.prop(ssp, "eye_look_gain")
+            rowlc.prop(ssp, "eye_look_gain", text="Gain X")
+            rowlc.prop(ssp, "eye_look_gain_y", text="Gain Y")
         else:
-            rowlc.prop(ssp, "eye_look_sensitivity")
-        rowlc.prop(ssp, "eye_look_clamp")
+            rowlc.prop(ssp, "eye_look_sensitivity", text="Sens X")
+            rowlc.prop(ssp, "eye_look_sensitivity_y", text="Sens Y")
+        eye_box.prop(ssp, "eye_look_clamp")
         rowinv = eye_box.row(align=True)
         rowinv.prop(ssp, "eye_look_invert_x", toggle=True)
         rowinv.prop(ssp, "eye_look_invert_y", toggle=True)
         eye_box.prop(ssp, "eye_look_pupil_from_scale")
         if ssp.eye_look_pupil_from_scale:
             eye_box.prop(ssp, "eye_look_scale_about_pupil")
+            if ssp.eye_look_scale_about_pupil:
+                eye_box.prop(ssp, "eye_pupil_centre_auto")
+                if not ssp.eye_pupil_centre_auto:
+                    eye_box.prop(ssp, "eye_pupil_centre", text="Centre UV")
+                eye_box.operator("sub.measure_pupil_centre", icon="EYEDROPPER")
             pupil_box = eye_box.box()
             pupil_box.label(text="Scale the control bone (S) to resize", icon="INFO")
             pupil_box.label(text="the pupil. Smaller bone = smaller pupil.")
-            pupil_box.label(text="Resizing also shifts it slightly.")
         eye_box.operator("sub.bake_eye_look", icon="ACTION")
         hint = eye_box.box()
         hint.label(text="Move the control in Pose Mode to preview,", icon="INFO")

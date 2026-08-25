@@ -110,7 +110,8 @@ def control_offset_armature_space(pbone):
     return pbone.bone.matrix_local.to_3x3() @ pbone.location
 
 
-def look_values_from_control(pbone, sensitivity, clamp, invert_x=False, invert_y=False):
+def look_values_from_control(pbone, sensitivity, clamp, invert_x=False, invert_y=False,
+                             sensitivity_y=None):
     """(left_z, right_z, shared_w) CV31 components for the control's pose.
 
     The two eyes take opposite horizontal signs - the eye texture slides the
@@ -123,8 +124,10 @@ def look_values_from_control(pbone, sensitivity, clamp, invert_x=False, invert_y
     answer depends on how the eye UVs were laid out, which varies per model.
     """
     offset = control_offset_armature_space(pbone)
+    if sensitivity_y is None:
+        sensitivity_y = sensitivity
     dx = max(-clamp, min(clamp, offset.x * sensitivity))
-    dz = max(-clamp, min(clamp, offset.z * sensitivity))
+    dz = max(-clamp, min(clamp, offset.z * sensitivity_y))
     if invert_x:
         dx = -dx
     if invert_y:
@@ -160,7 +163,8 @@ def head_frame(arma):
     return pbone.matrix.translation.copy(), right, up, forward
 
 
-def look_at_values(arma, ctrl_pbone, gain, clamp, invert_x=False, invert_y=False):
+def look_at_values(arma, ctrl_pbone, gain, clamp, invert_x=False, invert_y=False,
+                   gain_y=None):
     """(left_u, right_u, v) from actually aiming at where the control sits.
 
     Unlike the flat offset mode this uses the 3D direction from the head to
@@ -180,13 +184,29 @@ def look_at_values(arma, ctrl_pbone, gain, clamp, invert_x=False, invert_y=False
 
     # Projections onto the head's own right/up axes: effectively sin(yaw) and
     # sin(pitch), so both stay in -1..1 no matter how far the target is.
+    if gain_y is None:
+        gain_y = gain
     du = max(-clamp, min(clamp, direction.dot(right) * gain))
-    dv = max(-clamp, min(clamp, direction.dot(up) * gain))
+    dv = max(-clamp, min(clamp, direction.dot(up) * gain_y))
     if invert_x:
         du = -du
     if invert_y:
         dv = -dv
     return du, -du, dv
+
+
+def resolve_pupil_centre(arma, ssp):
+    """Where the UV scale pivots - measured off the mesh, or placed by hand.
+
+    Auto measures the eye meshes' average UV, which lands on the middle of the
+    whole eye island rather than the pupil itself. That is close enough for a
+    symmetric eye but wrong whenever the pupil sits off-centre in the texture,
+    so the value stays editable.
+    """
+    from mathutils import Vector
+    if ssp.eye_pupil_centre_auto:
+        return eye_uv_centre(arma)
+    return Vector((ssp.eye_pupil_centre[0], ssp.eye_pupil_centre[1]))
 
 
 def eye_uv_centre(arma):
@@ -249,15 +269,15 @@ def compute_cv31(arma, pbone, ssp):
     if ssp.eye_look_mode == 'LOOK_AT':
         left_u, right_u, v = look_at_values(
             arma, pbone, ssp.eye_look_gain, ssp.eye_look_clamp,
-            ssp.eye_look_invert_x, ssp.eye_look_invert_y)
+            ssp.eye_look_invert_x, ssp.eye_look_invert_y, ssp.eye_look_gain_y)
     else:
         left_u, right_u, v = look_values_from_control(
             pbone, ssp.eye_look_sensitivity, ssp.eye_look_clamp,
-            ssp.eye_look_invert_x, ssp.eye_look_invert_y)
+            ssp.eye_look_invert_x, ssp.eye_look_invert_y, ssp.eye_look_sensitivity_y)
 
     scale = pupil_scale_from_control(pbone) if ssp.eye_look_pupil_from_scale else None
     if scale is not None and ssp.eye_look_scale_about_pupil:
-        centre = eye_uv_centre(arma)
+        centre = resolve_pupil_centre(arma, ssp)
         left_u, v_l = compensate_scale_about_pupil(left_u, v, scale, centre)
         right_u, v_r = compensate_scale_about_pupil(right_u, v, scale, centre)
         v = v_l if abs(v_l - v_r) < 1e-9 else (v_l + v_r) * 0.5
@@ -573,8 +593,33 @@ class SUB_OT_bake_eye_look(Operator):
         return {'FINISHED'}
 
 
+class SUB_OT_measure_pupil_centre(Operator):
+    """Fill the pupil centre from the eye meshes' UVs"""
+    bl_idname = "sub.measure_pupil_centre"
+    bl_label = "Measure From Mesh"
+    bl_description = ("Set the pupil centre to the eye meshes' average UV and switch to manual, "
+                      "so you can nudge it onto the actual pupil from there")
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return obj is not None and obj.type == 'ARMATURE'
+
+    def execute(self, context):
+        ssp = context.scene.sub_scene_properties
+        centre = eye_uv_centre(context.object)
+        ssp.eye_pupil_centre = (centre.x, centre.y)
+        ssp.eye_pupil_centre_auto = False
+        self.report({'INFO'},
+                    f"Pupil centre set to ({centre.x:.4f}, {centre.y:.4f}) - this is the middle "
+                    "of the whole eye island, so nudge it onto the pupil if they differ")
+        return {'FINISHED'}
+
+
 classes = (
     SUB_OT_setup_eye_cv31,
+    SUB_OT_measure_pupil_centre,
     SUB_OT_add_eye_look_control,
     SUB_OT_bake_eye_look,
 )
