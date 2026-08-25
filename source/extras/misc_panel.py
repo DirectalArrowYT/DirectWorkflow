@@ -297,6 +297,32 @@ class SUB_PT_model_tools(Panel):
         help_box.label(text="Matches bone names exactly (case-sensitive).", icon="INFO")
         help_box.label(text="Only roll values are changed.")
 
+        col = layout.column(align=True)
+        col.separator()
+        col.label(text="Bone Symmetry", icon="MOD_MIRROR")
+        col.prop(ssp, "bone_sym_source")
+        col.prop(ssp, "bone_sym_convention")
+        sym_row = layout.row()
+        active = context.active_object
+        sym_row.enabled = active is not None and active.type == "ARMATURE"
+        sym_row.operator("sub.bone_symmetrize", icon="MOD_MIRROR")
+        layout.row().operator("sub.bone_symmetry_audit", icon="VIEWZOOM")
+        sym_box = layout.box()
+        if ssp.bone_sym_convention == "PURE":
+            sym_box.alert = True
+            sym_box.label(text="Pure mirror is NOT the Smash convention.", icon="ERROR")
+            sym_box.label(text="Mirrored bones end up rolled 180 degrees")
+            sym_box.label(text="from what the game expects.")
+        else:
+            sym_box.label(text="Mirrors head/tail and applies Smash's", icon="INFO")
+            sym_box.label(text="roll rule (180 - roll), not a plain mirror.")
+        sym_box.label(text="Geometry and parenting only - no constraints,")
+        sym_box.label(text="custom shapes or vertex weights.")
+        adv = layout.box()
+        adv.label(text="Advanced", icon="PREFERENCES")
+        adv.prop(ssp, "bone_sym_extra_pairs")
+        adv.prop(ssp, "bone_sym_center_eps")
+
 class SUB_PT_misc_utilities(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'

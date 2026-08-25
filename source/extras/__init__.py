@@ -24,6 +24,7 @@ from . import user_poses
 from . import reset_animation
 from . import mirror_animation
 from . import roll_copy
+from . import bone_symmetry
 from . import stage_tools
 
 # Import animation_scroll module
@@ -38,6 +39,7 @@ def register():
     mirror_animation.register()
 
     roll_copy.register()
+    bone_symmetry.register()
     stage_tools.register()
     
     # Register rename_utils
@@ -72,6 +74,7 @@ def unregister():
     reset_animation.unregister()
     
     roll_copy.unregister()
+    bone_symmetry.unregister()
     stage_tools.unregister()
 
     # Unregister mirror_animation

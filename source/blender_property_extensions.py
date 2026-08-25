@@ -497,6 +497,41 @@ class SubSceneProperties(PropertyGroup):
         description="Only copy rolls for bones currently selected on the target armature",
         default=False,
     )
+    bone_sym_source: EnumProperty(
+        name="Mirror From",
+        description="Which side to mirror FROM - the opposite side is created or overwritten",
+        items=[
+            ("NEG", "-X side", "Mirror every bone on the -X side onto +X"),
+            ("POS", "+X side", "Mirror every bone on the +X side onto -X"),
+            ("SEL", "Selected", "Mirror only the selected bones onto their opposite names"),
+        ],
+        default="NEG",
+    )
+    bone_sym_convention: EnumProperty(
+        name="Roll Convention",
+        description="How the mirrored bone's roll is derived from the source bone's",
+        items=[
+            ("SMASH", "Smash (180 - roll)",
+             "What Smash Ultimate rigs actually use - measured on vanilla imports, where "
+             "every unambiguous L/R pair follows it. A pure mirror leaves each mirrored "
+             "bone rolled 180 degrees from what the game and its animations expect"),
+            ("PURE", "Pure mirror (-roll)",
+             "A plain geometric reflection, the same thing Blender's own Symmetrize does. "
+             "Correct for ordinary rigs, wrong for Smash"),
+        ],
+        default="SMASH",
+    )
+    bone_sym_center_eps: FloatProperty(
+        name="Centre Tolerance",
+        description="Bones within this distance of X=0 count as centre bones and are skipped",
+        default=1e-4, min=0.0, precision=5,
+    )
+    bone_sym_extra_pairs: StringProperty(
+        name="Extra Name Pairs",
+        description="Custom name swaps the automatic rules can't catch, e.g. "
+                    "'SHair_R=SHair_L, Tail_R=Tail_L'. Applied before the built-in defaults",
+        default="",
+    )
     mirror_animation_expanded: BoolProperty(
         name="Mirror Animation Expanded",
         description="Whether the Mirror Animation section is expanded",
