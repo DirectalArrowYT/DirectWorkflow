@@ -538,6 +538,17 @@ class SubSceneProperties(PropertyGroup):
                     "Preview only - Bake still has to run to create the keyframes export reads",
         default=True,
     )
+    eye_look_invert_x: BoolProperty(
+        name="Invert X",
+        description="Flip which way the eyes look horizontally, if your model's eye UVs "
+                    "are mirrored the other way",
+        default=False,
+    )
+    eye_look_invert_y: BoolProperty(
+        name="Invert Y",
+        description="Flip which way the eyes look vertically",
+        default=False,
+    )
     eye_look_sensitivity: FloatProperty(
         name="Sensitivity",
         description="UV units the eye moves per Blender unit the control moves",

@@ -110,22 +110,36 @@ def control_offset_armature_space(pbone):
     return pbone.bone.matrix_local.to_3x3() @ pbone.location
 
 
-def look_values_from_control(pbone, sensitivity, clamp):
-    """(left_z, right_z, shared_w) CV31 components for the control's pose."""
+def look_values_from_control(pbone, sensitivity, clamp, invert_x=False, invert_y=False):
+    """(left_z, right_z, shared_w) CV31 components for the control's pose.
+
+    The two eyes take opposite horizontal signs - the eye texture slides the
+    other way on the mirrored UV - while vertical is shared.
+
+    Which eye gets which sign was originally taken from the existing CV31
+    mouse modal, but that modal derives its offset from a reversed mouse delta
+    (temp_mouse - event.mouse), so copying its signs directly inverted the
+    horizontal look. Corrected here; the toggles exist because the right
+    answer depends on how the eye UVs were laid out, which varies per model.
+    """
     offset = control_offset_armature_space(pbone)
     dx = max(-clamp, min(clamp, offset.x * sensitivity))
     dz = max(-clamp, min(clamp, offset.z * sensitivity))
-    # X is mirrored between the eyes, matching the existing CV31 mouse modal.
-    return -dx, dx, dz
+    if invert_x:
+        dx = -dx
+    if invert_y:
+        dz = -dz
+    return dx, -dx, dz
 
 
-def apply_look_to_tracks(arma, sensitivity, clamp):
+def apply_look_to_tracks(arma, sensitivity, clamp, invert_x=False, invert_y=False):
     """Push the control bone's pose into CV31. Returns True if anything moved."""
     pbone = arma.pose.bones.get(EYE_CTRL_BONE)
     if pbone is None:
         return False
     sap = arma.data.sub_anim_properties
-    left_z, right_z, shared_w = look_values_from_control(pbone, sensitivity, clamp)
+    left_z, right_z, shared_w = look_values_from_control(
+        pbone, sensitivity, clamp, invert_x, invert_y)
     changed = False
     for name, z in (('EyeL', left_z), ('EyeR', right_z)):
         track = sap.mat_tracks.get(name)
@@ -158,7 +172,8 @@ def _eye_look_live_handler(scene, depsgraph=None):
         for obj in scene.objects:
             if obj.type != 'ARMATURE' or EYE_CTRL_BONE not in obj.pose.bones:
                 continue
-            apply_look_to_tracks(obj, ssp.eye_look_sensitivity, ssp.eye_look_clamp)
+            apply_look_to_tracks(obj, ssp.eye_look_sensitivity, ssp.eye_look_clamp,
+                                 ssp.eye_look_invert_x, ssp.eye_look_invert_y)
     except Exception as ex:
         print(f"[eye look live] disabled after error: {ex}")
         try:
@@ -400,7 +415,8 @@ class SUB_OT_bake_eye_look(Operator):
             for frame in range(start, end + 1):
                 scene.frame_set(frame)
                 left_z, right_z, shared_w = look_values_from_control(
-                    pbone, self.sensitivity, self.clamp)
+                    pbone, self.sensitivity, self.clamp,
+                    ssp.eye_look_invert_x, ssp.eye_look_invert_y)
                 for name, (track_index, track, prop_index) in tracks.items():
                     prop = track.properties[prop_index]
                     prop.custom_vector[2] = left_z if name == 'EyeL' else right_z
