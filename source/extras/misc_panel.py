@@ -353,6 +353,7 @@ class SUB_PT_misc_utilities(Panel):
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = False
+        ssp = context.scene.sub_scene_properties
 
         # Eye Material Custom Vector 31 Modal Operator
         eye_box = layout.box()
