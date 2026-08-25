@@ -355,8 +355,35 @@ class SUB_PT_misc_utilities(Panel):
         layout.use_property_split = False
 
         # Eye Material Custom Vector 31 Modal Operator
-        row = layout.row(align=True)
-        row.operator("sub.eye_material_custom_vector_31_modal")
+        eye_box = layout.box()
+        eye_box.label(text="Eye Look (CustomVector31)", icon="HIDE_OFF")
+        eye_box.operator("sub.setup_eye_cv31", icon="DRIVER")
+        row = eye_box.row(align=True)
+        row.operator("sub.eye_material_custom_vector_31_modal", text="Aim Eyes With Mouse")
+
+        # Warn when the modal has nothing to edit. It cancels with a message
+        # about loading an animation, which sends people looking in the wrong
+        # place - the usual cause is a track that exists with no CV31 property.
+        arma = context.object if (context.object and context.object.type == 'ARMATURE') else None
+        if arma is not None:
+            sap = arma.data.sub_anim_properties
+            ready = any((t := sap.mat_tracks.get(n)) is not None
+                        and t.properties.get('CustomVector31') is not None
+                        for n in ('EyeL', 'EyeR'))
+            if not ready:
+                warn = eye_box.box()
+                warn.alert = True
+                warn.label(text="No EyeL/EyeR CustomVector31 yet -", icon="ERROR")
+                warn.label(text="aiming will do nothing. Run Set Up first.")
+
+        eye_box.separator()
+        eye_box.label(text="Look Control Rig", icon="BONE_DATA")
+        eye_box.operator("sub.add_eye_look_control", icon="PLUS")
+        eye_box.operator("sub.bake_eye_look", icon="ACTION")
+        hint = eye_box.box()
+        hint.label(text="Move the control in Pose Mode, then Bake.", icon="INFO")
+        hint.label(text="Baking writes real keyframes because export")
+        hint.label(text="reads fcurves, not drivers.")
 
         layout.separator()
         box = layout.box()
