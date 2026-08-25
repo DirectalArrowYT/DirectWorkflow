@@ -78,17 +78,37 @@ def get_sampler(sub_matl_sampler: SUB_PG_matl_sampler) -> ssbh_data_py.matl_data
 def get_samplers(samplers: list[SUB_PG_matl_sampler]) -> list[ssbh_data_py.matl_data.SamplerParam]:
     return [get_sampler(sub_matl_sampler) for sub_matl_sampler in samplers]
 
-def get_texture(sub_matl_texture: SUB_PG_matl_texture, texture_overrides: dict[str, str] = None) -> ssbh_data_py.matl_data.TextureParam:
-    image_name = sub_matl_texture.image.name
-    if texture_overrides is not None:
-        image_name = texture_overrides.get(sub_matl_texture.param_id_name, image_name)
+# Fallback image name per texture param when a slot has no image assigned
+# (e.g. a texture node was deleted/unlinked) and no bundle override supplies
+# one either - matches the defaults create_default_matl_entry() uses.
+MISSING_TEXTURE_DEFAULTS: dict[str, str] = {
+    'Texture0': '/common/shader/sfxpbs/default_params_r100_g025_b100',
+    'Texture4': '/common/shader/sfxpbs/fighter/default_normal',
+    'Texture6': '/common/shader/sfxpbs/fighter/default_params',
+    'Texture7': '#replace_cubemap',
+}
+
+def get_texture(operator: bpy.types.Operator, material_label: str, sub_matl_texture: SUB_PG_matl_texture, texture_overrides: dict[str, str] = None) -> ssbh_data_py.matl_data.TextureParam:
+    # A bundled/Shiny-style material's own texture slots are legitimately
+    # image-less (see get_texture_overrides_for_bundle - it supplies the base
+    # material's image instead), so check for an override first and only
+    # warn about a missing image when nothing is going to rescue it.
+    override = texture_overrides.get(sub_matl_texture.param_id_name) if texture_overrides is not None else None
+    if override is not None:
+        image_name = override
+    elif sub_matl_texture.image is not None:
+        image_name = sub_matl_texture.image.name
+    else:
+        image_name = MISSING_TEXTURE_DEFAULTS.get(sub_matl_texture.param_id_name, '/common/shader/sfxpbs/default_white')
+        operator.report({'WARNING'}, f'Material "{material_label}" has no image assigned to '
+                                      f'{sub_matl_texture.param_id_name} - using "{image_name}" instead.')
     return ssbh_data_py.matl_data.TextureParam(
         param_id=ssbh_data_py.matl_data.ParamId.from_str(sub_matl_texture.param_id_name),
         data=image_name
     )
 
-def get_textures(textures: list[SUB_PG_matl_texture], texture_overrides: dict[str, str] = None) -> list[ssbh_data_py.matl_data.TextureParam]:
-    return [get_texture(sub_matl_texture, texture_overrides) for sub_matl_texture in textures]
+def get_textures(operator: bpy.types.Operator, material_label: str, textures: list[SUB_PG_matl_texture], texture_overrides: dict[str, str] = None) -> list[ssbh_data_py.matl_data.TextureParam]:
+    return [get_texture(operator, material_label, sub_matl_texture, texture_overrides) for sub_matl_texture in textures]
 
 def get_texture_overrides_for_bundle(material: bpy.types.Material, materials_by_name: dict[str, bpy.types.Material], data_source_by_name: dict[str, bpy.types.Material] = None) -> dict[str, str] | None:
     """Point a Shiny-style bundled material's textures at its base material's.
@@ -215,7 +235,7 @@ def create_default_matl_entry(material_label: str) -> ssbh_data_py.matl_data.Mat
 
     return entry
 
-def create_matl_entry_from_sub_matl_data(material_label: str, sub_matl_data: SUB_PG_sub_matl_data, texture_overrides: dict[str, str] = None) -> ssbh_data_py.matl_data.MatlEntryData:
+def create_matl_entry_from_sub_matl_data(operator: bpy.types.Operator, material_label: str, sub_matl_data: SUB_PG_sub_matl_data, texture_overrides: dict[str, str] = None) -> ssbh_data_py.matl_data.MatlEntryData:
     return ssbh_data_py.matl_data.MatlEntryData(
         material_label=material_label,
         shader_label=sub_matl_data.shader_label,
@@ -225,7 +245,7 @@ def create_matl_entry_from_sub_matl_data(material_label: str, sub_matl_data: SUB
         vectors=get_vectors(sub_matl_data.vectors),
         rasterizer_states=get_rasterizer_states(sub_matl_data.rasterizer_states),
         samplers=get_samplers(sub_matl_data.samplers),
-        textures=get_textures(sub_matl_data.textures, texture_overrides),
+        textures=get_textures(operator, material_label, sub_matl_data.textures, texture_overrides),
     )
 
 def create_matl_from_blender_materials(operator: bpy.types.Operator, blender_materials: set[bpy.types.Material]) -> ssbh_data_py.matl_data.MatlData:
@@ -248,7 +268,7 @@ def create_matl_from_blender_materials(operator: bpy.types.Operator, blender_mat
         data_source = data_source_by_name[material.name]
         if has_sub_matl_data(data_source):
             texture_overrides = get_texture_overrides_for_bundle(material, materials_by_name, data_source_by_name)
-            new_matl_entry = create_matl_entry_from_sub_matl_data(material.name, data_source.sub_matl_data, texture_overrides)
+            new_matl_entry = create_matl_entry_from_sub_matl_data(operator, material.name, data_source.sub_matl_data, texture_overrides)
         else:
             new_matl_entry = create_default_matl_entry(material.name)
         matl.entries.append(new_matl_entry)

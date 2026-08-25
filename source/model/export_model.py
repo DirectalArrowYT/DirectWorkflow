@@ -1245,7 +1245,11 @@ def make_mesh_object(operator, context, mesh: bpy.types.Object, group_name, i, m
     positions = np.zeros(len(mesh_data.vertices) * 3, dtype=np.float32)
     mesh_data.vertices.foreach_get('co', positions)
     # The output data is flattened, so we need to reshape it into the appropriate number of rows and columns.
-    position0.data = positions.reshape((-1, 3)) @ axis_correction
+    # axis_correction is a float64 numpy array (mathutils.Matrix iterates as
+    # Python floats), so this matmul silently upcasts positions to float64 -
+    # cast back to float32 like normal0.data below does, since ssbh_data_py
+    # rejects a float64 array here.
+    position0.data = (positions.reshape((-1, 3)) @ axis_correction).astype(np.float32)
     ssbh_mesh_object.positions = [position0]
 
     # Store vertex indices as a numpy array for faster indexing later.
@@ -1410,7 +1414,8 @@ def make_mesh_object(operator, context, mesh: bpy.types.Object, group_name, i, m
 
     tangents = per_loop_to_per_vertex(loop_tangents, vertex_indices, (len(mesh.data.vertices), 3))
     bitangent_signs = per_loop_to_per_vertex(loop_bitangent_signs, vertex_indices, (len(mesh.data.vertices), 1))
-    tangent0.data = np.append(tangents @ axis_correction, bitangent_signs * -1.0, axis=1)
+    # Same float64 upcast issue as position0.data above.
+    tangent0.data = np.append(tangents @ axis_correction, bitangent_signs * -1.0, axis=1).astype(np.float32)
 
     ssbh_mesh_object.tangents = [tangent0]
             
