@@ -295,6 +295,7 @@ class MatlContext:
 
     def __init__(self, material):
         self.material = material
+        self.data_source = material
         self.shader_label = ''
         self.anisotropy = 0.0
         self.prm_alpha_is_used = True
@@ -302,7 +303,30 @@ class MatlContext:
         self.reads_emissive = False
         self.notes = []
 
-        sub_matl_data = getattr(material, 'sub_matl_data', None)
+        # Read the same material data export will read. A side-loaded twin is
+        # never assigned to a mesh, so walking material slots only ever finds
+        # the live material - and when the twin is the one carrying the real
+        # shader (the whole point of side-loading), every decision below was
+        # being made against the wrong material. That silently disabled all of
+        # it: a Skin preset applied to the twin left the baker still writing
+        # metalness into PRM.r, because as far as it could see the material was
+        # on a plain PBR shader.
+        # Guarded: the scene property group is not guaranteed to be attached
+        # yet depending on when this runs, and losing the side-load resolution
+        # is far better than the whole bake dying over a missing preference.
+        try:
+            from ..model.material.create_matl_from_blender_materials import (
+                resolve_material_data_source,
+            )
+            scene_props = getattr(bpy.context.scene, 'sub_scene_properties', None)
+            prefer_side_loaded = bool(
+                scene_props and scene_props.export_prefer_sideloaded_materials)
+            self.data_source = resolve_material_data_source(material, prefer_side_loaded)
+        except Exception as e:
+            self.notes.append(f'could not resolve side-loaded data ({e}) - using this material')
+            self.data_source = material
+
+        sub_matl_data = getattr(self.data_source, 'sub_matl_data', None)
         if sub_matl_data is None or not sub_matl_data.shader_label:
             return
 
@@ -331,10 +355,19 @@ class MatlContext:
     def prm_alpha_is_rotation(self):
         return abs(self.anisotropy) > 1e-6
 
+    @property
+    def uses_side_loaded_data(self):
+        return self.data_source is not self.material
+
     def describe(self):
         if not self.shader_label:
+            if self.uses_side_loaded_data:
+                return (f"no Smash material data on '{self.data_source.name}' - "
+                        f"baking with plain PBR rules")
             return "no Smash material data - baking with plain PBR rules"
         bits = [self.shader_label]
+        if self.uses_side_loaded_data:
+            bits.append(f"data from '{self.data_source.name}'")
         if self.is_subsurface:
             bits.append("subsurface (PRM.r = SSS mask)")
         if self.prm_alpha_is_rotation:
