@@ -31,6 +31,7 @@ from . import stage_tools
 
 # Import animation_scroll module
 from . import animation_scroll
+from . import vis_mesh_bake
 
 # Explicit registration function for the package
 def register():
@@ -50,6 +51,7 @@ def register():
     
     # Register animation_scroll
     animation_scroll.register()
+    vis_mesh_bake.register()
     face_picker.register()
     
     # Register misc_panel first since IK panel depends on it
@@ -67,6 +69,7 @@ def register():
     
 def unregister():
     face_picker.unregister()
+    vis_mesh_bake.unregister()
     # Unregister animation_scroll
     animation_scroll.unregister()
     
