@@ -255,6 +255,10 @@ class SUB_PT_model_tools(Panel):
         row.operator("sub.unstack_uv_islands", text="Unstack UV Islands")
 
         row = layout.row(align=True)
+        row.operator_context = 'INVOKE_DEFAULT'
+        row.operator("sub.smart_hair_seams", text="Smart Seams (Hair)", icon='MOD_UVPROJECT')
+
+        row = layout.row(align=True)
         if context.mode == 'OBJECT':
             row.label(text="Shape Keys Prefix:")
             row.prop(ssp, "shape_keys_prefix", text="")

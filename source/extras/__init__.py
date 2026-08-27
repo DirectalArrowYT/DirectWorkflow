@@ -16,6 +16,7 @@ from . import ik_fk_switch
 from . import ik_pole_alignment
 from . import limit_weights
 from . import unstack_uvs
+from . import smart_hair_seams
 from . import rename_utils
 from . import fk_to_ik
 from . import user_poses

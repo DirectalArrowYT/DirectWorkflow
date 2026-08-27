@@ -107,6 +107,7 @@ classes = [
     source.extras.user_poses.SUB_OP_user_pose_apply_selected,
     source.extras.limit_weights.SUB_OP_limit_weights,
     source.extras.unstack_uvs.SUB_OP_unstack_uv_islands,
+    source.extras.smart_hair_seams.SUB_OP_smart_hair_seams,
     source.extras.roll_copy.SUB_OT_copy_bone_rolls,
     source.extras.animation_scroll.SUB_OP_animation_scroll_modal,
     source.anim.anim_data.SUB_PT_sub_smush_anim_data_main,
