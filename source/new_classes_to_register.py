@@ -37,6 +37,7 @@ classes = [
     source.exo.exo_weight_transfer.SUB_OP_transfer_exo_weights,
     source.exo.exo_bone_align.SUB_OP_align_exo_bones,
     source.exo.exo_bone_cleanup.SUB_OP_cleanup_unused_exo_bones,
+    source.exo.merge_rigs.SUB_OP_merge_rigs,
     source.anim.import_anim.SUB_PT_import_anim,
     source.anim.import_anim.SUB_OP_import_anim,
     source.anim.import_anim.SUB_UL_animation_import_list,
