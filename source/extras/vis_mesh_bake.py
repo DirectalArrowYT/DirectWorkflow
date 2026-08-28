@@ -25,11 +25,13 @@ The weight rule is the whole reason this is not just "apply modifier":
 """
 
 import re
+import textwrap
 
 import bpy
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
+    EnumProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
@@ -40,6 +42,20 @@ from bpy.types import Operator, Panel, PropertyGroup, UIList
 VIS_MESH_RE = re.compile(r"^(?P<fighter>.+?)_(?P<vis>.+)_VIS_O_OBJShape(?:\.\d+)?$")
 
 VIS_NAME_TEMPLATE = "{fighter}_{name}_VIS_O_OBJShape"
+
+HALF_ITEMS = (
+    ('UPPER', "Upper", "Bake from the upper face mesh — eyes and blinks"),
+    ('LOWER', "Lower", "Bake from the lower face mesh — mouth and jaw"),
+)
+
+# VIS names that belong to the lower half. Smash prefixes every mouth shape with `Mouth_`, so
+# the split is readable straight off the imported mesh names.
+LOWER_HINTS = ("mouth", "lip", "voice", "talk")
+
+# ...but an eye name wins over those, because the two vocabularies overlap: `Blink_Talk` is the
+# eye shape used *while* talking, not a mouth shape, and matching "talk" first would file it
+# under the wrong mesh.
+UPPER_HINTS = ("blink", "eye")
 
 # Suggested AJ -> Smash face-bone pairings, used only to prefill the remap list. These are
 # proposals for the user to confirm, never applied on their own: an unconfirmed row is just a
@@ -96,6 +112,115 @@ REMAP_SUGGESTIONS = {
 
 def _settings(context):
     return context.scene.sub_vis_bake
+
+
+def _source_for(settings, entry):
+    """The mesh a row bakes from — the upper half for eyes, the lower half for the mouth."""
+    return settings.source_lower if entry.half == 'LOWER' else settings.source_upper
+
+
+def _active_sources(settings):
+    """(label, object) for each source slot that is filled, for the whole-list operators."""
+    return [
+        (label, obj)
+        for label, obj in (("Upper", settings.source_upper), ("Lower", settings.source_lower))
+        if obj is not None
+    ]
+
+
+def _format_name(settings, entry):
+    """The object name a row bakes to, or `None` if the template cannot be filled in.
+
+    Returns `None` rather than raising so the caller can refuse the whole run with one clear
+    message instead of a traceback halfway through.
+    """
+    try:
+        return settings.name_template.format(
+            name=entry.name,
+            fighter=settings.fighter_prefix,
+            frame=entry.frame,
+        )
+    except (KeyError, IndexError, ValueError):
+        return None
+
+
+def _template_problem(settings) -> str:
+    """Why the current name template cannot produce one distinct name per row, if it can't.
+
+    A template with no `{name}` in it formats every row to the same string, and Blender then
+    silently disambiguates with `.001`, `.002` — so a run "succeeds" and leaves a pile of
+    identically named meshes that have to be matched back up by hand. Catching it here is the
+    difference between a refused bake and an hour of renaming.
+    """
+    template = settings.name_template
+    if not template.strip():
+        return "The name template is empty"
+    probe = type("Probe", (), {"name": "X", "frame": 1})()
+    if _format_name(settings, probe) is None:
+        return (
+            f"The name template {template!r} uses a placeholder that does not exist. "
+            "Only {name}, {fighter} and {frame} are available"
+        )
+    if "{name}" not in template:
+        return (
+            f"The name template {template!r} has no {{name}} in it, so every row would bake to "
+            "the same object name. Use the preset button beside the field for the standard "
+            "VIS naming"
+        )
+    return ""
+
+
+def _deform_armature(source_obj):
+    """The rig that actually deforms `source_obj` — its Armature modifier's target.
+
+    This is deliberately not the object's parent and not the rig chosen for binding output.
+    A retargeted face mesh is routinely parented to the character rig for organisation while
+    being deformed by a separate facial rig, and playing the action on the parent then poses
+    a skeleton nothing is skinned to: the bake still runs, and every mesh comes out in rest
+    pose. The modifier is the only thing that says which rig the vertices follow.
+    """
+    for modifier in source_obj.modifiers:
+        if modifier.type == 'ARMATURE' and modifier.object is not None:
+            return modifier.object
+    parent = source_obj.parent
+    return parent if parent is not None and parent.type == 'ARMATURE' else None
+
+
+def _bind_target(settings, source_obj):
+    """The rig a baked mesh is parented and bound to.
+
+    Falls back to the source mesh's own parent, which in the usual setup is exactly right: the
+    face mesh is parented to the Smash rig for organisation while an Armature modifier deforms
+    it from the facial rig. The parent is therefore the rig the output belongs on, and the
+    modifier is the rig the animation plays on — the two are read from different places on
+    purpose, so neither has to be configured by hand.
+    """
+    if settings.armature is not None:
+        return settings.armature
+    parent = source_obj.parent
+    return parent if parent is not None and parent.type == 'ARMATURE' else None
+
+
+def _assign_action(rig, action):
+    """Put `action` on `rig` so it actually evaluates.
+
+    Blender 4.4+ splits an action into slots, and assigning `animation_data.action` can leave
+    no slot bound — the action is attached, evaluates to nothing, and the rig stays at rest.
+    Bind the first slot when one is not chosen for us.
+    """
+    rig.animation_data.action = action
+    try:
+        if rig.animation_data.action_slot is None and getattr(action, "slots", None):
+            rig.animation_data.action_slot = action.slots[0]
+    except (AttributeError, TypeError):
+        pass
+
+
+def _guess_half(vis_name: str) -> str:
+    lowered = vis_name.lower()
+    if any(hint in lowered for hint in UPPER_HINTS):
+        return 'UPPER'
+    return 'LOWER' if any(hint in lowered for hint in LOWER_HINTS) else 'UPPER'
 
 
 def _reference_group_names(reference) -> set[str]:
@@ -205,7 +330,7 @@ def _resolve_group_targets(vertex_groups, settings) -> tuple[dict[int, str], set
 
 def _bake_one(context, settings, entry, depsgraph_frame_set) -> tuple[object, set[str]]:
     """Evaluate the source mesh at one frame and build a standalone object from it."""
-    source_obj = settings.source_object
+    source_obj = _source_for(settings, entry)
     depsgraph_frame_set(entry)
 
     depsgraph = context.evaluated_depsgraph_get()
@@ -214,11 +339,18 @@ def _bake_one(context, settings, entry, depsgraph_frame_set) -> tuple[object, se
         eval_obj, preserve_all_data_layers=True, depsgraph=depsgraph
     )
 
-    name = settings.name_template.format(
-        name=entry.name,
-        fighter=settings.fighter_prefix,
-        frame=entry.frame,
-    )
+    name = _format_name(settings, entry)
+
+    # The imported Smash VIS meshes already hold these names, so Blender would hand the bake
+    # `…_VIS_O_OBJShape.001` and the exporter would not see the name it needs. Move the old one
+    # aside instead of deleting it: it is usually still the bone reference, and a rename keeps
+    # every pointer to it intact while freeing the name.
+    if settings.replace_existing:
+        for datablocks in (bpy.data.objects, bpy.data.meshes):
+            previous = datablocks.get(name)
+            if previous is not None and previous is not source_obj:
+                previous.name = f"{name}_old"
+
     mesh.name = name
     new_obj = bpy.data.objects.new(name, mesh)
     new_obj.matrix_world = source_obj.matrix_world.copy()
@@ -277,13 +409,23 @@ def _bake_one(context, settings, entry, depsgraph_frame_set) -> tuple[object, se
 
     context.collection.objects.link(new_obj)
 
-    if settings.bind_armature and settings.armature:
-        new_obj.parent = settings.armature
-        new_obj.matrix_parent_inverse = settings.armature.matrix_world.inverted()
-        modifier = new_obj.modifiers.new(name="Armature", type='ARMATURE')
-        modifier.object = settings.armature
+    unbound: set[str] = set()
+    if settings.bind_armature:
+        bind = _bind_target(settings, source_obj)
+        if bind is not None:
+            new_obj.parent = bind
+            new_obj.matrix_parent_inverse = bind.matrix_world.inverted()
+            modifier = new_obj.modifiers.new(name="Armature", type='ARMATURE')
+            modifier.object = bind
+            # A group with no bone of that name on the bind rig is inert — the mesh looks
+            # bound and simply will not follow. Worth naming, because the reference that
+            # decided these names can be a mesh skinned to a different skeleton entirely.
+            bones = {bone.name for bone in bind.data.bones}
+            unbound = {
+                group.name for group in new_obj.vertex_groups if group.name not in bones
+            }
 
-    return new_obj, collapsed
+    return new_obj, collapsed, unbound
 
 
 class SUB_PG_vis_bake_entry(PropertyGroup):
@@ -298,6 +440,12 @@ class SUB_PG_vis_bake_entry(PropertyGroup):
         default="",
     )
     frame: IntProperty(name="Frame", description="Frame to bake", default=1)
+    half: EnumProperty(
+        name="Half",
+        description="Which source mesh this shape comes from",
+        items=HALF_ITEMS,
+        default='UPPER',
+    )
     use: BoolProperty(name="Bake", description="Include this row in Bake All", default=True)
 
 
@@ -310,15 +458,32 @@ class SUB_PG_vis_bake_remap(PropertyGroup):
 
 
 class SUB_PG_vis_bake(PropertyGroup):
-    source_object: PointerProperty(
-        name="Source Mesh",
-        description="The animated AJ face mesh to bake from. It is never modified",
+    source_upper: PointerProperty(
+        name="Upper Mesh",
+        description=(
+            "Animated AJ mesh for the eyes and blinks. Rows set to Upper bake from this. "
+            "It is never modified"
+        ),
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'MESH',
+    )
+    source_lower: PointerProperty(
+        name="Lower Mesh",
+        description=(
+            "Animated AJ mesh for the mouth and jaw. Rows set to Lower bake from this. "
+            "It is never modified"
+        ),
         type=bpy.types.Object,
         poll=lambda self, obj: obj.type == 'MESH',
     )
     armature: PointerProperty(
-        name="Rig",
-        description="Armature that plays the facial actions",
+        name="Bind To",
+        description=(
+            "Armature the BAKED meshes are parented and bound to — normally the Smash rig. "
+            "The rig the animation plays on is not this one: it is taken from each source "
+            "mesh's own Armature modifier, so a face deformed by a separate facial rig works "
+            "without setting anything"
+        ),
         type=bpy.types.Object,
         poll=lambda self, obj: obj.type == 'ARMATURE',
     )
@@ -343,8 +508,12 @@ class SUB_PG_vis_bake(PropertyGroup):
     )
     name_template: StringProperty(
         name="Name Template",
-        description="Output object name. {name}, {fighter} and {frame} are substituted",
-        default="{name}",
+        description=(
+            "Output object name. {name}, {fighter} and {frame} are substituted — plain text "
+            "with no {name} in it would give every row the same name. Defaults to the naming "
+            "the model exporter expects"
+        ),
+        default=VIS_NAME_TEMPLATE,
     )
     neutralize_unkeyed: BoolProperty(
         name="Rest Unkeyed Bones",
@@ -358,6 +527,16 @@ class SUB_PG_vis_bake(PropertyGroup):
         name="Normalize Weights",
         description="Rescale each vertex's folded weights to sum to 1",
         default=True,
+    )
+    replace_existing: BoolProperty(
+        name="Take Name From Existing",
+        description=(
+            "If an object already holds the name a row bakes to — usually the imported VIS "
+            "mesh being replaced — rename that one to <name>_old so the new mesh gets the "
+            "exact name the exporter expects, instead of Blender appending .001. Nothing is "
+            "deleted"
+        ),
+        default=False,
     )
     drop_empty_groups: BoolProperty(
         name="Drop Empty Groups",
@@ -377,13 +556,19 @@ class SUB_PG_vis_bake(PropertyGroup):
 
 class SUB_UL_vis_bake_entries(UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        settings = _settings(context)
         row = layout.row(align=True)
         row.prop(item, "use", text="")
         row.prop(item, "name", text="", emboss=False)
+        half = row.row(align=True)
+        half.scale_x = 0.55
+        # Flag a row whose half has no mesh assigned, rather than letting the bake fail later.
+        half.alert = _source_for(settings, item) is None
+        half.prop(item, "half", text="")
         sub = row.row(align=True)
-        sub.scale_x = 0.9
+        sub.scale_x = 0.85
         sub.prop_search(item, "action", bpy.data, "actions", text="", icon='ACTION')
-        sub.scale_x = 0.4
+        sub.scale_x = 0.35
         sub.prop(item, "frame", text="")
 
 
@@ -486,6 +671,7 @@ class SUB_OP_vis_bake_populate(Operator):
             entry = settings.entries.add()
             entry.name = vis_name
             entry.frame = 1
+            entry.half = _guess_half(vis_name)
             entry.use = False
             added += 1
 
@@ -495,6 +681,32 @@ class SUB_OP_vis_bake_populate(Operator):
 
         settings.entries_index = max(0, len(settings.entries) - 1)
         self.report({'INFO'}, f"Added {added} row(s) from {len(found)} VIS mesh name(s)")
+        return {'FINISHED'}
+
+
+class SUB_OP_vis_bake_guess_halves(Operator):
+    bl_idname = "sub.vis_bake_guess_halves"
+    bl_label = "Guess Halves From Names"
+    bl_description = (
+        "Re-read every row's name and set Upper or Lower from it. Populate only assigns a half "
+        "to rows it creates, so use this on a list saved before the two-mesh split existed, or "
+        "after renaming rows"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_settings(context).entries)
+
+    def execute(self, context):
+        settings = _settings(context)
+        changed = 0
+        for entry in settings.entries:
+            guess = _guess_half(entry.name)
+            if entry.half != guess:
+                entry.half = guess
+                changed += 1
+        self.report({'INFO'}, f"Reassigned {changed} row(s)")
         return {'FINISHED'}
 
 
@@ -521,7 +733,7 @@ class SUB_OP_vis_bake_guess_remaps(Operator):
     @classmethod
     def poll(cls, context):
         settings = _settings(context)
-        return settings.source_object is not None and settings.bone_reference is not None
+        return bool(_active_sources(settings)) and settings.bone_reference is not None
 
     def execute(self, context):
         settings = _settings(context)
@@ -529,16 +741,20 @@ class SUB_OP_vis_bake_guess_remaps(Operator):
         existing = {entry.name for entry in settings.remaps}
 
         added = 0
-        for group in settings.source_object.vertex_groups:
-            if group.name in allowed or group.name in existing:
-                continue
-            suggestion = REMAP_SUGGESTIONS.get(group.name.lower())
-            if not suggestion or suggestion not in allowed:
-                continue
-            entry = settings.remaps.add()
-            entry.name = group.name
-            entry.target = suggestion
-            added += 1
+        # Both halves feed one remap list: the two meshes share the AJ rig, so a pairing found
+        # on the mouth mesh is the same pairing on the eye mesh.
+        for _, source in _active_sources(settings):
+            for group in source.vertex_groups:
+                if group.name in allowed or group.name in existing:
+                    continue
+                suggestion = REMAP_SUGGESTIONS.get(group.name.lower())
+                if not suggestion or suggestion not in allowed:
+                    continue
+                entry = settings.remaps.add()
+                entry.name = group.name
+                entry.target = suggestion
+                existing.add(group.name)
+                added += 1
 
         self.report({'INFO'}, f"Suggested {added} remap(s)")
         return {'FINISHED'}
@@ -585,24 +801,24 @@ class SUB_OP_vis_bake_preview_weights(Operator):
     @classmethod
     def poll(cls, context):
         settings = _settings(context)
-        return settings.source_object is not None and settings.bone_reference is not None
+        return bool(_active_sources(settings)) and settings.bone_reference is not None
 
     def execute(self, context):
         settings = _settings(context)
-        targets, collapsed = _resolve_group_targets(
-            settings.source_object.vertex_groups, settings
-        )
-        kept = len(set(targets.values()))
-        total = len(settings.source_object.vertex_groups)
-        print("\n[VIS bake] weight mapping preview")
-        for index, group in enumerate(settings.source_object.vertex_groups):
-            target = targets.get(index, "?")
-            marker = "  " if target == group.name else "->"
-            print(f"  {group.name:24} {marker} {target}")
+        summary = []
+        for label, source in _active_sources(settings):
+            targets, collapsed = _resolve_group_targets(source.vertex_groups, settings)
+            kept = len(set(targets.values()))
+            total = len(source.vertex_groups)
+            print(f"\n[VIS bake] weight mapping preview — {label}: {source.name}")
+            for index, group in enumerate(source.vertex_groups):
+                target = targets.get(index, "?")
+                marker = "  " if target == group.name else "->"
+                print(f"  {group.name:24} {marker} {target}")
+            summary.append(f"{label}: {total}->{kept}, {len(collapsed)} folded")
         self.report(
             {'INFO'},
-            f"{total} source group(s) -> {kept} kept; "
-            f"{len(collapsed)} folded into '{settings.fallback_group}' (details in console)",
+            "; ".join(summary) + f" (into '{settings.fallback_group}'; details in console)",
         )
         return {'FINISHED'}
 
@@ -618,11 +834,7 @@ class SUB_OP_vis_bake_run(Operator):
     @classmethod
     def poll(cls, context):
         settings = _settings(context)
-        return (
-            settings.source_object is not None
-            and settings.armature is not None
-            and settings.bone_reference is not None
-        )
+        return bool(_active_sources(settings)) and settings.bone_reference is not None
 
     def execute(self, context):
         settings = _settings(context)
@@ -642,41 +854,88 @@ class SUB_OP_vis_bake_run(Operator):
             self.report({'WARNING'}, "No rows enabled to bake")
             return {'CANCELLED'}
 
+        problem = _template_problem(settings)
+        if problem:
+            self.report({'ERROR'}, problem)
+            return {'CANCELLED'}
+
         missing = [entry.name for entry in rows if not entry.action]
         if missing:
             self.report({'ERROR'}, f"No action set for: {', '.join(missing[:5])}")
             return {'CANCELLED'}
 
-        if armature.animation_data is None:
-            armature.animation_data_create()
+        # Two rows can also collide by having the same name, which the template cannot fix.
+        names = [_format_name(settings, entry) for entry in rows]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            self.report({'ERROR'}, f"Rows would collide on: {', '.join(duplicates[:5])}")
+            return {'CANCELLED'}
 
-        original_action = armature.animation_data.action
+        # A row can only bake if the half it names has a mesh. Check the whole list up front so
+        # a missing slot is one message rather than a part-finished run.
+        no_source = sorted(
+            {
+                f"{entry.name} ({entry.half.title()})"
+                for entry in rows
+                if _source_for(settings, entry) is None
+            }
+        )
+        if no_source:
+            self.report({'ERROR'}, f"No source mesh for: {', '.join(no_source[:5])}")
+            return {'CANCELLED'}
+
+        # The action has to play on the rig that DEFORMS each source, which is not necessarily
+        # the rig chosen for binding: a retargeted face mesh is commonly parented to the
+        # character rig while an Armature modifier deforms it from a separate facial rig.
+        # Playing the action on the wrong one poses a skeleton nothing is skinned to, and every
+        # mesh bakes in rest pose. Resolved per row, because the two halves can differ.
+        deform_rigs: dict[str, object] = {}
+        for entry in rows:
+            source = _source_for(settings, entry)
+            rig = _deform_armature(source)
+            if rig is None:
+                self.report(
+                    {'ERROR'},
+                    f"{source.name} has no Armature modifier, so there is no rig to play the "
+                    "animation on",
+                )
+                return {'CANCELLED'}
+            deform_rigs[source.name] = rig
+
         original_frame = scene.frame_current
-        original_pose = _capture_pose(armature)
+        originals = []
+        for rig in {rig.name: rig for rig in deform_rigs.values()}.values():
+            if rig.animation_data is None:
+                rig.animation_data_create()
+            originals.append((rig, rig.animation_data.action, _capture_pose(rig)))
 
         created = []
         all_collapsed: set[str] = set()
+        all_unbound: set[str] = set()
         try:
             for entry in rows:
                 action = bpy.data.actions.get(entry.action)
                 if action is None:
                     self.report({'ERROR'}, f"Action '{entry.action}' not found")
                     return {'CANCELLED'}
+                rig = deform_rigs[_source_for(settings, entry).name]
 
-                def apply_frame(entry=entry, action=action):
-                    armature.animation_data.action = action
+                def apply_frame(entry=entry, action=action, rig=rig):
+                    _assign_action(rig, action)
                     scene.frame_set(entry.frame)
                     if settings.neutralize_unkeyed:
-                        _neutralize_unkeyed(armature, _keyed_bone_names(action))
+                        _neutralize_unkeyed(rig, _keyed_bone_names(action))
                     context.view_layer.update()
 
-                new_obj, collapsed = _bake_one(context, settings, entry, apply_frame)
+                new_obj, collapsed, unbound = _bake_one(context, settings, entry, apply_frame)
                 created.append(new_obj.name)
                 all_collapsed |= collapsed
+                all_unbound |= unbound
         finally:
-            armature.animation_data.action = original_action
+            for rig, action, pose in originals:
+                rig.animation_data.action = action
+                _restore_pose(rig, pose)
             scene.frame_set(original_frame)
-            _restore_pose(armature, original_pose)
             context.view_layer.update()
 
         if all_collapsed:
@@ -685,11 +944,23 @@ class SUB_OP_vis_bake_run(Operator):
                 + ", ".join(sorted(all_collapsed))
             )
 
-        self.report(
-            {'INFO'},
+        summary = (
             f"Baked {len(created)} mesh(es); "
-            f"{len(all_collapsed)} AJ-only group(s) folded into '{settings.fallback_group}'",
+            f"{len(all_collapsed)} AJ-only group(s) folded into '{settings.fallback_group}'"
         )
+        if all_unbound:
+            print(
+                "\n[VIS bake] groups with no matching bone on the bind rig: "
+                + ", ".join(sorted(all_unbound))
+            )
+            self.report(
+                {'WARNING'},
+                summary
+                + f"; {len(all_unbound)} group(s) have no bone on the bind rig and will not "
+                "deform (see console)",
+            )
+        else:
+            self.report({'INFO'}, summary)
         return {'FINISHED'}
 
 
@@ -705,8 +976,35 @@ class SUB_PT_vis_mesh_bake(Panel):
         settings = _settings(context)
 
         box = layout.box()
-        box.prop(settings, "source_object")
+        box.prop(settings, "source_upper")
+        box.prop(settings, "source_lower")
+        # Which rig each source is actually deformed by decides whether the animation reaches
+        # the bake at all, and it is invisible in the modifier stack unless you go looking, so
+        # it is reported here rather than assumed.
+        for label, source in _active_sources(settings):
+            rig = _deform_armature(source)
+            row = box.row()
+            row.alert = rig is None
+            row.label(
+                text=f"{label} animated by: {rig.name if rig else 'NO ARMATURE MODIFIER'}",
+                icon='ARMATURE_DATA' if rig else 'ERROR',
+            )
         box.prop(settings, "armature")
+        # Bind To is optional; say which rig the output will actually land on so an empty
+        # field does not read as "nothing will happen".
+        if settings.bind_armature and settings.armature is None:
+            for label, source in _active_sources(settings):
+                bind = _bind_target(settings, source)
+                row = box.row()
+                row.alert = bind is None
+                row.label(
+                    text=(
+                        f"{label} parents to: {bind.name} (auto, from parent)"
+                        if bind
+                        else f"{label} has no parent rig — set Bind To"
+                    ),
+                    icon='OUTLINER_OB_ARMATURE' if bind else 'ERROR',
+                )
         box.prop(settings, "bone_reference")
         row = box.row(align=True)
         row.prop(settings, "fallback_group")
@@ -715,13 +1013,30 @@ class SUB_PT_vis_mesh_bake(Panel):
         box = layout.box()
         box.label(text="Naming")
         box.prop(settings, "fighter_prefix")
+        problem = _template_problem(settings)
         row = box.row(align=True)
+        row.alert = bool(problem)
         row.prop(settings, "name_template")
         row.operator("sub.vis_bake_use_vis_template", text="", icon='PRESET')
+        # Show the name a real row would get. A template is easy to get wrong in a way that
+        # only shows up as a pile of `.001`s after the bake, so it is spelled out up front.
+        if problem:
+            for position, line in enumerate(textwrap.wrap(problem, 46)):
+                box.label(text=line, icon='ERROR' if position == 0 else 'BLANK1')
+        else:
+            index = settings.entries_index
+            sample = (
+                settings.entries[index]
+                if 0 <= index < len(settings.entries)
+                else None
+            )
+            if sample is not None:
+                box.label(text=_format_name(settings, sample), icon='OUTLINER_OB_MESH')
 
         box = layout.box()
         header = box.row(align=True)
         header.label(text="Shapes")
+        header.operator("sub.vis_bake_guess_halves", text="", icon='ARROW_LEFTRIGHT')
         header.operator("sub.vis_bake_populate", text="", icon='IMPORT')
 
         row = box.row()
@@ -752,6 +1067,7 @@ class SUB_PT_vis_mesh_bake(Panel):
         box.prop(settings, "normalize_weights")
         box.prop(settings, "drop_empty_groups")
         box.prop(settings, "bind_armature")
+        box.prop(settings, "replace_existing")
 
         row = layout.row(align=True)
         row.scale_y = 1.4
@@ -769,6 +1085,7 @@ classes = (
     SUB_OP_vis_bake_entry_remove,
     SUB_OP_vis_bake_entry_move,
     SUB_OP_vis_bake_populate,
+    SUB_OP_vis_bake_guess_halves,
     SUB_OP_vis_bake_use_vis_template,
     SUB_OP_vis_bake_guess_remaps,
     SUB_OP_vis_bake_remap_add,
