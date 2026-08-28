@@ -263,6 +263,10 @@ class SUB_PT_model_tools(Panel):
         row.operator("sub.merge_rigs", text="Merge Rigs", icon='GROUP_BONE')
 
         row = layout.row(align=True)
+        row.operator_context = 'INVOKE_DEFAULT'
+        row.operator("sub.protect_datablocks", text="Protect Unused Data", icon='FAKE_USER_ON')
+
+        row = layout.row(align=True)
         if context.mode == 'OBJECT':
             row.label(text="Shape Keys Prefix:")
             row.prop(ssp, "shape_keys_prefix", text="")

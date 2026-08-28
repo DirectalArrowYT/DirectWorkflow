@@ -345,6 +345,16 @@ class SubSceneProperties(PropertyGroup):
         default=False,
     )
 
+    auto_protect_datablocks: BoolProperty(
+        name='Auto-Protect On Save',
+        description=(
+            "Before every save, give unused actions, materials, images and node "
+            "groups a fake user so Blender does not discard them. Costs file "
+            "size in exchange for never silently losing an animation or a "
+            "side-loaded material"
+        ),
+        default=False,
+    )
     matl_panel_edit_side_loaded: BoolProperty(
         name='Edit Side-Loaded Data',
         description=(

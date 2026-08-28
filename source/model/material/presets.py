@@ -115,6 +115,65 @@ PRESETS = [
         ),
     ),
     MaterialPreset(
+        name='Skin (UV Switchable)',
+        shader_label='SFX_PBS_010000080800826b_opaque',
+        category='Character',
+        description='Subsurface skin whose UVs can be scrolled, for switching between stacked textures.',
+        vectors=dict(
+            _COMMON_LIT,
+            CustomVector6=(1.0, 1.0, 0.0, 0.0),
+            CustomVector11=(0.17, 0.0578, 0.018, 1.0),
+            CustomVector14=(0.75, 0.75, 0.75, 1.0),
+            CustomVector30=(0.6, 1.0, 1.0, 1.0),
+        ),
+        floats={'CustomFloat8': 0.4},
+        # Vanilla has CustomBoolean1 off on all 8 of these, so PRM alpha is
+        # ignored and specular is a flat 0.16.
+        bools={'CustomBoolean1': False, 'CustomBoolean3': True, 'CustomBoolean4': True},
+        blend=_OPAQUE,
+        notes=(
+            'The plain Skin preset uses SFX_PBS_010000000800826b, which does NOT '
+            'read CustomVector6 - so its UVs cannot be scrolled and stacked '
+            'textures cannot be switched. This one does. Vanilla uses it for '
+            "Kazuya's skin_demon_001. Bake two materials, run Bake Textures > "
+            'Stack Two Materials, then keyframe CustomVector6.w: 0 for the top '
+            'texture, -1 for the bottom.'
+        ),
+    ),
+    MaterialPreset(
+        name='Skin + Second Col Layer',
+        shader_label='SFX_PBS_010000000800824f_opaque',
+        category='Character',
+        description='Subsurface skin with a second Col map layered over it, for decals like scars or burns.',
+        vectors=dict(
+            _COMMON_LIT,
+            CustomVector11=(0.25, 0.02, 0.01, 1.0),
+            CustomVector30=(0.5, 1.5, 1.0, 1.0),
+            CustomVector31=(1.0, 1.0, 0.0, 0.0),
+        ),
+        bools={
+            'CustomBoolean1': True,
+            'CustomBoolean3': True,
+            'CustomBoolean4': True,
+            # False = alpha blend the second layer over the first. All 866
+            # vanilla materials on this shader use alpha blending; nothing
+            # ships with additive.
+            'CustomBoolean11': False,
+        },
+        blend=_OPAQUE,
+        notes=(
+            'Texture1 is the second Col layer and samples the uvSet UV map, NOT '
+            'map1 - the mesh needs both. The blend is driven per-texel by '
+            "Texture1's own ALPHA: result = Col0 + Tex1.a * (Tex1.rgb - Col0.rgb). "
+            'So the decal shape lives in the second texture\'s alpha channel. '
+            'There is no scalar that fades the whole layer in and out; '
+            'CustomVector13 multiplies both layers together. To move the layer '
+            'at runtime, animate CustomVector31 (.xy scale, .zw offset), which '
+            'the vertex shader applies to the uvSet coordinates. Vanilla uses '
+            'this shader for eyes - layer 1 the eye white, layer 2 the iris.'
+        ),
+    ),
+    MaterialPreset(
         name='Alpha Blend',
         shader_label='SFX_PBS_0100000008018269_sort',
         category='Character',

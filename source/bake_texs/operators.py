@@ -302,3 +302,360 @@ class SUB_OP_bake_texs_pick_output(Operator):
         self.report({'INFO' if not failed else 'WARNING'},
                    f'{ok} nutexb written' + (f', {failed} failed' if failed else ''))
         return {'FINISHED'}
+
+
+def _stem_for_material(material, stems):
+    """The bake stem for a material, or None if nothing uses it.
+
+    Prefers the stem the current selection would produce, so it agrees exactly
+    with what a bake just wrote. Falls back to any mesh in the file that uses
+    the material, because stacking is routinely done on materials that are not
+    part of the current selection - which is the case that used to pass None
+    into make_stem() and crash on obj.name.
+    """
+    if material.name in stems:
+        return stems[material.name]
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH':
+            continue
+        for slot in obj.material_slots:
+            if slot.material is material:
+                return core.make_stem(obj, material)
+    return None
+
+
+class SUB_OP_bake_texs_stack_materials(Operator):
+    """Stack two materials' baked maps into one texture, switched by CustomVector6"""
+    bl_idname = 'sub.bake_texs_stack_materials'
+    bl_label = 'Stack Two Materials'
+    bl_description = (
+        'Combine two already-baked materials into one vertically stacked '
+        'texture set, so a single material can switch between them by '
+        'animating CustomVector6.w. Bake both materials first'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    top_material: StringProperty(
+        name='Top (default)',
+        description='The look shown at rest, placed in the upper half. CustomVector6.w = 0 selects it',
+    )
+    bottom_material: StringProperty(
+        name='Bottom (switched to)',
+        description='The look switched to, placed in the lower half. CustomVector6.w = -1 selects it',
+    )
+    half_height: BoolProperty(
+        name='Keep Original Size',
+        description=(
+            'Squeeze each half so the atlas stays the size of one texture, at '
+            'half the vertical resolution. Off, the atlas is twice as tall and '
+            'neither half loses detail'
+        ),
+        default=False,
+    )
+    uv_mode: EnumProperty(
+        name='UVs',
+        description='How the mesh is aimed at the top half of the atlas',
+        items=(
+            ('REMAP', 'Remap Mesh UVs',
+             'Rewrite the mesh V coordinates into the top half now, so the face '
+             'is not stretched and Blender previews it correctly. '
+             'CustomVector6 stays at identity scale; switch with .w = -0.5'),
+            ('SHADER', 'Leave UVs Alone',
+             'Keep the mesh at 0-1 and let CustomVector6.y squeeze it at '
+             'runtime. Correct in game, but Blender has no CustomVector6 '
+             'wiring so the viewport will look stretched. Switch with .w = -1'),
+        ),
+        default='REMAP',
+    )
+    compile_nutexb: BoolProperty(
+        name='Compile To .nutexb',
+        description=(
+            'Convert the stacked PNGs into the model folder afterwards, the '
+            'same way baking does, so they are ready to ship without a '
+            'separate compile step'
+        ),
+        default=True,
+    )
+    apply_to_material: BoolProperty(
+        name='Apply To Top Material',
+        description=(
+            'Point the top material at the stacked maps and set its '
+            'CustomVector6 to (1, 0.5, 0, 0)'
+        ),
+        default=True,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return bool(bpy.data.filepath)
+
+    def invoke(self, context, event):
+        obj = context.object
+        if obj is not None and obj.type == 'MESH' and len(obj.material_slots) >= 2:
+            slots = [s.material.name for s in obj.material_slots if s.material]
+            if len(slots) >= 2:
+                self.top_material, self.bottom_material = slots[0], slots[1]
+        return context.window_manager.invoke_props_dialog(self, width=460)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop_search(self, 'top_material', bpy.data, 'materials')
+        layout.prop_search(self, 'bottom_material', bpy.data, 'materials')
+        layout.prop(self, 'half_height')
+        layout.prop(self, 'uv_mode')
+        layout.prop(self, 'apply_to_material')
+        layout.prop(self, 'compile_nutexb')
+
+        from . import stack_textures
+        bottom_w = (stack_textures.REMAP_W_BOTTOM if self.uv_mode == 'REMAP'
+                    else stack_textures.STACK_W_BOTTOM)
+        box = layout.box()
+        box.label(text='After stacking, animate CustomVector6.w:', icon='ANIM')
+        box.label(text='       0    = top texture (default)')
+        box.label(text=f'    {bottom_w}   = bottom texture')
+        box.label(text='Nor and PRM are stacked too - the UV shift')
+        box.label(text='moves every map, not just Col.')
+
+        if self.uv_mode == 'REMAP':
+            warn = layout.box()
+            warn.label(text='Mesh UVs will be edited (undoable).', icon='ERROR')
+            warn.label(text='Bake BEFORE stacking - baking afterwards')
+            warn.label(text='would bake into the top half only.')
+
+    def execute(self, context):
+        from . import stack_textures
+
+        props = context.scene.sub_bake_texs_properties
+        core.apply_settings(props)
+
+        top = bpy.data.materials.get(self.top_material)
+        bottom = bpy.data.materials.get(self.bottom_material)
+        if top is None or bottom is None:
+            self.report({'ERROR'}, 'Pick two materials that exist.')
+            return {'CANCELLED'}
+        if top is bottom:
+            self.report({'ERROR'}, 'Top and bottom are the same material.')
+            return {'CANCELLED'}
+
+        # Stems come from the same naming the bake used, so the files line up
+        # with whatever was actually written.
+        try:
+            groups, _ = core.collect_targets()
+        except Exception:
+            groups = {}
+        stems = {}
+        for group in groups.values():
+            base = group['materials'][0]
+            stems[base.name] = core.make_stem(group['objects'][0], base)
+
+        top_stem = _stem_for_material(top, stems)
+        bottom_stem = _stem_for_material(bottom, stems)
+        missing_stem = [m.name for m, s in ((top, top_stem), (bottom, bottom_stem))
+                        if s is None]
+        if missing_stem:
+            self.report(
+                {'ERROR'},
+                f'No mesh in this file uses {" or ".join(missing_stem)}, so the '
+                f'baked file name cannot be worked out. Assign the material to a '
+                f'mesh, or pick the material that was actually baked.')
+            return {'CANCELLED'}
+
+        try:
+            written = stack_textures.stack_material_bakes(
+                self, top, bottom, top_stem, bottom_stem,
+                core.BAKE_DIR, top_stem, self.half_height)
+        except Exception as e:
+            self.report({'ERROR'}, f'Could not stack: {e}')
+            return {'CANCELLED'}
+
+        if not written:
+            self.report({'WARNING'},
+                        f'No baked maps found for "{top_stem}" and "{bottom_stem}" '
+                        f'in {core.BAKE_DIR}. Bake both materials first.')
+            return {'CANCELLED'}
+
+        message = f'Stacked {len(written)} map(s) into {top_stem}_*'
+
+        remapped = []
+        if self.uv_mode == 'REMAP':
+            remapped = stack_textures.remap_uvs_to_top_half(
+                stack_textures.meshes_using_material(top))
+            if remapped:
+                message += f'; remapped UVs on {len(remapped)} mesh(es)'
+            else:
+                message += '; no mesh uses the top material, so no UVs were remapped'
+
+        if self.apply_to_material:
+            applied, notes = stack_textures.apply_stacked_textures(
+                top, top_stem, core.BAKE_DIR, self.uv_mode)
+            uv_transform = (stack_textures.REMAP_UV_TRANSFORM
+                            if self.uv_mode == 'REMAP'
+                            else stack_textures.STACK_UV_TRANSFORM)
+            message += (f'; applied {applied} to {top.name}, '
+                        f'CustomVector6 = {uv_transform}')
+            if notes:
+                message += '; ' + '; '.join(notes)
+
+        if self.compile_nutexb:
+            out_dir = core.get_output_dir()
+            if out_dir:
+                ok, failed = core.compile_nutexb(written, out_dir)
+                message += f'; {ok} nutexb written'
+                if failed:
+                    message += f', {failed} failed'
+            else:
+                message += '; no nutexb folder set - run Bake once to choose one'
+
+        print('\n' + '=' * 66)
+        print(f'Stacked textures: {top.name} (top) over {bottom.name} (bottom)')
+        for path in written:
+            print(f'  {os.path.basename(path)}')
+        print('\nAnimate CustomVector6.w on this material:')
+        print(f'   {stack_textures.STACK_W_TOP:>5}  -> {top.name}')
+        print(f'   {stack_textures.STACK_W_BOTTOM:>5}  -> {bottom.name}')
+        print('=' * 66 + '\n')
+
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
+class SUB_OP_bake_texs_remap_uvs(Operator):
+    """Move the selected meshes' UVs into the top half of a stacked texture"""
+    bl_idname = 'sub.bake_texs_remap_uvs'
+    bl_label = 'Fix UVs For Stacked Texture'
+    bl_description = (
+        'Rewrite the selected meshes\' V coordinates so they point at the top '
+        'half of a vertically stacked texture instead of stretching over the '
+        'whole thing. Also restores them for re-baking'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    mode: EnumProperty(
+        name='Direction',
+        items=(
+            ('TOP_HALF', 'Fit To Top Half',
+             'V 0-1 becomes 0.5-1.0, so the mesh samples the top image of a '
+             'stacked pair at its correct proportions'),
+            ('RESTORE', 'Restore Full Range',
+             'V 0.5-1.0 becomes 0-1 again. Do this before re-baking, or the '
+             'bake lands in the top half of a fresh texture'),
+        ),
+        default='TOP_HALF',
+    )
+    set_uv_transform: BoolProperty(
+        name='Set CustomVector6',
+        description=(
+            'Also set CustomVector6 on the meshes\' materials to match - '
+            'identity for the top half, so only .w needs animating'
+        ),
+        default=True,
+    )
+    force: BoolProperty(
+        name='Run Anyway',
+        description=(
+            'Skip the check that stops a mesh being remapped twice. Remapping '
+            'twice squeezes the UVs into a quarter of the atlas'
+        ),
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        from . import stack_textures
+        layout = self.layout
+        layout.prop(self, 'mode')
+        layout.prop(self, 'set_uv_transform')
+
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        box = layout.box()
+        box.label(text=f'{len(meshes)} selected mesh(es):', icon='MESH_DATA')
+        for obj in meshes[:6]:
+            span = stack_textures.uv_v_range(obj)
+            if span is None:
+                box.label(text=f'   {obj.name}: no UVs')
+                continue
+            state = ' (already in top half)' if stack_textures.looks_remapped(obj) else ''
+            box.label(text=f'   {obj.name}: V {span[0]:.2f}-{span[1]:.2f}{state}')
+        if len(meshes) > 6:
+            box.label(text=f'   ...and {len(meshes) - 6} more')
+
+        wrong_way = [o for o in meshes
+                     if stack_textures.looks_remapped(o) == (self.mode == 'TOP_HALF')]
+        if wrong_way:
+            warn = layout.box()
+            if self.mode == 'TOP_HALF':
+                warn.label(text=f'{len(wrong_way)} mesh(es) already look remapped.',
+                           icon='ERROR')
+                warn.label(text='They will be skipped unless you force it.')
+            else:
+                warn.label(text=f'{len(wrong_way)} mesh(es) are already full range.',
+                           icon='ERROR')
+                warn.label(text='They will be skipped unless you force it.')
+            warn.prop(self, 'force')
+
+    def execute(self, context):
+        from . import stack_textures
+
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        if not meshes:
+            self.report({'WARNING'}, 'Select at least one mesh.')
+            return {'CANCELLED'}
+
+        want_remapped = self.mode == 'TOP_HALF'
+        targets, skipped = [], []
+        for obj in meshes:
+            already = stack_textures.looks_remapped(obj)
+            # Skip a mesh that is already in the state being asked for -
+            # running either direction twice is destructive and silent.
+            if already == want_remapped and not self.force:
+                skipped.append(obj.name)
+            else:
+                targets.append(obj)
+
+        if not targets:
+            self.report(
+                {'WARNING'},
+                f'Nothing to do - {len(skipped)} mesh(es) are already '
+                f'{"in the top half" if want_remapped else "at full range"}. '
+                f'Tick "Run Anyway" to override.')
+            return {'CANCELLED'}
+
+        if want_remapped:
+            changed = stack_textures.remap_uvs_to_top_half(targets)
+            transform = stack_textures.REMAP_UV_TRANSFORM
+        else:
+            changed = stack_textures.restore_uvs_from_full_range(targets)
+            transform = None
+
+        materials_touched = set()
+        if self.set_uv_transform and transform is not None:
+            for obj in targets:
+                for slot in obj.material_slots:
+                    material = slot.material
+                    if material is None or material.name in materials_touched:
+                        continue
+                    sub_matl_data = getattr(material, 'sub_matl_data', None)
+                    if sub_matl_data is None:
+                        continue
+                    uv_transform = sub_matl_data.vectors.get('CustomVector6')
+                    if uv_transform is not None:
+                        uv_transform.value = transform
+                        materials_touched.add(material.name)
+
+        message = (f'{"Fitted" if want_remapped else "Restored"} UVs on '
+                   f'{len(changed)} mesh(es)')
+        if materials_touched:
+            message += f'; CustomVector6 set on {len(materials_touched)} material(s)'
+        if skipped:
+            message += f'; skipped {len(skipped)} already done'
+        if want_remapped:
+            message += f'; switch with CustomVector6.w = {stack_textures.REMAP_W_BOTTOM}'
+
+        self.report({'INFO'}, message)
+        return {'FINISHED'}

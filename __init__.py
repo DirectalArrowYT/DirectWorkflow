@@ -81,6 +81,11 @@ def register():
     from .source import retargeting
     retargeting.register()
 
+    # Fake-user protection on save. The handler itself checks the scene toggle,
+    # so registering it here costs nothing until the user turns it on.
+    from .source.extras import protect_datablocks
+    protect_datablocks.register_handler()
+
     print('Loaded Smash Ultimate Blender Tools!')
 
 def unregister():
@@ -91,6 +96,9 @@ def unregister():
     from .source import new_classes_to_register
     from .source.model.material import texture
     from .source import swing
+
+    from .source.extras import protect_datablocks
+    protect_datablocks.unregister_handler()
 
     # Unregister retargeting module first (expy_kit integration)
     from .source import retargeting

@@ -41,6 +41,12 @@ class SUB_PT_bake_texs(Panel):
 
         layout.separator()
         layout.operator('sub.bake_texs_apply_to_materials', icon='MATERIAL')
+        row = layout.row()
+        row.operator_context = 'INVOKE_DEFAULT'
+        row.operator('sub.bake_texs_stack_materials', icon='NODE_TEXTURE')
+        row = layout.row()
+        row.operator_context = 'INVOKE_DEFAULT'
+        row.operator('sub.bake_texs_remap_uvs', icon='UV')
         layout.label(text="Doesn't happen automatically - only on click", icon='INFO')
 
 
