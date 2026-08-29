@@ -134,9 +134,23 @@ class SUB_PT_animation_tools(Panel):
 
         layout.separator()
         
-        # Add button for hip animation transfer
-        row = layout.row(align=True)
-        row.operator("sub.transfer_hip_animation", text="Transfer Hip Animation to Trans")
+        # Hip <-> Trans root motion transfer, both directions.
+        #
+        # The reverse is not just undo: it re-derives the Hip curve from whatever the Trans
+        # curve holds now, so motion edited on Trans comes back down to Hip. The jump pair was
+        # registered but had no button, which made it reachable only from search.
+        box = layout.box()
+        box.label(text="Root motion (Hip <-> Trans):")
+        row = box.row(align=True)
+        row.operator("sub.transfer_hip_animation", text="Hip X -> Trans Z")
+        row.operator("sub.transfer_trans_animation_to_hip", text="Trans Z -> Hip X")
+        row = box.row(align=True)
+        row.operator("sub.transfer_hip_jump_animation", text="Hip Y -> Trans X")
+        row.operator("sub.transfer_trans_jump_animation_to_hip", text="Trans X -> Hip Y")
+        box.label(
+            text="Horizontal transfers mirror over the 3D cursor",
+            icon='INFO',
+        )
         
         # Add Mirror Animation section
         layout.separator()

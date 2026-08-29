@@ -100,6 +100,8 @@ classes = [
     source.extras.ik_pole_alignment.SUB_OP_align_ik_pole_angle,
     source.extras.hip_animation_transfer.SUB_OP_transfer_hip_animation,
     source.extras.hip_animation_transfer.SUB_OP_transfer_hip_jump_animation,
+    source.extras.hip_animation_transfer.SUB_OP_transfer_trans_animation_to_hip,
+    source.extras.hip_animation_transfer.SUB_OP_transfer_trans_jump_animation_to_hip,
     source.extras.idle_pose_library.SUB_OP_store_idle_pose,
     source.extras.idle_pose_library.SUB_OP_apply_idle_pose,
     source.extras.idle_pose_library.SUB_OP_apply_idle_pose_from_list,
