@@ -251,6 +251,11 @@ class SUB_OP_model_exporter(Operator):
         ),
         default='NONE',
     )
+    ignore_hidden_meshes: BoolProperty(
+        name='Ignore Hidden Meshes',
+        description='Only export meshes that are visible in the viewport. Meshes hidden by the eye or monitor icon, or by a hidden collection, are skipped',
+        default=True,
+    )
     use_debug_timer: BoolProperty(
         name='Print debug timing stats',
         description='Prints advance import timing info to the console, useful for development of this plugin.',
@@ -277,7 +282,7 @@ class SUB_OP_model_exporter(Operator):
                     self.include_nusktb, self.include_numatb, self.include_nuhlpb, self.include_nutexb, self.linked_nusktb_settings,
                     self.optimize_mesh_weights_to_parent_bone, self.armature_position, self.apply_modifiers,
                     self.split_shape_keys, self.ignore_underscore_meshes, self.include_wol_matls,
-                    self.merge_bundled_materials)
+                    self.merge_bundled_materials, self.ignore_hidden_meshes)
         if self.use_debug_timer:
             stats = pstats.Stats(pr)
             stats.sort_stats(pstats.SortKey.TIME)
@@ -374,7 +379,8 @@ def weights_to_parent_bones(ssbh_mesh_data: ssbh_data_py.mesh_data.MeshData, ssb
 def export_model(operator: bpy.types.Operator, context, directory, include_numdlb, include_numshb, include_numshexb, include_nusktb,
                 include_numatb, include_nuhlpb, include_nutexb, linked_nusktb_settings, optimize_mesh_weights:str, armature_position: str,
                 apply_modifiers: str, split_shape_keys: str, ignore_underscore_meshes:str,
-                include_wol_matls: bool = True, merge_bundled_materials: bool = True):
+                include_wol_matls: bool = True, merge_bundled_materials: bool = True,
+                ignore_hidden_meshes: bool = True):
     # Prepare the scene for export and find the meshes to export.
     arma: bpy.types.Object = context.scene.sub_scene_properties.model_export_arma
     context.view_layer.objects.active = arma
@@ -385,6 +391,26 @@ def export_model(operator: bpy.types.Operator, context, directory, include_numdl
         arma.data.pose_position = 'REST'
     elif armature_position == 'POSE':
         arma.data.pose_position = 'POSE'
+
+    # Sample what the user had hidden BEFORE the loop below force-shows every
+    # child. The ops further down can't operate on hidden objects, so their
+    # visibility genuinely has to be cleared - but that also means this is the
+    # last point where "was this mesh hidden?" can still be answered.
+    hidden_mesh_names: set[str] = set()
+    previous_visibility: dict[str, tuple[bool, bool]] = {}
+    for child in arma.children:
+        previous_visibility[child.name] = (child.hide_viewport, child.hide_render)
+        if child.type != 'MESH':
+            continue
+        try:
+            # visible_get() folds in the eye icon, the monitor icon, and the
+            # object's collection, which is what a user means by "hidden".
+            visible = child.visible_get()
+        except RuntimeError:
+            # Not linked into this view layer at all, so it isn't visible.
+            visible = False
+        if not visible:
+            hidden_mesh_names.add(child.name)
 
     # Temporarily remove mesh vis drivers and un-hide them for export
     if arma.animation_data is not None:
@@ -407,6 +433,14 @@ def export_model(operator: bpy.types.Operator, context, directory, include_numdl
         else:
             unprocessed_meshes: list[Object] = [child for child in arma.children if child.type == 'MESH' and len(child.data.vertices) > 0] 
         
+        # Remove meshes the user had hidden
+        if ignore_hidden_meshes and hidden_mesh_names:
+            skipped = [mesh.name for mesh in unprocessed_meshes if mesh.name in hidden_mesh_names]
+            unprocessed_meshes = [mesh for mesh in unprocessed_meshes if mesh.name not in hidden_mesh_names]
+            if skipped:
+                operator.report({'INFO'},
+                    f'Skipped {len(skipped)} hidden mesh(es): {", ".join(sorted(skipped))}')
+
         # Remove swing meshes
         unprocessed_meshes = [mesh for mesh in unprocessed_meshes if mesh.data.sub_swing_data_linked_mesh.is_swing_mesh == False]
         
@@ -591,6 +625,14 @@ def export_model(operator: bpy.types.Operator, context, directory, include_numdl
                 except Exception as e:
                     operator.report({'ERROR'}, f'Failed to save .adjb, Error="{e}" ; Traceback=\n{traceback.format_exc()}')
                     
+    # Put back whatever the user had hidden, since the export force-showed it.
+    # Runs before the vis drivers are restored so a driven mesh still ends up
+    # under its driver's control rather than this snapshot.
+    for child in arma.children:
+        hide_viewport, hide_render = previous_visibility.get(child.name, (False, False))
+        child.hide_viewport = hide_viewport
+        child.hide_render = hide_render
+
     if arma.animation_data is not None:
         from ..anim.import_anim import setup_visibility_drivers
         setup_visibility_drivers(arma)
