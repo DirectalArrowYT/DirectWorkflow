@@ -83,6 +83,42 @@ def has_any_finger_bones(arma):
     )
 
 
+def hand_across_vector(source, side):
+    """Direction along the knuckles, index -> pinky, in armature space.
+
+    Fingers close by rotating about this line, so it's the bend axis expressed
+    in a space we can actually measure off the rest pose.
+    """
+    bones = source.data.bones
+    index = bones.get(finger_bone_name(side, 1, 1))
+    pinky = bones.get(finger_bone_name(side, 4, 1))
+    if index is not None and pinky is not None:
+        across = pinky.head_local - index.head_local
+        if across.length > 1e-6:
+            return across.normalized()
+
+    # A rig missing the pinky still gives a usable line from index to middle.
+    middle = bones.get(finger_bone_name(side, 2, 1))
+    if index is not None and middle is not None:
+        across = middle.head_local - index.head_local
+        if across.length > 1e-6:
+            return across.normalized()
+    return None
+
+
+def detect_bone_curl_axis(bone, across):
+    """(axis index, sign) for the local axis nearest the knuckle line.
+
+    Local Y runs down the bone, so a bend is always X or Z. Doing this per
+    bone rather than per hand means the thumb - which sits in its own frame -
+    resolves correctly without being special-cased.
+    """
+    local = bone.matrix_local.to_3x3().inverted() @ across
+    if abs(local.x) >= abs(local.z):
+        return 0, (1.0 if local.x >= 0.0 else -1.0)
+    return 2, (1.0 if local.z >= 0.0 else -1.0)
+
+
 def define_slider(pose_bone, name, default, soft_min, soft_max, description):
     """Custom property + its UI range, across the 3.x/4.x id_properties API."""
     pose_bone[name] = default
@@ -112,11 +148,12 @@ class SUB_OP_build_hand_control_rig(Operator):
         name="Curl Axis",
         description="Local rotation axis the finger joints bend on. Smash rigs vary; if the fingers splay sideways instead of closing, try another axis",
         items=(
+            ('AUTO', 'Auto', 'Work the axis out per bone from the rest pose'),
             ('X', 'X', 'Bend around local X'),
             ('Y', 'Y', 'Bend around local Y'),
             ('Z', 'Z', 'Bend around local Z'),
         ),
-        default='X',
+        default='AUTO',
     )
     max_curl_degrees: FloatProperty(
         name="Max Curl",
@@ -228,14 +265,19 @@ class SUB_OP_build_hand_control_rig(Operator):
                               f"Offset added to the master curl for the {label}")
 
     def drive_fingers(self, ctrl, source):
-        axis = AXIS_INDEX[self.curl_axis]
-        sign = -1.0 if self.invert_curl else 1.0
+        user_sign = -1.0 if self.invert_curl else 1.0
         max_radians = math.radians(self.max_curl_degrees)
 
         for side in ("L", "R"):
             control = hand_control_name(side)
             if control not in ctrl.pose.bones:
                 continue
+
+            across = hand_across_vector(source, side) if self.curl_axis == 'AUTO' else None
+            if self.curl_axis == 'AUTO' and across is None:
+                self.report({'WARNING'},
+                            f"Couldn't measure the {side} hand's knuckle line; "
+                            f"falling back to local X.")
 
             for label, digit in FINGERS:
                 for segment in SEGMENTS:
@@ -244,15 +286,30 @@ class SUB_OP_build_hand_control_rig(Operator):
                     if pose_bone is None:
                         continue
 
+                    if across is not None:
+                        axis, axis_sign = detect_bone_curl_axis(
+                            source.data.bones[bone_name], across)
+                    elif self.curl_axis == 'AUTO':
+                        axis, axis_sign = 0, 1.0
+                    else:
+                        axis, axis_sign = AXIS_INDEX[self.curl_axis], 1.0
+
                     # Drivers can't touch a quaternion channel usefully, and
                     # imported Smash rigs come in as quaternion.
                     pose_bone.rotation_mode = 'XYZ'
 
                     data_path = f'pose.bones["{bone_name}"].rotation_euler'
                     source.animation_data_create()
-                    source.driver_remove(data_path, axis)
-                    fcurve = source.driver_add(data_path, axis)
+                    # Clear every axis, not just the one being written - a
+                    # rebuild on a different axis would otherwise leave the
+                    # previous driver behind still bending the finger.
+                    for stale in range(3):
+                        try:
+                            source.driver_remove(data_path, stale)
+                        except Exception:
+                            pass
 
+                    fcurve = source.driver_add(data_path, axis)
                     driver = fcurve.driver
                     driver.type = 'SCRIPTED'
 
@@ -264,7 +321,8 @@ class SUB_OP_build_hand_control_rig(Operator):
                         target.id = ctrl
                         target.data_path = f'pose.bones["{control}"]["{prop}"]'
 
-                    weight = SEGMENT_WEIGHTS[segment] * max_radians * sign
+                    weight = (SEGMENT_WEIGHTS[segment] * max_radians
+                              * axis_sign * user_sign)
                     driver.expression = f'(curl + offset) * {weight:.6f}'
 
 
