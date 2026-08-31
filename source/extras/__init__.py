@@ -28,6 +28,7 @@ from . import mirror_animation
 from . import roll_copy
 from . import bone_symmetry
 from . import eye_rig
+from . import rig_helper
 from . import stage_tools
 
 # Import animation_scroll module
