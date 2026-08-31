@@ -10,9 +10,8 @@ automatically.
 3. Safe Installation: Refuses to run over local edits instead of silently discarding them
 4. Auto-Restart: Restarts Blender automatically to complete the update process
 
-Repository: shoup@10.0.0.46:E:/Git/smash-ultimate-blender-animation-workflow (LAN)
-        or  shoup@100.118.148.112:E:/Git/smash-ultimate-blender-animation-workflow (Tailscale)
-Branch: main
+Repository: https://github.com/DirectalArrowYT/DirectWorkflow
+Branch: DirectWorkflow
 
 The system operates through a state machine with the following states:
 - idle: Ready for operations
@@ -45,29 +44,28 @@ CURRENT_COMMIT_MESSAGE: str = None
 UPDATE_DOWNLOAD_PROGRESS: float = 0.0
 UPDATE_STATUS: str = "idle"  # idle, checking, downloading, installing, ready_to_restart
 
-# This fork's own remote - the same private server the SmashScripts build
-# tooling uses (see machines.json in that repo for the per-machine layout
-# convention this follows). It's reached over SSH (the git protocol), not
-# HTTPS, so this can't go through requests/urllib the way the old GitHub API
-# check did - every operation below shells out to the system `git` instead.
+# This fork's own public remote. Fetching a public repo over HTTPS needs no
+# credentials, which matters here: _run_git() hides the console window, so an
+# auth prompt would be invisible and unanswerable. Pushes still go through
+# GitHub Desktop from the editable copy; this updater only ever reads.
 #
-# Two addresses for the same box: the LAN one only answers from the home
-# network, the Tailscale one answers from anywhere (laptop off-network) but
-# is slower and occasionally unreachable itself. There's no cheap way to know
-# which applies without asking the network, so fetch_latest() below races both
-# instead of guessing - whichever answers first wins, and the check stays
-# bounded by GIT_TIMEOUT_CHECK total rather than doubling when tried in turn.
+# The branch is DirectWorkflow rather than main - that repo's main holds the
+# upstream history it was seeded from, which is unrelated to this fork's.
+#
+# fetch_latest() below is written to race several addresses and take whichever
+# answers first. That's down to one entry now, which costs nothing and leaves
+# the door open: adding a LAN or Tailscale address back is a one-line append,
+# and the check stays bounded by GIT_TIMEOUT_CHECK however many there are.
 UPDATE_REMOTE_URLS = [
-    ("LAN", "shoup@10.0.0.46:E:/Git/smash-ultimate-blender-animation-workflow"),
-    ("Tailscale", "shoup@100.118.148.112:E:/Git/smash-ultimate-blender-animation-workflow"),
+    ("GitHub", "https://github.com/DirectalArrowYT/DirectWorkflow.git"),
 ]
-UPDATE_REMOTE_BRANCH = "main"
+UPDATE_REMOTE_BRANCH = "DirectWorkflow"
 
 GIT_TIMEOUT_CHECK = 8       # seconds - this runs on every Blender startup, keep it short
 GIT_TIMEOUT_INSTALL = 30    # seconds - only runs when the user clicks the button
 
-# This addon is a locally-maintained fork (own git history, pushed to the
-# private remote above) with custom swing-bone-collision tools that don't
+# This addon is a self-maintained fork (own git history, published to the
+# remote above) with custom swing-bone-collision tools that don't
 # exist upstream. The auto-updater used to overwrite this folder with whatever
 # was on CrusherD2/smash-ultimate-blender's animation-workflow branch - an
 # unrelated repo - which would have silently deleted those local changes, so
