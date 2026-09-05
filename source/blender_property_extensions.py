@@ -79,10 +79,16 @@ def register():
 class ModelImportFile(PropertyGroup):
     name: StringProperty()
 
+class ModelImportAlt(PropertyGroup):
+    name: StringProperty()
+    path: StringProperty()
+
 class ModelImportItem(PropertyGroup):
     name: StringProperty()
     path: StringProperty()
+    fallback_path: StringProperty()
     files: CollectionProperty(type=ModelImportFile)
+    alts: CollectionProperty(type=ModelImportAlt)
 
 class AnimationImportFile(PropertyGroup):
     name: StringProperty()
@@ -101,6 +107,7 @@ class IdlePoseItem(PropertyGroup):
     )
     
 bpy.utils.register_class(ModelImportFile)
+bpy.utils.register_class(ModelImportAlt)
 bpy.utils.register_class(ModelImportItem)
 bpy.utils.register_class(AnimationImportFile)
 
