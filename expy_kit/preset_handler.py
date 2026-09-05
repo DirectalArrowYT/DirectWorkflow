@@ -96,6 +96,15 @@ def validate_preset(armature_data, separator=':'):
         with_prefix = prefix + settings.root
         settings.root = with_prefix if with_prefix in armature_data.bones else ""
 
+    # Handle throw bone (also migrate legacy custom.throw)
+    if not getattr(settings, 'throw', ''):
+        legacy_throw = getattr(settings.custom, 'throw', '') or ''
+        if legacy_throw:
+            settings.throw = legacy_throw
+    if settings.throw and settings.throw not in armature_data.bones:
+        with_prefix = prefix + settings.throw
+        settings.throw = with_prefix if with_prefix in armature_data.bones else ""
+
     finger_bones = 'meta', 'a', 'b', 'c'
     for trg_grp in settings.left_fingers, settings.right_fingers:
         for k, trg_finger in trg_grp.items():
@@ -243,6 +252,7 @@ class PresetSkeleton:
         self.right_fingers = HumanFingers(thumb=PresetFinger(), index=PresetFinger(), middle=PresetFinger(), ring=PresetFinger(), pinky=PresetFinger())
         self.custom = PresetCustom()
         self.root = ""
+        self.throw = ""
 
     def copy(self, settings):
         for group in ('spine', 'left_arm', 'left_arm_ik', 'right_arm', 'right_arm_ik',
@@ -262,6 +272,7 @@ class PresetSkeleton:
 
         # Copy root bone
         self.root = settings.root
+        self.throw = getattr(settings, 'throw', '') or ''
 
         finger_bones = 'a', 'b', 'c', 'meta'
         for group, trg_grp in zip((self.left_fingers, self.right_fingers),

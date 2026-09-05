@@ -8,6 +8,34 @@ from ...expy_kit.operators import (
     resolve_bake_armature_pair,
     select_bones_for_visual_bake,
 )
+from ..blender_compat import assign_action
+
+
+def load_baked_action(armature, action):
+    """Assign a baked bone action (and matching SAP Data) so the Action Editor shows it."""
+    if armature is None or action is None:
+        return False
+    if getattr(armature, "type", None) != "ARMATURE":
+        return False
+    if armature.animation_data is None:
+        armature.animation_data_create()
+    assign_action(armature.animation_data, action)
+
+    data = getattr(armature, "data", None)
+    if data is not None:
+        sap_name = f"{armature.name} {action.name} SAP Data"
+        sap = bpy.data.actions.get(sap_name)
+        if sap is not None:
+            if data.animation_data is None:
+                data.animation_data_create()
+            assign_action(data.animation_data, sap)
+
+    try:
+        from . import guided
+        guided._invalidate_smash_viewport()
+    except Exception:
+        pass
+    return True
 
 
 def bake_visible_actions(
@@ -34,6 +62,7 @@ def bake_visible_actions(
         action_armature.animation_data_create()
 
     baked_count = 0
+    first_baked = None
     use_retarget_clean = action_armature != bake_armature
     lock_source = use_retarget_clean
 
@@ -41,7 +70,7 @@ def bake_visible_actions(
         context.window.cursor_modal_set('WAIT')
 
         def _bake_actions():
-            nonlocal baked_count
+            nonlocal baked_count, first_baked
             for action in list(actions_to_bake):
                 bone_names = select_bones_for_visual_bake(
                     action_armature,
@@ -72,6 +101,8 @@ def bake_visible_actions(
                     if old_action and old_action.users > 0:
                         old_action.user_clear()
 
+                if first_baked is None:
+                    first_baked = baked_action
                 baked_count += 1
 
         if lock_source:
@@ -81,5 +112,8 @@ def bake_visible_actions(
             _bake_actions()
     finally:
         context.window.cursor_modal_restore()
+
+    if first_baked is not None:
+        load_baked_action(bake_armature, first_baked)
 
     return baked_count

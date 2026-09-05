@@ -10,7 +10,14 @@ from pathlib import Path
 import bpy
 
 from ..blender_compat import assign_action, ensure_action_slot
-from .fcurve_compat import find_fcurve, get_all_action_fcurves, new_fcurve, remove_fcurve
+from .fcurve_compat import (
+    ensure_fcurve_for_datablock,
+    find_fcurve,
+    get_all_action_fcurves,
+    get_fcurves_for_assigned_slot,
+    remove_fcurve,
+    style_visibility_fcurve,
+)
 
 RAW_ANIM_FORMAT = "sub_raw_anim"
 RAW_ANIM_VERSION = 1
@@ -289,12 +296,42 @@ def _import_visibility_tracks(
                 keyframe.interpolation = (
                     key_data.get("interpolation", "CONSTANT") if key_data else "CONSTANT"
                 )
+            style_visibility_fcurve(fcurve)
             fcurve.update()
 
     from .import_anim import setup_visibility_drivers
 
     setup_visibility_drivers(arma)
     return sap_action, keyframe_count
+
+
+def _write_fcurve_keys(fcurve: bpy.types.FCurve, keys: list[dict]) -> int:
+    """Replace an F-Curve's keyframes from serialized raw-anim key dicts."""
+    if fcurve is None or not keys:
+        return 0
+
+    points = fcurve.keyframe_points
+    while len(points):
+        points.remove(points[0])
+
+    points.add(count=len(keys))
+    flat_coords = []
+    for key_data in keys:
+        flat_coords.append(float(key_data["frame"]))
+        flat_coords.append(float(key_data["value"]))
+    points.foreach_set("co", flat_coords)
+
+    for index, key_data in enumerate(keys):
+        keyframe = points[index]
+        keyframe.interpolation = key_data.get("interpolation", "BEZIER")
+        if keyframe.interpolation == "BEZIER":
+            if "handle_left" in key_data:
+                keyframe.handle_left = key_data["handle_left"]
+            if "handle_right" in key_data:
+                keyframe.handle_right = key_data["handle_right"]
+
+    fcurve.update()
+    return len(keys)
 
 
 def export_raw_animation(
@@ -310,8 +347,13 @@ def export_raw_animation(
             operator.report({"ERROR"}, "No action to export.")
         return False
 
+    # Prefer the channelbag actually driving this armature (Blender 5 slots).
+    source_fcurves = get_fcurves_for_assigned_slot(arma)
+    if not source_fcurves:
+        source_fcurves = get_all_action_fcurves(action, id_type="OBJECT")
+
     fcurve_entries: list[dict] = []
-    for fcurve in get_all_action_fcurves(action, id_type="OBJECT"):
+    for fcurve in source_fcurves:
         match = _BONE_FCURVE_REGEX.match(fcurve.data_path)
         if match is None:
             continue
@@ -369,14 +411,22 @@ def export_raw_animation(
 
 
 def get_raw_anim_import_directory(ssp, folder_path: str = "") -> str:
+    """Resolve the raw-anim folder, preferring an explicit or stored path.
+
+    Motion→rawanims mapping is only a fallback when the user has not chosen
+    a raw folder yet, so browsing a custom folder is not overwritten.
+    """
     if folder_path:
         return folder_path
+    stored = getattr(ssp, "raw_animation_import_folder_path", "") or ""
+    if stored:
+        return stored
     motion_path = getattr(ssp, "animation_import_folder_path", "")
     if is_fighter_motion_body_path(motion_path):
         mapped = motion_path_to_rawanims_path(motion_path)
         if mapped:
             return mapped
-    return getattr(ssp, "raw_animation_import_folder_path", "")
+    return ""
 
 
 def refresh_raw_animation_import_list(ssp, folder_path: str = "") -> str:
@@ -386,7 +436,7 @@ def refresh_raw_animation_import_list(ssp, folder_path: str = "") -> str:
 
     if resolved_folder and os.path.isdir(resolved_folder):
         for file_name in sorted(os.listdir(resolved_folder)):
-            if not file_name.endswith(RAW_ANIM_EXTENSION):
+            if not file_name.lower().endswith(RAW_ANIM_EXTENSION):
                 continue
             item = ssp.raw_animation_import_files.add()
             item.name = os.path.splitext(file_name)[0]
@@ -399,7 +449,7 @@ _scheduled_raw_refresh_scenes: set[str] = set()
 
 
 def schedule_raw_animation_list_refresh(context: bpy.types.Context) -> None:
-    """Refresh raw anim list outside panel draw (RNA writes are not allowed in draw)."""
+    """Fill an empty raw-anim folder from motion path outside panel draw."""
     scene_name = context.scene.name
     if scene_name in _scheduled_raw_refresh_scenes:
         return
@@ -411,12 +461,15 @@ def schedule_raw_animation_list_refresh(context: bpy.types.Context) -> None:
         if scene is None:
             return None
         ssp = scene.sub_scene_properties
+        # Never overwrite a folder the user already picked.
+        if ssp.raw_animation_import_folder_path:
+            return None
         motion_path = getattr(ssp, "animation_import_folder_path", "")
         if not is_fighter_motion_body_path(motion_path):
             return None
         expected_raw_folder = motion_path_to_rawanims_path(motion_path)
-        if expected_raw_folder and ssp.raw_animation_import_folder_path != expected_raw_folder:
-            refresh_raw_animation_import_list(ssp)
+        if expected_raw_folder:
+            refresh_raw_animation_import_list(ssp, expected_raw_folder)
         window_manager = getattr(bpy.context, "window_manager", None)
         if window_manager is not None:
             for window in window_manager.windows:
@@ -532,15 +585,29 @@ def import_raw_animation(
     if ik_setup and not ensure_ik_rig_for_raw_import(context, arma, ik_setup, operator):
         return False
 
+    # Always build a fresh action so Blender 5 doesn't keep writing into a
+    # leftover Legacy Slot from a previous import/edit of the same name.
     action_name = data.get("action_name") or Path(filepath).stem
-    action = bpy.data.actions.get(action_name)
-    if action is None:
+    action_name = normalize_anim_stem(str(action_name)) or Path(filepath).stem
+    existing = bpy.data.actions.get(action_name)
+    if existing is not None:
+        # Detach from this armature first, then remove if unused.
+        if arma.animation_data and arma.animation_data.action == existing:
+            arma.animation_data.action = None
+        try:
+            bpy.data.actions.remove(existing)
+        except RuntimeError:
+            # Still in use elsewhere — fall back to clearing curves.
+            for existing_fcurve in list(get_all_action_fcurves(existing)):
+                remove_fcurve(existing, existing_fcurve, id_type="OBJECT")
+            action = existing
+        else:
+            action = bpy.data.actions.new(name=action_name)
+    else:
         action = bpy.data.actions.new(name=action_name)
-    elif fcurve_entries:
-        for existing_fcurve in list(get_all_action_fcurves(action)):
-            remove_fcurve(action, existing_fcurve, id_type="OBJECT")
 
     if fcurve_entries:
+        # Assign before writing so fcurve_ensure_for_datablock binds the slot.
         ensure_action_slot(action, arma)
         assign_action(arma.animation_data, action)
 
@@ -552,25 +619,15 @@ def import_raw_animation(
         transform_property = fcurve_data["property"]
         array_index = int(fcurve_data["index"])
         data_path = f'pose.bones["{bone_name}"].{transform_property}'
-        fcurve = new_fcurve(
+        fcurve = ensure_fcurve_for_datablock(
             action,
+            arma,
             data_path,
             index=array_index,
             action_group=bone_name,
             id_type="OBJECT",
         )
-
-        for key_data in fcurve_data.get("keys", []):
-            keyframe = fcurve.keyframe_points.insert(float(key_data["frame"]), float(key_data["value"]))
-            keyframe.interpolation = key_data.get("interpolation", "BEZIER")
-            if keyframe.interpolation == "BEZIER":
-                if "handle_left" in key_data:
-                    keyframe.handle_left = key_data["handle_left"]
-                if "handle_right" in key_data:
-                    keyframe.handle_right = key_data["handle_right"]
-            keyframe_count += 1
-
-        fcurve.update()
+        keyframe_count += _write_fcurve_keys(fcurve, fcurve_data.get("keys", []))
 
         if transform_property == "rotation_quaternion":
             quaternion_bones.add(bone_name)
@@ -592,10 +649,17 @@ def import_raw_animation(
     frame_end = int(data.get("frame_end", frame_start))
     context.scene.frame_start = frame_start
     context.scene.frame_end = frame_end
-    context.scene.frame_current = frame_start
 
     if fcurve_entries:
         assign_action(arma.animation_data, action)
+        assigned_count = len(get_fcurves_for_assigned_slot(arma))
+        if assigned_count == 0 and operator is not None:
+            operator.report(
+                {"ERROR"},
+                "Raw animation wrote F-Curves but none are on the armature's active action slot.",
+            )
+            return False
+
     if sap_action is not None:
         assign_action(arma.data.animation_data, sap_action)
 
@@ -604,12 +668,16 @@ def import_raw_animation(
 
         mark_sap_sync_known(arma)
 
-    if ik_setup:
-        from ..extras.fk_to_ik import run_fk_to_ik_match_for_raw_import
+    # Scrub to start so the viewport evaluates the new action immediately.
+    context.scene.frame_set(frame_start)
 
-        match_result = run_fk_to_ik_match_for_raw_import(context, cleanup_mode=ik_setup)
-        if match_result != {"FINISHED"} and operator is not None:
-            operator.report({"WARNING"}, "IK to FK matching did not complete successfully.")
+    # Do not run FK→IK matching here. Raw anims already store the authored IK
+    # control keys; matching on frame 1 overwrites them and warps the start pose.
+    if ik_setup and operator is not None:
+        operator.report(
+            {"INFO"},
+            "IK bones were created for this raw animation; imported IK keys drive the pose.",
+        )
 
     if operator is not None:
         parts = [f"{len(fcurve_entries)} pose f-curves", f"{keyframe_count} keyframes"]

@@ -23,6 +23,7 @@ _FINGER_SLOTS = ('meta', 'a', 'b', 'c')
 # Process larger / structural bones first so they claim the best matches.
 _SLOT_PRIORITY = [
     ('root', None, None),
+    ('throw', None, None),
     ('spine', None, 'hips'),
     ('spine', None, 'spine'),
     ('spine', None, 'spine1'),
@@ -41,11 +42,22 @@ for _slot in _FACE_SLOTS:
     _SLOT_PRIORITY.append(('face', None, _slot))
 
 
-def _bone_world_head(armature_obj, bone_name):
-    bone = armature_obj.data.bones.get(bone_name)
+def _bone_world_head(armature_obj, bone):
+    if isinstance(bone, str):
+        bone = armature_obj.data.bones.get(bone)
     if not bone:
         return None
     return armature_obj.matrix_world @ bone.head_local
+
+
+def _bone_world_mid(armature_obj, bone):
+    if isinstance(bone, str):
+        bone = armature_obj.data.bones.get(bone)
+    if not bone:
+        return None
+    head = armature_obj.matrix_world @ bone.head_local
+    tail = armature_obj.matrix_world @ bone.tail_local
+    return (head + tail) * 0.5
 
 
 def _bone_length(bone):
@@ -57,8 +69,26 @@ def _bone_length(bone):
     return 0.0
 
 
-def _compute_proximity_threshold(reference_armature_obj, target_armature_obj):
-    """Return max head-to-head distance for a bone pair to count as 'close'."""
+def _armature_world_extent(armature_obj):
+    """Rough world-space size of an armature from bone head positions."""
+    points = []
+    for bone in armature_obj.data.bones:
+        head = _bone_world_head(armature_obj, bone)
+        if head is not None:
+            points.append(head)
+    if len(points) < 2:
+        return 0.0
+    xs = [p.x for p in points]
+    ys = [p.y for p in points]
+    zs = [p.z for p in points]
+    dx = max(xs) - min(xs)
+    dy = max(ys) - min(ys)
+    dz = max(zs) - min(zs)
+    return max(dx, dy, dz)
+
+
+def _compute_proximity_threshold(reference_armature_obj, target_armature_obj, radius_scale=1.0):
+    """Return max head distance for a bone pair to count as a candidate match."""
     lengths = []
     for armature_obj in (reference_armature_obj, target_armature_obj):
         for bone in armature_obj.data.bones:
@@ -66,45 +96,112 @@ def _compute_proximity_threshold(reference_armature_obj, target_armature_obj):
             if length > 1e-6:
                 lengths.append(length)
 
+    extent = max(
+        _armature_world_extent(reference_armature_obj),
+        _armature_world_extent(target_armature_obj),
+        0.0,
+    )
+
     if not lengths:
-        return 0.05
+        base = max(0.05, extent * 0.04)
+    else:
+        lengths.sort()
+        median = lengths[len(lengths) // 2]
+        # Scale with the skeleton. A hard 0.10m-style cap made Smash-sized
+        # overlapping armatures fail even when heads visually touch.
+        base = max(median * 0.65, extent * 0.035, 0.02)
+        if extent > 1e-6:
+            base = min(base, extent * 0.20)
 
-    lengths.sort()
-    median = lengths[len(lengths) // 2]
-    # Nearly touching / slightly separated relative to typical bone length.
-    return max(0.005, min(median * 1.5, 0.15))
+    scale = max(0.1, float(radius_scale) if radius_scale else 1.0)
+    return base * scale
 
 
-def _find_nearest_bone(world_pos, target_armature_obj, used_bones, max_distance):
+def _match_score(ref_armature, ref_bone, target_armature, target_bone, parent_map, max_distance):
+    """Lower is better. Gate on head distance; use mid/length/parent for ranking."""
+    ref_head = _bone_world_head(ref_armature, ref_bone)
+    trg_head = _bone_world_head(target_armature, target_bone)
+    ref_mid = _bone_world_mid(ref_armature, ref_bone)
+    trg_mid = _bone_world_mid(target_armature, target_bone)
+    if ref_head is None or trg_head is None or ref_mid is None or trg_mid is None:
+        return None
+
+    head_dist = (trg_head - ref_head).length
+    # Users judge "touching" by heads. Different proportions make midpoints diverge
+    # even when heads sit on top of each other.
+    if head_dist > max_distance:
+        return None
+
+    mid_dist = (trg_mid - ref_mid).length
+    dist = (head_dist * 0.80) + (mid_dist * 0.20)
+
+    ref_len = _bone_length(ref_bone)
+    trg_len = _bone_length(target_bone)
+    if ref_len > 1e-6 and trg_len > 1e-6:
+        ratio = min(ref_len, trg_len) / max(ref_len, trg_len)
+        dist *= 1.0 + ((1.0 - ratio) * 0.45)
+
+    if ref_bone.parent and ref_bone.parent.name in parent_map:
+        expected = parent_map[ref_bone.parent.name]
+        if target_bone.parent and target_bone.parent.name == expected:
+            dist *= 0.45
+        else:
+            dist *= 1.15
+
+    return dist
+
+
+def _find_best_target(ref_armature, ref_bone, target_armature, used_bones, parent_map, max_distance):
+    """Return the unique best target bone, or '' when the match is ambiguous."""
+    if isinstance(ref_bone, str):
+        ref_bone = ref_armature.data.bones.get(ref_bone)
+    if not ref_bone:
+        return ""
+
     best_name = ""
-    best_dist = max_distance
+    best_score = None
+    second_score = None
 
-    for bone in target_armature_obj.data.bones:
+    for bone in target_armature.data.bones:
         if bone.name in used_bones:
             continue
-        bone_pos = target_armature_obj.matrix_world @ bone.head_local
-        dist = (bone_pos - world_pos).length
-        if dist < best_dist:
-            best_dist = dist
+        score = _match_score(ref_armature, ref_bone, target_armature, bone, parent_map, max_distance)
+        if score is None:
+            continue
+        if best_score is None or score < best_score:
+            second_score = best_score
+            best_score = score
             best_name = bone.name
+        elif second_score is None or score < second_score:
+            second_score = score
 
-    return best_name if best_name else ""
+    if not best_name:
+        return ""
+    # Drop near-ties only when the winner is not already very close. Perfect
+    # overlaps used to lose every slot because helper/twist bones sat nearby.
+    if (
+        second_score is not None
+        and best_score > max_distance * 0.12
+        and second_score <= best_score * 1.08
+    ):
+        return ""
+    return best_name
 
 
-def _collect_close_bone_pairs(reference_armature_obj, target_armature_obj, max_distance):
-    """Return sorted (distance, ref_bone, target_bone) for all close head pairs."""
+def _collect_close_bone_pairs(reference_armature_obj, target_armature_obj, parent_map, max_distance):
+    """Return sorted (score, ref_bone, target_bone) for close scored pairs."""
     pairs = []
 
     for ref_bone in reference_armature_obj.data.bones:
-        ref_pos = _bone_world_head(reference_armature_obj, ref_bone.name)
-        if ref_pos is None:
-            continue
-
         for target_bone in target_armature_obj.data.bones:
-            target_pos = target_armature_obj.matrix_world @ target_bone.head_local
-            dist = (target_pos - ref_pos).length
-            if dist <= max_distance:
-                pairs.append((dist, ref_bone.name, target_bone.name))
+            score = _match_score(
+                reference_armature_obj, ref_bone,
+                target_armature_obj, target_bone,
+                parent_map, max_distance,
+            )
+            if score is None:
+                continue
+            pairs.append((score, ref_bone.name, target_bone.name))
 
     pairs.sort(key=lambda item: item[0])
     return pairs
@@ -113,6 +210,8 @@ def _collect_close_bone_pairs(reference_armature_obj, target_armature_obj, max_d
 def _get_slot_bone_name(settings, group_name, finger_name, slot_name):
     if group_name == 'root':
         return settings.root or ""
+    if group_name == 'throw':
+        return getattr(settings, 'throw', '') or ""
 
     group = getattr(settings, group_name)
     if finger_name:
@@ -125,6 +224,9 @@ def _get_slot_bone_name(settings, group_name, finger_name, slot_name):
 def _set_slot_bone_name(settings, group_name, finger_name, slot_name, bone_name):
     if group_name == 'root':
         settings.root = bone_name
+        return
+    if group_name == 'throw':
+        settings.throw = bone_name
         return
 
     group = getattr(settings, group_name)
@@ -154,54 +256,59 @@ def _collect_reference_preset_bones(ref_settings):
     return bones
 
 
-def map_bones_by_proximity(reference_armature_obj, target_armature_obj):
-    """Fill target retarget settings using nearby bone head positions.
+def map_bones_by_proximity(reference_armature_obj, target_armature_obj, radius_scale=1.0):
+    """Fill target retarget settings using scored nearby bone positions.
 
-    Compares all bone heads between the reference and target armatures. When
-    heads are close (nearly touching or slightly separated), they are paired.
-    Preset slots from the reference mapping are filled first, then any other
-    close pairs are added as custom bones.
+    Compares bone heads and midpoints, prefers similar lengths and matching
+    parents, and skips pairs that are too close to call. `radius_scale`
+    multiplies the auto distance threshold (1.0 is the default).
 
     Returns (mapped_count, custom_count).
     """
     ref_settings = reference_armature_obj.data.expykit_retarget
     target_settings = target_armature_obj.data.expykit_retarget
-    max_distance = _compute_proximity_threshold(reference_armature_obj, target_armature_obj)
+    max_distance = _compute_proximity_threshold(
+        reference_armature_obj, target_armature_obj, radius_scale=radius_scale
+    )
     used_targets = set()
     mapped_ref_bones = set()
+    parent_map = {}
     mapped_count = 0
     custom_count = 0
     ref_has_preset = ref_settings.has_settings()
 
     if ref_has_preset:
         for group_name, finger_name, slot_name in _SLOT_PRIORITY:
-            ref_bone = _get_slot_bone_name(ref_settings, group_name, finger_name, slot_name)
-            if not ref_bone:
+            ref_bone_name = _get_slot_bone_name(ref_settings, group_name, finger_name, slot_name)
+            if not ref_bone_name:
                 continue
 
-            world_pos = _bone_world_head(reference_armature_obj, ref_bone)
-            if world_pos is None:
-                continue
-
-            nearest = _find_nearest_bone(
-                world_pos, target_armature_obj, used_targets, max_distance
+            nearest = _find_best_target(
+                reference_armature_obj,
+                ref_bone_name,
+                target_armature_obj,
+                used_targets,
+                parent_map,
+                max_distance,
             )
             if not nearest:
                 continue
 
             _set_slot_bone_name(target_settings, group_name, finger_name, slot_name, nearest)
             used_targets.add(nearest)
-            mapped_ref_bones.add(ref_bone)
+            mapped_ref_bones.add(ref_bone_name)
+            parent_map[ref_bone_name] = nearest
             mapped_count += 1
 
         ref_settings.custom.migrate_legacy_bones()
         for identifier, ref_bone in ref_settings.custom.get_bones():
-            world_pos = _bone_world_head(reference_armature_obj, ref_bone)
-            if world_pos is None:
-                continue
-
-            nearest = _find_nearest_bone(
-                world_pos, target_armature_obj, used_targets, max_distance
+            nearest = _find_best_target(
+                reference_armature_obj,
+                ref_bone,
+                target_armature_obj,
+                used_targets,
+                parent_map,
+                max_distance,
             )
             if not nearest:
                 continue
@@ -209,29 +316,34 @@ def map_bones_by_proximity(reference_armature_obj, target_armature_obj):
             target_settings.custom.add_bone(identifier, nearest)
             used_targets.add(nearest)
             mapped_ref_bones.add(ref_bone)
+            parent_map[ref_bone] = nearest
             custom_count += 1
 
         if ref_settings.custom.name:
             ref_bone = ref_settings.custom.name
-            world_pos = _bone_world_head(reference_armature_obj, ref_bone)
-            if world_pos is not None:
-                nearest = _find_nearest_bone(
-                    world_pos, target_armature_obj, used_targets, max_distance
-                )
-                if nearest:
-                    from ...expy_kit.properties import _clean_custom_identifier
-                    identifier = _clean_custom_identifier(ref_bone)
-                    target_settings.custom.add_bone(identifier, nearest)
-                    used_targets.add(nearest)
-                    mapped_ref_bones.add(ref_bone)
-                    custom_count += 1
+            nearest = _find_best_target(
+                reference_armature_obj,
+                ref_bone,
+                target_armature_obj,
+                used_targets,
+                parent_map,
+                max_distance,
+            )
+            if nearest:
+                from ...expy_kit.properties import _clean_custom_identifier
+                identifier = _clean_custom_identifier(ref_bone)
+                target_settings.custom.add_bone(identifier, nearest)
+                used_targets.add(nearest)
+                mapped_ref_bones.add(ref_bone)
+                parent_map[ref_bone] = nearest
+                custom_count += 1
     else:
         mapped_ref_bones = _collect_reference_preset_bones(ref_settings)
 
     from ...expy_kit.properties import _clean_custom_identifier
 
     for dist, ref_bone, target_bone in _collect_close_bone_pairs(
-        reference_armature_obj, target_armature_obj, max_distance
+        reference_armature_obj, target_armature_obj, parent_map, max_distance
     ):
         if ref_bone in mapped_ref_bones or target_bone in used_targets:
             continue
@@ -243,6 +355,7 @@ def map_bones_by_proximity(reference_armature_obj, target_armature_obj):
         target_settings.custom.add_bone(identifier, target_bone)
         used_targets.add(target_bone)
         mapped_ref_bones.add(ref_bone)
+        parent_map[ref_bone] = target_bone
         custom_count += 1
 
     target_settings.custom.sync_all_dynamic_props()

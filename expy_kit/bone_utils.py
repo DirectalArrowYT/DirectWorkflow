@@ -4,6 +4,8 @@ from mathutils import Matrix
 from mathutils import Quaternion
 from math import pi
 
+from ..source.blender_compat import set_pose_bone_select
+
 
 def is_pose_bone_all_locked(pose_bone) -> bool:
     """Return True if all pose_bone's transform channels are locked"""
@@ -237,15 +239,17 @@ def remove_all_bone_constraints(ob):
 
 
 def get_constrained_controls(armature_object: bpy.types.Object, unselect=False, use_deform=False) -> list[bpy.types.PoseBone]:
+    if armature_object is None or getattr(armature_object, "pose", None) is None:
+        return
     for pb in armature_object.pose.bones:
         if pb.bone.use_deform and not use_deform:  # FIXME: ik controls might have use_deform just to be exported for games
             if unselect:
-                pb.select = False
+                set_pose_bone_select(pb, False)
             continue
 
         if len(pb.constraints) == 0:
             if unselect:
-                pb.select = False
+                set_pose_bone_select(pb, False)
             continue
     
         yield pb
@@ -690,3 +694,21 @@ def relative_pose_direction(start_pose_bone, end_pose_bone, mat):
 
     direction = mat @ direction
     return direction.normalized()
+
+
+def get_ik_control_bone_names(armature_data):
+    """Return IK helper control bones (FootIK, KneeIK, HandIK, ArmIK, etc.)."""
+    return [bone.name for bone in armature_data.bones if "IK" in bone.name]
+
+
+def append_ik_bones_for_bake(armature_object, bone_names, select=False):
+    """Add IK control bones to a bake/cleanup list, optionally selecting them for nla.bake."""
+    result = list(bone_names)
+    for ik_name in get_ik_control_bone_names(armature_object.data):
+        if ik_name not in result:
+            result.append(ik_name)
+        if select:
+            pose_bone = armature_object.pose.bones.get(ik_name)
+            if pose_bone:
+                set_pose_bone_select(pose_bone, True)
+    return result

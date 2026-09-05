@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import StringProperty
 from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper, ImportHelper
@@ -563,6 +564,7 @@ def import_stage_light(context, filepath: str, start_frame: int = 1):
     if active is not None:
         context.view_layer.objects.active = active
     apply_stage_light_preview(context)
+    _link_imported_lights_to_smash_viewport(context, filepath)
     return collection, len(objects), frame_count
 
 
@@ -773,7 +775,7 @@ def _apply_track_flags(track_data, track_cache):
         )
 
 
-def export_stage_light(context, filepath: str):
+def export_stage_light(context, filepath: str, preview_frame=None):
     objects = {obj.get("sub_stage_light_node"): obj for obj in find_stage_light_objects(context)}
     if not objects:
         raise ValueError("No imported stage lights found. Import a light.nuanmb first.")
@@ -795,14 +797,18 @@ def export_stage_light(context, filepath: str):
     else:
         cache = json.loads(cache_text)
 
-    start_frame = context.scene.frame_start
-    end_frame = context.scene.frame_end
-    frame_count = max(1, end_frame - start_frame + 1)
+    if preview_frame is not None:
+        start_frame = int(preview_frame)
+        frame_count = 1
+    else:
+        start_frame = context.scene.frame_start
+        end_frame = context.scene.frame_end
+        frame_count = max(1, end_frame - start_frame + 1)
 
     sampled = _sample_all_nodes(objects, cache, frame_count, start_frame)
 
     anim = ssbh_data_py.anim_data.AnimData()
-    anim.final_frame_index = float(frame_count - 1)
+    anim.final_frame_index = 0.0 if preview_frame is not None else float(frame_count - 1)
 
     for group_cache in cache.get("groups", []):
         group = ssbh_data_py.anim_data.GroupData(_group_type(group_cache["group_type"]))
@@ -831,9 +837,165 @@ def export_stage_light(context, filepath: str):
         anim.groups.append(group)
 
     anim.save(filepath)
-    if collection is not None:
+    if collection is not None and preview_frame is None:
         collection["sub_stage_light_source"] = filepath
     return frame_count, len(objects)
+
+
+_PREVIEW_LIGHT_NAME = "smash_stage_lights_preview.nuanmb"
+_live_sync_hold = False
+_live_sync_pending = False
+_live_sync_busy = False
+_last_light_fingerprint = None
+_last_seen_frame = None
+
+
+def hold_live_smash_sync():
+    """Training Lights / Load Stage Lights should not be overwritten until the user edits a Stage Tools light."""
+    global _live_sync_hold
+    _live_sync_hold = True
+
+
+def resume_live_smash_sync():
+    global _live_sync_hold
+    _live_sync_hold = False
+
+
+def _using_stage_tools_preview(ssp):
+    path = (getattr(ssp, "smash_vp_light_path", "") or "").strip()
+    return os.path.basename(path).startswith("smash_stage_lights")
+
+
+def _preview_light_path():
+    root = getattr(bpy.app, "tempdir", "") or ""
+    if not root:
+        import tempfile
+        root = tempfile.gettempdir()
+    return os.path.join(root, _PREVIEW_LIGHT_NAME)
+
+
+def _light_fingerprint(context):
+    parts = []
+    for obj in find_stage_light_objects(context):
+        mw = obj.matrix_world
+        loc = mw.to_translation()
+        rot = mw.to_quaternion()
+        parts.append((
+            obj.get("sub_stage_light_node") or obj.name,
+            round(loc.x, 4),
+            round(loc.y, 4),
+            round(loc.z, 4),
+            round(rot.w, 4),
+            round(rot.x, 4),
+            round(rot.y, 4),
+            round(rot.z, 4),
+        ))
+        if obj.type == "LIGHT":
+            color = obj.data.color
+            parts.append((
+                round(float(obj.data.energy), 4),
+                round(float(color[0]), 4),
+                round(float(color[1]), 4),
+                round(float(color[2]), 4),
+            ))
+        for key in obj.keys():
+            if str(key).startswith("Custom"):
+                parts.append((str(key), str(obj[key])))
+    return tuple(parts)
+
+
+def _link_imported_lights_to_smash_viewport(context, filepath):
+    global _live_sync_hold, _last_light_fingerprint, _last_seen_frame
+    ssp = getattr(context.scene, "sub_scene_properties", None)
+    if ssp is None or not bool(getattr(ssp, "stage_light_drive_smash_viewport", True)):
+        return
+    _live_sync_hold = False
+    _last_light_fingerprint = _light_fingerprint(context)
+    _last_seen_frame = int(context.scene.frame_current)
+    try:
+        from ..smash_viewport import apply_lighting_file
+        apply_lighting_file(filepath, context.scene, force=True)
+    except Exception:
+        ssp.smash_vp_light_path = filepath
+
+
+def push_stage_lights_to_smash_viewport(context=None):
+    """Write the current Stage Tools lights to a temp nuanmb and load them in Smash Viewport."""
+    global _live_sync_busy, _last_light_fingerprint
+    context = context or bpy.context
+    ssp = getattr(context.scene, "sub_scene_properties", None)
+    if ssp is None or not bool(getattr(ssp, "stage_light_drive_smash_viewport", True)):
+        return False
+    if not find_stage_light_objects(context):
+        return False
+    path = _preview_light_path()
+    _live_sync_busy = True
+    try:
+        export_stage_light(context, path, preview_frame=context.scene.frame_current)
+        from ..smash_viewport import apply_lighting_file
+        apply_lighting_file(path, context.scene, force=True)
+        _last_light_fingerprint = _light_fingerprint(context)
+    except Exception:
+        return False
+    finally:
+        _live_sync_busy = False
+    return True
+
+
+def _flush_live_smash_sync():
+    global _live_sync_pending
+    _live_sync_pending = False
+    push_stage_lights_to_smash_viewport()
+    return None
+
+
+def _schedule_live_smash_sync():
+    global _live_sync_pending
+    if _live_sync_pending:
+        return
+    _live_sync_pending = True
+    try:
+        bpy.app.timers.register(_flush_live_smash_sync, first_interval=0.2)
+    except Exception:
+        _live_sync_pending = False
+
+
+@persistent
+def _stage_light_depsgraph_update(scene, _depsgraph):
+    global _live_sync_hold, _last_light_fingerprint, _last_seen_frame
+    if _live_sync_busy:
+        return
+    ssp = getattr(scene, "sub_scene_properties", None)
+    if ssp is None or not bool(getattr(ssp, "stage_light_drive_smash_viewport", True)):
+        return
+    if getattr(scene.render, "engine", "") != "SMASH_VIEWPORT":
+        return
+    context = bpy.context
+    if not find_stage_light_objects(context):
+        return
+    fingerprint = _light_fingerprint(context)
+    frame = int(scene.frame_current)
+    if fingerprint == _last_light_fingerprint:
+        _last_seen_frame = frame
+        return
+
+    frame_changed = _last_seen_frame is not None and frame != _last_seen_frame
+    _last_seen_frame = frame
+
+    # Training Lights / Load Stage Lights: keep that lighting until the user edits a sun.
+    if _live_sync_hold:
+        if frame_changed:
+            _last_light_fingerprint = fingerprint
+            return
+        _live_sync_hold = False
+
+    # Imported original nuanmb already advances with the timeline in Smash Viewport.
+    if frame_changed and not _using_stage_tools_preview(ssp):
+        _last_light_fingerprint = fingerprint
+        return
+
+    _last_light_fingerprint = fingerprint
+    _schedule_live_smash_sync()
 
 
 class SUB_OP_import_stage_light(Operator, ImportHelper):
