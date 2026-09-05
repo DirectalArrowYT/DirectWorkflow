@@ -1,5 +1,7 @@
+import base64
 import ctypes
 import ctypes.wintypes
+import json
 import math
 import os
 import re
@@ -15,6 +17,7 @@ from gpu_extras.presets import draw_texture_2d
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
+    EnumProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
@@ -22,9 +25,13 @@ from bpy.props import (
 from bpy.types import Operator, Panel, PropertyGroup, UIList
 from mathutils import Matrix, Vector
 
+from .anim_flip import apply_smash_pose_data, keyframe_pose_bones, smash_pose_data_from_armature
 
-TOML_NAME = "face_picker.toml"
+
+PICKER_FILE_NAME = "face_picker.json"
+LEGACY_TOML_NAME = "face_picker.toml"
 IMAGE_DIR_NAME = "face_picker"
+PICKER_FILE_VERSION = 2
 DEFAULT_CAMERA_SIZE = 500
 HEAD_BONE_NAMES = ("HeadN", "Head", "FaceN", "NeckN")
 FACE_MESH_HINTS = (
@@ -35,6 +42,90 @@ FACIAL_TRACK_HINTS = (
     "mouth", "blink", "eye", "face", "brow", "jaw",
     "lip", "tooth", "tongue", "openblink",
 )
+FACIAL_BONE_HINTS = (
+    "mouth", "blink", "eye", "face", "brow", "jaw",
+    "lip", "tooth", "tongue", "cheek", "nose", "lid",
+)
+EXPRESSION_MODE_VIS = "vis"
+EXPRESSION_MODE_BONE = "bone"
+
+# Shared words in vis-track names that mean the same face part.
+# VoiceAMouth and HeavyhitMouth both contain "Mouth", so applying VoiceA
+# only replaces mouth tracks and leaves eyes/brows from Heavyhit on.
+_TRACK_TOKEN_SPLIT = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+")
+_TRACK_PART_ALIASES = {
+    "mouth": "mouth",
+    "lip": "lip",
+    "lips": "lip",
+    "jaw": "jaw",
+    "tooth": "tooth",
+    "teeth": "tooth",
+    "tongue": "tongue",
+    "eye": "eye",
+    "eyes": "eye",
+    "blink": "blink",
+    "openblink": "blink",
+    "brow": "brow",
+    "brows": "brow",
+    "eyebrow": "brow",
+    "eyebrows": "brow",
+    "face": "face",
+    "cheek": "cheek",
+    "cheeks": "cheek",
+    "nose": "nose",
+    "lid": "lid",
+    "lids": "lid",
+}
+_TRACK_PART_ALIASES_BY_LENGTH = tuple(
+    sorted(_TRACK_PART_ALIASES, key=len, reverse=True)
+)
+
+
+def tokenize_track_name(name):
+    tokens = []
+    for piece in re.split(r"[^A-Za-z0-9]+", name or ""):
+        if not piece:
+            continue
+        tokens.extend(token.lower() for token in _TRACK_TOKEN_SPLIT.findall(piece))
+    return tokens
+
+
+def track_part_keys(name):
+    keys = set()
+    for token in tokenize_track_name(name):
+        canonical = _TRACK_PART_ALIASES.get(token)
+        if canonical:
+            keys.add(canonical)
+    if keys:
+        return keys
+    lowered = (name or "").lower()
+    matched = []
+    for alias in _TRACK_PART_ALIASES_BY_LENGTH:
+        if alias not in lowered:
+            continue
+        if any(alias in other for other in matched):
+            continue
+        matched.append(alias)
+        keys.add(_TRACK_PART_ALIASES[alias])
+    return keys
+
+
+def expression_part_keys(expression):
+    keys = set()
+    for track in getattr(expression, "tracks", []) or []:
+        keys |= track_part_keys(getattr(track, "name", ""))
+    return keys
+
+
+def vis_track_names_for_parts(sap, part_keys):
+    names = set()
+    if sap is None or not part_keys:
+        return names
+    for entry in sap.vis_track_entries:
+        if track_part_keys(entry.name) & part_keys:
+            names.add(entry.name)
+    return names
+
 
 
 def get_armature(context):
@@ -103,7 +194,7 @@ def armature_has_face_picker_menu(context):
     if len(picker.expressions) > 0:
         return True
     folder = peek_model_folder(context, arma)
-    return bool(folder) and toml_path_for(folder).exists()
+    return bool(folder) and resolve_picker_load_path(folder) is not None
 
 
 def sanitize_id(name):
@@ -219,8 +310,12 @@ def write_toml_file(path, data):
         lines.append(f"id = {toml_string(expr.get('id', ''))}")
         lines.append(f"name = {toml_string(expr.get('name', ''))}")
         lines.append(f"image = {toml_string(expr.get('image', ''))}")
+        mode = expr.get("mode", EXPRESSION_MODE_VIS) or EXPRESSION_MODE_VIS
+        lines.append(f"mode = {toml_string(mode)}")
         tracks = ", ".join(toml_string(track) for track in expr.get("tracks", []))
         lines.append(f"tracks = [{tracks}]")
+        if mode == EXPRESSION_MODE_BONE:
+            lines.append(f"bone_pose = {toml_string(expr.get('bone_pose', '{}'))}")
         lines.append("")
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
@@ -277,12 +372,157 @@ def resolve_source_folder(context, arma):
     return ""
 
 
-def toml_path_for(folder):
-    return Path(folder) / TOML_NAME
+def picker_json_path_for(folder):
+    return Path(folder) / PICKER_FILE_NAME
+
+
+def legacy_toml_path_for(folder):
+    return Path(folder) / LEGACY_TOML_NAME
 
 
 def image_dir_for(folder):
     return Path(folder) / IMAGE_DIR_NAME
+
+
+def resolve_picker_load_path(folder):
+    json_path = picker_json_path_for(folder)
+    if json_path.exists():
+        return json_path
+    toml_path = legacy_toml_path_for(folder)
+    if toml_path.exists():
+        return toml_path
+    return None
+
+
+def read_picker_file(path):
+    path = Path(path)
+    if path.suffix.lower() == ".json":
+        return json.loads(path.read_text(encoding="utf-8"))
+    return read_toml_file(path)
+
+
+def image_to_png_bytes(image):
+    if image is None:
+        return None
+    packed = getattr(image, "packed_file", None)
+    if packed is not None:
+        try:
+            return bytes(packed.data)
+        except Exception:
+            pass
+    temp = Path(bpy.app.tempdir) / f"_sub_face_picker_{abs(hash(image.name))}.png"
+    try:
+        image.file_format = "PNG"
+        image.save_render(str(temp))
+        if temp.exists():
+            return temp.read_bytes()
+    except Exception:
+        pass
+    try:
+        image.filepath_raw = str(temp)
+        image.file_format = "PNG"
+        image.save()
+        if temp.exists():
+            return temp.read_bytes()
+    except Exception:
+        pass
+    finally:
+        if temp.exists():
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+    return None
+
+
+def load_preview_image_from_bytes(png_bytes, image_name):
+    if not png_bytes:
+        return None
+    temp = Path(bpy.app.tempdir) / f"_sub_face_picker_load_{sanitize_id(image_name)}.png"
+    temp.write_bytes(png_bytes)
+    try:
+        return load_preview_image(temp, image_name)
+    finally:
+        if temp.exists():
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+
+
+def load_expression_image(arma, folder, expression_id, item):
+    image_name = expression_image_name(arma, expression_id)
+    image_b64 = item.get("image_base64")
+    if image_b64:
+        try:
+            png_bytes = base64.standard_b64decode(image_b64)
+        except (ValueError, TypeError):
+            png_bytes = None
+        if png_bytes:
+            return load_preview_image_from_bytes(png_bytes, image_name)
+    rel_image = item.get("image") or f"{IMAGE_DIR_NAME}/{expression_id}.png"
+    if folder:
+        abs_image = Path(folder) / rel_image.replace("\\", "/")
+        return load_preview_image(abs_image, image_name)
+    return None
+
+
+def bone_pose_json_from_item(item):
+    bone_pose = item.get("bone_pose")
+    if isinstance(bone_pose, dict):
+        return json.dumps(bone_pose)
+    if isinstance(bone_pose, str):
+        return bone_pose or "{}"
+    return "{}"
+
+
+def apply_picker_data_to_armature(arma, folder, data):
+    global _suppress_apply
+    picker = get_picker(arma)
+    if picker is None:
+        return 0
+    _suppress_apply = True
+    try:
+        clear_expressions(picker)
+    finally:
+        _suppress_apply = False
+    picker.source_folder = folder
+    picker.camera_size = int(data.get("camera_size", DEFAULT_CAMERA_SIZE) or DEFAULT_CAMERA_SIZE)
+    loaded = 0
+    _suppress_apply = True
+    try:
+        for item in data.get("expressions", []):
+            expr = picker.expressions.add()
+            expr.expression_id = item.get("id") or unique_expression_id(
+                picker, sanitize_id(item.get("name", "expression"))
+            )
+            expr.name = item.get("name") or expr.expression_id
+            expr.image_path = ""
+            mode = item.get("mode", EXPRESSION_MODE_VIS) or EXPRESSION_MODE_VIS
+            if mode not in {EXPRESSION_MODE_VIS, EXPRESSION_MODE_BONE}:
+                mode = EXPRESSION_MODE_VIS
+            expr.mode = mode
+            if mode == EXPRESSION_MODE_BONE:
+                expr.tracks.clear()
+                expr.bone_pose_json = bone_pose_json_from_item(item)
+            else:
+                expr.bone_pose_json = "{}"
+                add_tracks_to_expression(expr, item.get("tracks") or [])
+            image = load_expression_image(arma, folder, expr.expression_id, item)
+            if image is not None:
+                expr.image = image
+            loaded += 1
+        picker.active_expression_index = 0
+        picker.active_expression_id = ""
+    finally:
+        _suppress_apply = False
+    refresh_track_choices(arma)
+    refresh_bone_choices(arma)
+    return loaded
+
+
+def toml_path_for(folder):
+    return legacy_toml_path_for(folder)
 
 
 def iter_armature_meshes(arma):
@@ -382,10 +622,18 @@ def set_visibility_tracks(arma, enable_names, managed_names, insert_keyframes=Fa
                 data_path=f"sub_anim_properties.vis_track_entries[{index}].value",
                 group="Visibility",
             )
+    if insert_keyframes:
+        try:
+            from ..anim.fcurve_compat import style_visibility_action
+            animation_data = getattr(arma.data, 'animation_data', None)
+            if animation_data is not None:
+                style_visibility_action(animation_data.action, create_spacer=True)
+        except Exception:
+            pass
     return changed
 
 
-def apply_expression(context, arma, expression, insert_keyframes=False):
+def apply_vis_expression(context, arma, expression, insert_keyframes=False):
     global _suppress_apply
     picker = get_picker(arma)
     sap = get_sap(arma)
@@ -393,7 +641,13 @@ def apply_expression(context, arma, expression, insert_keyframes=False):
         return 0, []
     enable = [track.name for track in expression.tracks if track.name]
     missing = [name for name in enable if vis_entry_by_name(sap, name) is None]
-    managed = managed_track_names(picker, enable)
+    part_keys = expression_part_keys(expression)
+    if part_keys:
+        # Partial expressions only swap the face parts they name, e.g. Mouth.
+        managed = vis_track_names_for_parts(sap, part_keys)
+        managed.update(enable)
+    else:
+        managed = managed_track_names(picker, enable)
     should_key = insert_keyframes or context.scene.tool_settings.use_keyframe_insert_auto
     changed = set_visibility_tracks(arma, set(enable), managed, insert_keyframes=should_key)
     picker.active_expression_id = expression.expression_id
@@ -408,6 +662,39 @@ def apply_expression(context, arma, expression, insert_keyframes=False):
         finally:
             _suppress_apply = False
     return changed, missing
+
+
+def apply_bone_expression(context, arma, expression, insert_keyframes=False):
+    global _suppress_apply
+    picker = get_picker(arma)
+    if picker is None:
+        return 0, []
+    pose_data = bone_pose_data_from_expression(expression)
+    if not pose_data:
+        return 0, list(pose_data.keys())
+    missing = [name for name in pose_data if name not in arma.pose.bones]
+    applied = apply_smash_pose_data(arma, pose_data, target_bones=set(pose_data.keys()))
+    should_key = insert_keyframes or context.scene.tool_settings.use_keyframe_insert_auto
+    if should_key and applied:
+        keyframe_pose_bones(applied, context.scene.frame_current)
+    picker.active_expression_id = expression.expression_id
+    new_index = next(
+        (i for i, expr in enumerate(picker.expressions) if expr.expression_id == expression.expression_id),
+        picker.active_expression_index,
+    )
+    if picker.active_expression_index != new_index:
+        _suppress_apply = True
+        try:
+            picker.active_expression_index = new_index
+        finally:
+            _suppress_apply = False
+    return len(applied), missing
+
+
+def apply_expression(context, arma, expression, insert_keyframes=False):
+    if expression_mode(expression) == EXPRESSION_MODE_BONE:
+        return apply_bone_expression(context, arma, expression, insert_keyframes)
+    return apply_vis_expression(context, arma, expression, insert_keyframes)
 
 
 def _on_active_expression_index_update(self, context):
@@ -455,6 +742,73 @@ def ensure_track_choices(arma):
 
 def selected_track_names(picker):
     return [item.name for item in picker.track_choices if item.selected]
+
+
+def is_facial_bone_name(name):
+    lowered = (name or "").lower()
+    return any(hint in lowered for hint in FACIAL_BONE_HINTS)
+
+
+def refresh_bone_choices(arma):
+    picker = get_picker(arma)
+    if picker is None or arma is None:
+        return 0
+    selected = {item.name: item.selected for item in picker.bone_choices}
+    picker.bone_choices.clear()
+    for bone_name in sorted(arma.pose.bones.keys()):
+        item = picker.bone_choices.add()
+        item.name = bone_name
+        item.selected = selected.get(bone_name, False)
+    picker.bone_choices_index = min(
+        picker.bone_choices_index,
+        max(len(picker.bone_choices) - 1, 0),
+    )
+    return len(picker.bone_choices)
+
+
+def ensure_bone_choices(arma):
+    picker = get_picker(arma)
+    if picker is None or arma is None:
+        return
+    current = [item.name for item in picker.bone_choices]
+    bone_names = sorted(arma.pose.bones.keys())
+    if current != bone_names:
+        refresh_bone_choices(arma)
+
+
+def selected_bone_names(picker):
+    return [item.name for item in picker.bone_choices if item.selected]
+
+
+def expression_mode(expression):
+    mode = getattr(expression, "mode", EXPRESSION_MODE_VIS) or EXPRESSION_MODE_VIS
+    return mode if mode in {EXPRESSION_MODE_VIS, EXPRESSION_MODE_BONE} else EXPRESSION_MODE_VIS
+
+
+def picker_mode_to_expression_mode(picker_mode):
+    if picker_mode == "BONE":
+        return EXPRESSION_MODE_BONE
+    return EXPRESSION_MODE_VIS
+
+
+def expressions_for_mode(picker, picker_mode):
+    target_mode = picker_mode_to_expression_mode(picker_mode)
+    return [expr for expr in picker.expressions if expression_mode(expr) == target_mode]
+
+
+def bone_pose_data_from_expression(expression):
+    raw = getattr(expression, "bone_pose_json", "") or "{}"
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def bone_count_for_expression(expression):
+    if expression_mode(expression) != EXPRESSION_MODE_BONE:
+        return 0
+    return len(bone_pose_data_from_expression(expression))
 
 
 def find_expression(picker, expression_id):
@@ -522,6 +876,12 @@ def capture_thumbnail(context, arma, filepath, size):
     return path
 
 
+def capture_expression_thumbnail(context, arma, expression_id, camera_size):
+    filepath = Path(bpy.app.tempdir) / f"{expression_id}.png"
+    capture_thumbnail(context, arma, filepath, camera_size or DEFAULT_CAMERA_SIZE)
+    return load_preview_image(filepath, expression_image_name(arma, expression_id))
+
+
 def clear_expressions(picker):
     for expr in list(picker.expressions):
         if expr.image is not None:
@@ -543,61 +903,54 @@ def add_tracks_to_expression(expr, track_names):
         track.name = name
 
 
+def set_expression_vis_data(expr, track_names):
+    expr.mode = EXPRESSION_MODE_VIS
+    expr.bone_pose_json = "{}"
+    add_tracks_to_expression(expr, track_names)
+
+
+def set_expression_bone_data(expr, bone_names, arma):
+    expr.mode = EXPRESSION_MODE_BONE
+    expr.tracks.clear()
+    pose_data = smash_pose_data_from_armature(arma, bone_filter=set(bone_names))
+    expr.bone_pose_json = json.dumps(pose_data)
+
+
 def serialize_picker(picker):
     expressions = []
     for expr in picker.expressions:
-        image_rel = expr.image_path or f"{IMAGE_DIR_NAME}/{expr.expression_id}.png"
-        expressions.append({
+        mode = expression_mode(expr)
+        entry = {
             "id": expr.expression_id,
             "name": expr.name,
-            "image": image_rel.replace("\\", "/"),
+            "mode": mode,
             "tracks": [track.name for track in expr.tracks],
-        })
+        }
+        if mode == EXPRESSION_MODE_BONE:
+            try:
+                entry["bone_pose"] = json.loads(expr.bone_pose_json or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                entry["bone_pose"] = {}
+        png_bytes = image_to_png_bytes(expr.image)
+        if png_bytes:
+            entry["image_base64"] = base64.standard_b64encode(png_bytes).decode("ascii")
+        expressions.append(entry)
     return {
-        "version": 1,
+        "version": PICKER_FILE_VERSION,
         "camera_size": picker.camera_size or DEFAULT_CAMERA_SIZE,
         "expressions": expressions,
     }
 
 
 def load_picker_from_folder(arma, folder):
-    global _suppress_apply
     picker = get_picker(arma)
     if picker is None:
         return 0
-    path = toml_path_for(folder)
-    if not path.exists():
+    path = resolve_picker_load_path(folder)
+    if path is None:
         return 0
-    data = read_toml_file(path)
-    _suppress_apply = True
-    try:
-        clear_expressions(picker)
-    finally:
-        _suppress_apply = False
-    # clear_expressions already ran; avoid a second clear
-    picker.source_folder = folder
-    picker.camera_size = int(data.get("camera_size", DEFAULT_CAMERA_SIZE) or DEFAULT_CAMERA_SIZE)
-    loaded = 0
-    _suppress_apply = True
-    try:
-        for item in data.get("expressions", []):
-            expr = picker.expressions.add()
-            expr.expression_id = item.get("id") or unique_expression_id(picker, sanitize_id(item.get("name", "expression")))
-            expr.name = item.get("name") or expr.expression_id
-            rel_image = item.get("image") or f"{IMAGE_DIR_NAME}/{expr.expression_id}.png"
-            expr.image_path = rel_image.replace("\\", "/")
-            add_tracks_to_expression(expr, item.get("tracks") or [])
-            abs_image = Path(folder) / expr.image_path
-            image = load_preview_image(abs_image, expression_image_name(arma, expr.expression_id))
-            if image is not None:
-                expr.image = image
-            loaded += 1
-        picker.active_expression_index = 0
-        picker.active_expression_id = ""
-    finally:
-        _suppress_apply = False
-    refresh_track_choices(arma)
-    return loaded
+    data = read_picker_file(path)
+    return apply_picker_data_to_armature(arma, folder, data)
 
 
 def save_picker_to_folder(arma, folder):
@@ -606,32 +959,14 @@ def save_picker_to_folder(arma, folder):
         raise RuntimeError("No face picker data on armature")
     folder_path = Path(folder)
     folder_path.mkdir(parents=True, exist_ok=True)
-    images_dir = image_dir_for(folder)
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    for expr in picker.expressions:
-        dest = images_dir / f"{expr.expression_id}.png"
-        if expr.image is not None:
-            try:
-                expr.image.filepath_raw = str(dest)
-                expr.image.file_format = "PNG"
-                expr.image.save()
-            except Exception:
-                if expr.image.packed_file is not None:
-                    expr.image.save_render(str(dest))
-        elif expr.image_path:
-            src = Path(folder) / expr.image_path
-            if src.exists() and src.resolve() != dest.resolve():
-                dest.write_bytes(src.read_bytes())
-        expr.image_path = f"{IMAGE_DIR_NAME}/{expr.expression_id}.png".replace("\\", "/")
-        if dest.exists():
-            image = load_preview_image(dest, expression_image_name(arma, expr.expression_id))
-            if image is not None:
-                expr.image = image
-
+    data = serialize_picker(picker)
+    output_path = picker_json_path_for(folder)
+    output_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     picker.source_folder = str(folder_path)
-    write_toml_file(toml_path_for(folder), serialize_picker(picker))
-    return toml_path_for(folder)
+    return output_path
 
 
 def on_model_imported(arma, folder):
@@ -640,8 +975,8 @@ def on_model_imported(arma, folder):
         return
     picker.source_folder = folder
     refresh_track_choices(arma)
-    toml_file = toml_path_for(folder)
-    if toml_file.exists():
+    refresh_bone_choices(arma)
+    if resolve_picker_load_path(folder) is not None:
         try:
             load_picker_from_folder(arma, folder)
         except Exception:
@@ -1042,6 +1377,22 @@ def _draw_picker_canvas(context, region, picker):
     _draw_label("Easy Facial Animation", pad, y - title_h, width - pad * 2, title_h, 14.0 * ui)
     y -= title_h + 4.0 * ui
 
+    tab_h = 24.0 * ui
+    tab_w = max((width - pad * 2 - gap) * 0.5, 80.0 * ui)
+    vis_active = picker is None or picker.active_mode == "VIS"
+    bone_active = picker is not None and picker.active_mode == "BONE"
+    vis_color = (0.33, 0.55, 0.85, 1.0) if vis_active else (0.28, 0.28, 0.28, 1.0)
+    bone_color = (0.33, 0.55, 0.85, 1.0) if bone_active else (0.28, 0.28, 0.28, 1.0)
+    vis_x = pad
+    bone_x = pad + tab_w + gap
+    _draw_rect(vis_x, y - tab_h, tab_w, tab_h, vis_color)
+    _draw_rect(bone_x, y - tab_h, tab_w, tab_h, bone_color)
+    _draw_label("VIS Mesh", vis_x, y - tab_h, tab_w, tab_h, font_size)
+    _draw_label("Bone Based", bone_x, y - tab_h, tab_w, tab_h, font_size)
+    _picker_hits.append({"kind": "tab_vis", "x": vis_x, "y": y - tab_h, "w": tab_w, "h": tab_h})
+    _picker_hits.append({"kind": "tab_bone", "x": bone_x, "y": y - tab_h, "w": tab_w, "h": tab_h})
+    y -= tab_h + gap
+
     check = 16.0 * ui
     key_x = pad
     key_y = y - bar_h + (bar_h - check) * 0.5
@@ -1075,8 +1426,14 @@ def _draw_picker_canvas(context, region, picker):
     if picker is None:
         _draw_label("Select an imported armature", pad, height * 0.5, width - pad * 2, 24.0 * ui, font_size)
         return
-    if not picker.expressions:
-        _draw_label("No expressions yet. Use Setup in the Ultimate tab first.", pad, height * 0.5, width - pad * 2, 24.0 * ui, font_size)
+    visible_expressions = expressions_for_mode(picker, picker.active_mode)
+    if not visible_expressions:
+        empty_text = (
+            "No VIS expressions yet. Use Setup in the Ultimate tab first."
+            if picker.active_mode == "VIS"
+            else "No bone expressions yet. Use Setup in the Ultimate tab first."
+        )
+        _draw_label(empty_text, pad, height * 0.5, width - pad * 2, 24.0 * ui, font_size)
         return
 
     cols = max(int(picker.columns), 1)
@@ -1084,7 +1441,7 @@ def _draw_picker_canvas(context, region, picker):
     cell_w = (inner_w - gap * (cols - 1)) / cols
     img_h = cell_w
     cell_h = img_h + name_h
-    count = len(picker.expressions)
+    count = len(visible_expressions)
     rows = math.ceil(count / cols)
     content_h = rows * cell_h + max(rows - 1, 0) * gap
     visible_h = max(clip_top - clip_bottom, 1.0)
@@ -1092,7 +1449,7 @@ def _draw_picker_canvas(context, region, picker):
     _picker_scroll = min(max(_picker_scroll, 0.0), max_scroll)
     content_top = clip_top + _picker_scroll
 
-    for index, expr in enumerate(picker.expressions):
+    for index, expr in enumerate(visible_expressions):
         row, col = divmod(index, cols)
         cell_x = pad + col * (cell_w + gap)
         cell_top = content_top - row * (cell_h + gap)
@@ -1132,6 +1489,7 @@ def _draw_picker_canvas(context, region, picker):
 
 
 def _apply_picker_hit(context, hit):
+    global _picker_scroll
     arma = _canvas_armature()
     picker = get_picker(arma)
     if picker is None:
@@ -1145,6 +1503,14 @@ def _apply_picker_hit(context, hit):
         return True
     if kind == "columns_plus":
         picker.columns = min(picker.columns + 1, 6)
+        return True
+    if kind == "tab_vis":
+        picker.active_mode = "VIS"
+        _picker_scroll = 0.0
+        return True
+    if kind == "tab_bone":
+        picker.active_mode = "BONE"
+        _picker_scroll = 0.0
         return True
     if kind == "expression":
         expression = find_expression(picker, hit.get("id"))
@@ -1331,11 +1697,18 @@ class SUB_PG_face_picker_track_choice(PropertyGroup):
     selected: BoolProperty(name="Assign", default=False)
 
 
+class SUB_PG_face_picker_bone_choice(PropertyGroup):
+    name: StringProperty(name="Bone", default="")
+    selected: BoolProperty(name="Assign", default=False)
+
+
 class SUB_PG_face_picker_expression(PropertyGroup):
     expression_id: StringProperty(name="ID", default="")
     name: StringProperty(name="Name", default="")
     image_path: StringProperty(name="Image Path", default="")
     image: PointerProperty(name="Thumbnail", type=bpy.types.Image)
+    mode: StringProperty(name="Mode", default=EXPRESSION_MODE_VIS)
+    bone_pose_json: StringProperty(name="Bone Pose JSON", default="{}")
     tracks: CollectionProperty(type=SUB_PG_face_picker_track)
 
 
@@ -1347,6 +1720,15 @@ class SUB_PG_face_picker_data(PropertyGroup):
         update=_on_active_expression_index_update,
     )
     active_expression_id: StringProperty(name="Active Expression ID", default="")
+    active_mode: EnumProperty(
+        name="Expression Type",
+        description="Switch between VIS mesh and bone-based expression setup",
+        items=(
+            ("VIS", "VIS Mesh", "Visibility mesh expressions"),
+            ("BONE", "Bone Based", "Bone animation expressions"),
+        ),
+        default="VIS",
+    )
     source_folder: StringProperty(name="Model Folder", default="", subtype="DIR_PATH")
     camera: PointerProperty(name="Face Camera", type=bpy.types.Object)
     camera_size: IntProperty(
@@ -1362,9 +1744,11 @@ class SUB_PG_face_picker_data(PropertyGroup):
     new_expression_name: StringProperty(name="Expression Name", default="")
     track_choices: CollectionProperty(type=SUB_PG_face_picker_track_choice)
     track_choices_index: IntProperty(name="Track Choice Index", default=0)
+    bone_choices: CollectionProperty(type=SUB_PG_face_picker_bone_choice)
+    bone_choices_index: IntProperty(name="Bone Choice Index", default=0)
     insert_keyframes: BoolProperty(
         name="Insert Keyframes",
-        description="Insert visibility keyframes when applying an expression. Also happens when Auto Key is enabled",
+        description="Insert keyframes when applying an expression. Also happens when Auto Key is enabled",
         default=True,
     )
     columns: IntProperty(name="Columns", default=3, min=1, max=6)
@@ -1382,15 +1766,38 @@ class SUB_UL_face_picker_track_choices(UIList):
             layout.prop(item, "selected", text="")
 
 
+class SUB_UL_face_picker_bone_choices(UIList):
+    def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+            row.prop(item, "selected", text="")
+            row.label(text=item.name, icon="BONE_DATA")
+        elif self.layout_type == "GRID":
+            layout.alignment = "CENTER"
+            layout.prop(item, "selected", text="")
+
+
 class SUB_UL_face_picker_expressions(UIList):
+    def filter_items(self, _context, data, propname):
+        items = getattr(data, propname)
+        target = picker_mode_to_expression_mode(getattr(data, "active_mode", "VIS"))
+        filter_flags = []
+        for item in items:
+            if expression_mode(item) == target:
+                filter_flags.append(self.bitflag_filter_item)
+            else:
+                filter_flags.append(0)
+        return filter_flags, []
+
     def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
         icon_id = preview_icon(item.image)
+        count = len(item.tracks) if expression_mode(item) == EXPRESSION_MODE_VIS else bone_count_for_expression(item)
         if self.layout_type in {"DEFAULT", "COMPACT"}:
             if icon_id:
                 layout.label(text=item.name, icon_value=icon_id)
             else:
                 layout.label(text=item.name, icon="IMAGE_DATA")
-            layout.label(text=str(len(item.tracks)))
+            layout.label(text=str(count))
         elif self.layout_type == "GRID":
             layout.alignment = "CENTER"
             col = layout.column(align=True)
@@ -1402,7 +1809,10 @@ class SUB_UL_face_picker_expressions(UIList):
 class SUB_OP_face_picker_apply(Operator):
     bl_idname = "sub.face_picker_apply"
     bl_label = "Apply Expression"
-    bl_description = "Enable this expression's visibility tracks and disable the other picker expressions"
+    bl_description = (
+        "Enable this expression's vis tracks. Tracks that share a face-part "
+        "word like Mouth or Eye are swapped; other parts stay as they are"
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     expression_id: StringProperty()
@@ -1423,7 +1833,10 @@ class SUB_OP_face_picker_apply(Operator):
             return {"CANCELLED"}
         _changed, missing = apply_expression(context, arma, expression, picker.insert_keyframes)
         if missing:
-            self.report({"WARNING"}, f"Missing vis tracks: {', '.join(missing)}")
+            if expression_mode(expression) == EXPRESSION_MODE_BONE:
+                self.report({"WARNING"}, f"Missing bones: {', '.join(missing)}")
+            else:
+                self.report({"WARNING"}, f"Missing vis tracks: {', '.join(missing)}")
         else:
             self.report({"INFO"}, f"Applied {expression.name}")
         return {"FINISHED"}
@@ -1517,13 +1930,14 @@ class SUB_OP_face_picker_popup(Operator):
         picker = get_picker(arma)
         if picker is not None:
             ensure_track_choices(arma)
+            ensure_bone_choices(arma)
             if not picker.expressions:
                 folder = resolve_source_folder(context, arma)
-                if folder and toml_path_for(folder).exists():
+                if folder and resolve_picker_load_path(folder) is not None:
                     try:
                         load_picker_from_folder(arma, folder)
                     except Exception as exc:
-                        self.report({"WARNING"}, f"Could not load face_picker.toml: {exc}")
+                        self.report({"WARNING"}, f"Could not load expression library: {exc}")
         window, created = open_face_picker_window(context)
         if window is None:
             self.report({"ERROR"}, "Could not open a new window")
@@ -1720,21 +2134,112 @@ class SUB_OP_face_picker_clear_tracks(Operator):
         return {"FINISHED"}
 
 
+class SUB_OP_face_picker_refresh_bones(Operator):
+    bl_idname = "sub.face_picker_refresh_bones"
+    bl_label = "Refresh Bones"
+    bl_description = "Reload bone names from the armature"
+
+    @classmethod
+    def poll(cls, context):
+        return get_armature(context) is not None
+
+    def execute(self, context):
+        count = refresh_bone_choices(get_armature(context))
+        self.report({"INFO"}, f"Loaded {count} bones")
+        return {"FINISHED"}
+
+
+class SUB_OP_face_picker_select_facial_bones(Operator):
+    bl_idname = "sub.face_picker_select_facial_bones"
+    bl_label = "Select Facial Bones"
+    bl_description = "Check bones whose names look like eyes, brows, or mouths"
+
+    @classmethod
+    def poll(cls, context):
+        arma = get_armature(context)
+        picker = get_picker(arma)
+        return picker is not None and len(picker.bone_choices) > 0
+
+    def execute(self, context):
+        picker = get_picker(get_armature(context))
+        matched = 0
+        for item in picker.bone_choices:
+            item.selected = is_facial_bone_name(item.name)
+            if item.selected:
+                matched += 1
+        self.report({"INFO"}, f"Selected {matched} facial bones")
+        return {"FINISHED"}
+
+
+class SUB_OP_face_picker_match_selected_bones(Operator):
+    bl_idname = "sub.face_picker_match_selected_bones"
+    bl_label = "Match Selected Pose Bones"
+    bl_description = "Assign the bones currently selected in Pose Mode"
+
+    @classmethod
+    def poll(cls, context):
+        arma = get_armature(context)
+        picker = get_picker(arma)
+        return picker is not None and len(picker.bone_choices) > 0
+
+    def execute(self, context):
+        arma = get_armature(context)
+        picker = get_picker(arma)
+        selected = {bone.name for bone in context.selected_pose_bones or []}
+        matched = 0
+        for item in picker.bone_choices:
+            item.selected = item.name in selected
+            if item.selected:
+                matched += 1
+        self.report({"INFO"}, f"Assigned {matched} selected pose bones")
+        return {"FINISHED"}
+
+
+class SUB_OP_face_picker_clear_bones(Operator):
+    bl_idname = "sub.face_picker_clear_bones"
+    bl_label = "Clear Assigned Bones"
+
+    @classmethod
+    def poll(cls, context):
+        arma = get_armature(context)
+        picker = get_picker(arma)
+        return picker is not None and len(picker.bone_choices) > 0
+
+    def execute(self, context):
+        picker = get_picker(get_armature(context))
+        for item in picker.bone_choices:
+            item.selected = False
+        return {"FINISHED"}
+
+
 class SUB_OP_face_picker_preview(Operator):
     bl_idname = "sub.face_picker_preview"
     bl_label = "Preview Assigned Tracks"
-    bl_description = "Turn on the assigned vis tracks and turn off other picker expression tracks"
+    bl_description = "Preview the current setup without inserting keyframes"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
         arma = get_armature(context)
         picker = get_picker(arma)
-        return picker is not None and any(item.selected for item in picker.track_choices)
+        if picker is None:
+            return False
+        if picker.active_mode == "BONE":
+            return any(item.selected for item in picker.bone_choices)
+        return any(item.selected for item in picker.track_choices)
 
     def execute(self, context):
         arma = get_armature(context)
         picker = get_picker(arma)
+        if picker.active_mode == "BONE":
+            bones = selected_bone_names(picker)
+            apply_smash_pose_data(
+                arma,
+                smash_pose_data_from_armature(arma, bone_filter=set(bones)),
+                target_bones=set(bones),
+            )
+            self.report({"INFO"}, f"Previewing {len(bones)} bones")
+            return {"FINISHED"}
         enable = selected_track_names(picker)
         managed = managed_track_names(picker, enable)
         set_visibility_tracks(arma, set(enable), managed, insert_keyframes=False)
@@ -1745,7 +2250,7 @@ class SUB_OP_face_picker_preview(Operator):
 class SUB_OP_face_picker_add(Operator):
     bl_idname = "sub.face_picker_add"
     bl_label = "Capture & Add Expression"
-    bl_description = "Take a thumbnail of the current expression and store its vis tracks"
+    bl_description = "Take a thumbnail of the current expression and store its setup"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -1757,42 +2262,54 @@ class SUB_OP_face_picker_add(Operator):
     def execute(self, context):
         arma = get_armature(context)
         picker = get_picker(arma)
-        ensure_track_choices(arma)
         name = picker.new_expression_name.strip()
-        tracks = selected_track_names(picker)
         if not name:
             self.report({"ERROR"}, "Enter an expression name first")
             return {"CANCELLED"}
-        if not tracks:
-            self.report({"ERROR"}, "Assign at least one visibility track")
-            return {"CANCELLED"}
 
-        folder = resolve_source_folder(context, arma)
+        if picker.active_mode == "BONE":
+            ensure_bone_choices(arma)
+            bones = selected_bone_names(picker)
+            if not bones:
+                self.report({"ERROR"}, "Assign at least one bone")
+                return {"CANCELLED"}
+        else:
+            ensure_track_choices(arma)
+            tracks = selected_track_names(picker)
+            if not tracks:
+                self.report({"ERROR"}, "Assign at least one visibility track")
+                return {"CANCELLED"}
+
         expr_id = unique_expression_id(picker, sanitize_id(name))
-        set_visibility_tracks(arma, set(tracks), managed_track_names(picker, tracks), insert_keyframes=False)
+        if picker.active_mode == "BONE":
+            apply_smash_pose_data(
+                arma,
+                smash_pose_data_from_armature(arma, bone_filter=set(bones)),
+                target_bones=set(bones),
+            )
+        else:
+            set_visibility_tracks(arma, set(tracks), managed_track_names(picker, tracks), insert_keyframes=False)
 
         image = None
-        rel_path = f"{IMAGE_DIR_NAME}/{expr_id}.png"
         try:
-            if folder:
-                filepath = image_dir_for(folder) / f"{expr_id}.png"
-            else:
-                filepath = Path(bpy.app.tempdir) / f"{expr_id}.png"
-            capture_thumbnail(context, arma, filepath, picker.camera_size or DEFAULT_CAMERA_SIZE)
-            image = load_preview_image(filepath, expression_image_name(arma, expr_id))
-            if folder:
-                rel_path = f"{IMAGE_DIR_NAME}/{expr_id}.png"
-            else:
-                rel_path = str(filepath)
+            image = capture_expression_thumbnail(
+                context,
+                arma,
+                expr_id,
+                picker.camera_size or DEFAULT_CAMERA_SIZE,
+            )
         except Exception as exc:
             self.report({"WARNING"}, f"Added without thumbnail: {exc}")
 
         expr = picker.expressions.add()
         expr.expression_id = expr_id
         expr.name = name
-        expr.image_path = rel_path.replace("\\", "/")
+        expr.image_path = ""
         expr.image = image
-        add_tracks_to_expression(expr, tracks)
+        if picker.active_mode == "BONE":
+            set_expression_bone_data(expr, bones, arma)
+        else:
+            set_expression_vis_data(expr, tracks)
         picker.active_expression_index = len(picker.expressions) - 1
         picker.active_expression_id = expr_id
         picker.new_expression_name = ""
@@ -1848,12 +2365,21 @@ class SUB_OP_face_picker_load_selected(Operator):
             return {"CANCELLED"}
         index = min(max(picker.active_expression_index, 0), len(picker.expressions) - 1)
         expr = picker.expressions[index]
+        picker.new_expression_name = expr.name
+        picker.active_expression_id = expr.expression_id
+        if expression_mode(expr) == EXPRESSION_MODE_BONE:
+            picker.active_mode = "BONE"
+            ensure_bone_choices(arma)
+            assigned = set(bone_pose_data_from_expression(expr).keys())
+            for item in picker.bone_choices:
+                item.selected = item.name in assigned
+            apply_bone_expression(context, arma, expr, insert_keyframes=False)
+            return {"FINISHED"}
+        picker.active_mode = "VIS"
         refresh_track_choices(arma)
         assigned = {track.name for track in expr.tracks}
         for item in picker.track_choices:
             item.selected = item.name in assigned
-        picker.new_expression_name = expr.name
-        picker.active_expression_id = expr.expression_id
         set_visibility_tracks(arma, assigned, managed_track_names(picker, assigned), insert_keyframes=False)
         return {"FINISHED"}
 
@@ -1861,7 +2387,7 @@ class SUB_OP_face_picker_load_selected(Operator):
 class SUB_OP_face_picker_recapture(Operator):
     bl_idname = "sub.face_picker_recapture"
     bl_label = "Recapture Thumbnail"
-    bl_description = "Replace the selected expression's thumbnail and vis tracks with the current setup"
+    bl_description = "Replace the selected expression's thumbnail and setup with the current assignment"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -1877,30 +2403,42 @@ class SUB_OP_face_picker_recapture(Operator):
         if index < 0 or index >= len(picker.expressions):
             return {"CANCELLED"}
         expr = picker.expressions[index]
-        tracks = selected_track_names(picker)
-        if not tracks:
-            tracks = [track.name for track in expr.tracks]
-        if not tracks:
-            self.report({"ERROR"}, "Assign at least one visibility track")
-            return {"CANCELLED"}
+        if expression_mode(expr) == EXPRESSION_MODE_BONE:
+            ensure_bone_choices(arma)
+            bones = selected_bone_names(picker)
+            if not bones:
+                bones = list(bone_pose_data_from_expression(expr).keys())
+            if not bones:
+                self.report({"ERROR"}, "Assign at least one bone")
+                return {"CANCELLED"}
+            apply_smash_pose_data(
+                arma,
+                smash_pose_data_from_armature(arma, bone_filter=set(bones)),
+                target_bones=set(bones),
+            )
+            set_expression_bone_data(expr, bones, arma)
+        else:
+            tracks = selected_track_names(picker)
+            if not tracks:
+                tracks = [track.name for track in expr.tracks]
+            if not tracks:
+                self.report({"ERROR"}, "Assign at least one visibility track")
+                return {"CANCELLED"}
+            set_visibility_tracks(arma, set(tracks), managed_track_names(picker, tracks), insert_keyframes=False)
+            set_expression_vis_data(expr, tracks)
 
-        folder = resolve_source_folder(context, arma)
-        set_visibility_tracks(arma, set(tracks), managed_track_names(picker, tracks), insert_keyframes=False)
-        add_tracks_to_expression(expr, tracks)
         if picker.new_expression_name.strip():
             expr.name = picker.new_expression_name.strip()
 
         try:
-            if folder:
-                filepath = image_dir_for(folder) / f"{expr.expression_id}.png"
-                expr.image_path = f"{IMAGE_DIR_NAME}/{expr.expression_id}.png"
-            else:
-                filepath = Path(bpy.app.tempdir) / f"{expr.expression_id}.png"
-                expr.image_path = str(filepath)
-            capture_thumbnail(context, arma, filepath, picker.camera_size or DEFAULT_CAMERA_SIZE)
-            expr.image = load_preview_image(filepath, expression_image_name(arma, expr.expression_id))
+            expr.image = capture_expression_thumbnail(
+                context,
+                arma,
+                expr.expression_id,
+                picker.camera_size or DEFAULT_CAMERA_SIZE,
+            )
         except Exception as exc:
-            self.report({"WARNING"}, f"Updated tracks, but thumbnail failed: {exc}")
+            self.report({"WARNING"}, f"Updated setup, but thumbnail failed: {exc}")
             return {"FINISHED"}
 
         picker.active_expression_id = expr.expression_id
@@ -1911,7 +2449,7 @@ class SUB_OP_face_picker_recapture(Operator):
 class SUB_OP_face_picker_save(Operator):
     bl_idname = "sub.face_picker_save"
     bl_label = "Save Expression Menu"
-    bl_description = "Save the picker setup as face_picker.toml next to the loaded model"
+    bl_description = "Save expressions and thumbnails to face_picker.json next to the loaded model"
 
     @classmethod
     def poll(cls, context):
@@ -1937,7 +2475,7 @@ class SUB_OP_face_picker_save(Operator):
 class SUB_OP_face_picker_load(Operator):
     bl_idname = "sub.face_picker_load"
     bl_label = "Load Expression Menu"
-    bl_description = "Load face_picker.toml from the model folder"
+    bl_description = "Load face_picker.json (or legacy face_picker.toml) from the model folder"
 
     @classmethod
     def poll(cls, context):
@@ -1949,9 +2487,12 @@ class SUB_OP_face_picker_load(Operator):
         if not folder:
             self.report({"ERROR"}, "Set the model folder first")
             return {"CANCELLED"}
-        path = toml_path_for(folder)
-        if not path.exists():
-            self.report({"ERROR"}, f"No {TOML_NAME} in {folder}")
+        path = resolve_picker_load_path(folder)
+        if path is None:
+            self.report(
+                {"ERROR"},
+                f"No {PICKER_FILE_NAME} or legacy {LEGACY_TOML_NAME} in {folder}",
+            )
             return {"CANCELLED"}
         try:
             count = load_picker_from_folder(arma, folder)
@@ -1962,9 +2503,14 @@ class SUB_OP_face_picker_load(Operator):
         return {"FINISHED"}
 
 
-def draw_expression_grid(layout, picker, columns, scale=6.0):
-    if not picker.expressions:
-        layout.label(text="No expressions yet. Use Setup to add some.")
+def draw_expression_grid(layout, picker, columns, scale=6.0, picker_mode=None):
+    mode = picker_mode or picker.active_mode
+    visible = expressions_for_mode(picker, mode)
+    if not visible:
+        if mode == "BONE":
+            layout.label(text="No bone expressions yet. Use Setup to add some.")
+        else:
+            layout.label(text="No VIS expressions yet. Use Setup to add some.")
         return
     columns = max(int(columns), 1)
     grid = layout.grid_flow(
@@ -1974,7 +2520,7 @@ def draw_expression_grid(layout, picker, columns, scale=6.0):
         even_rows=True,
         align=True,
     )
-    for expr in picker.expressions:
+    for expr in visible:
         is_active = expr.expression_id == picker.active_expression_id
         cell = grid.column(align=True)
         if is_active:
@@ -1997,13 +2543,19 @@ def draw_popup_picker_layout(layout, context):
         layout.label(text="Select an imported armature")
         return
     row = layout.row(align=True)
+    row.prop(picker, "active_mode", expand=True)
+    row = layout.row(align=True)
     row.prop(picker, "insert_keyframes", text="Keyframes")
     row.prop(picker, "columns", text="Columns")
-    if not picker.expressions:
-        layout.label(text="No expressions yet.")
+    visible = expressions_for_mode(picker, picker.active_mode)
+    if not visible:
+        if picker.active_mode == "BONE":
+            layout.label(text="No bone expressions yet.")
+        else:
+            layout.label(text="No VIS expressions yet.")
         layout.label(text="Use Setup in the Ultimate tab first.")
         return
-    draw_expression_grid(layout, picker, picker.columns, scale=7.0)
+    draw_expression_grid(layout, picker, picker.columns, scale=7.0, picker_mode=picker.active_mode)
     if picker.active_expression_id:
         active = find_expression(picker, picker.active_expression_id)
         if active is not None:
@@ -2022,11 +2574,16 @@ def draw_face_picker_layout(layout, context, show_grid=True):
     header.operator(SUB_OP_face_picker_popup.bl_idname, icon="IMAGE_DATA", text="Open Expression Window")
     header.prop(picker, "insert_keyframes", text="Keyframes")
 
-    if show_grid and picker.expressions:
-        box = layout.box()
-        row = box.row()
-        row.prop(picker, "columns", text="Columns")
-        draw_expression_grid(box, picker, picker.columns, scale=5.5)
+    tab_row = layout.row(align=True)
+    tab_row.prop(picker, "active_mode", expand=True)
+
+    if show_grid:
+        visible = expressions_for_mode(picker, picker.active_mode)
+        if visible:
+            box = layout.box()
+            row = box.row()
+            row.prop(picker, "columns", text="Columns")
+            draw_expression_grid(box, picker, picker.columns, scale=5.5, picker_mode=picker.active_mode)
 
     setup = layout.box()
     header_row = setup.row()
@@ -2044,8 +2601,8 @@ def draw_face_picker_layout(layout, context, show_grid=True):
     col = setup.column(align=True)
     col.prop(picker, "source_folder", text="Model Folder")
     row = col.row(align=True)
-    row.operator(SUB_OP_face_picker_save.bl_idname, icon="FILE_TICK", text="Save TOML")
-    row.operator(SUB_OP_face_picker_load.bl_idname, icon="FILE_REFRESH", text="Load TOML")
+    row.operator(SUB_OP_face_picker_save.bl_idname, icon="FILE_TICK", text="Save Library")
+    row.operator(SUB_OP_face_picker_load.bl_idname, icon="FILE_REFRESH", text="Load Library")
 
     col.separator()
     col.prop(picker, "camera_size", text="Capture Size")
@@ -2060,34 +2617,56 @@ def draw_face_picker_layout(layout, context, show_grid=True):
 
     col.separator()
     col.prop(picker, "new_expression_name", text="Name")
-    col.label(text="Assigned Visibility Tracks")
-    sap = get_sap(arma)
-    if sap is None or len(sap.vis_track_entries) == 0:
-        col.label(text="No vis tracks yet. Import an animation or auto-fill them first.", icon="INFO")
-    elif len(picker.track_choices) != len(sap.vis_track_entries):
-        col.label(text="Vis tracks changed. Refresh the list before assigning.", icon="ERROR")
-    row = col.row()
-    row.template_list(
-        "SUB_UL_face_picker_track_choices",
-        "",
-        picker,
-        "track_choices",
-        picker,
-        "track_choices_index",
-        rows=8,
-        maxrows=12,
-    )
-    track_col = row.column(align=True)
-    track_col.operator(SUB_OP_face_picker_refresh_tracks.bl_idname, icon="FILE_REFRESH", text="")
-    track_col.operator(SUB_OP_face_picker_match_enabled.bl_idname, icon="CHECKBOX_HLT", text="")
-    track_col.operator(SUB_OP_face_picker_select_facial.bl_idname, icon="HIDE_OFF", text="")
-    track_col.operator(SUB_OP_face_picker_clear_tracks.bl_idname, icon="X", text="")
 
-    col.operator(SUB_OP_face_picker_preview.bl_idname, icon="HIDE_OFF")
+    if picker.active_mode == "BONE":
+        col.label(text="Assigned Bones")
+        ensure_bone_choices(arma)
+        row = col.row()
+        row.template_list(
+            "SUB_UL_face_picker_bone_choices",
+            "",
+            picker,
+            "bone_choices",
+            picker,
+            "bone_choices_index",
+            rows=8,
+            maxrows=12,
+        )
+        bone_col = row.column(align=True)
+        bone_col.operator(SUB_OP_face_picker_refresh_bones.bl_idname, icon="FILE_REFRESH", text="")
+        bone_col.operator(SUB_OP_face_picker_match_selected_bones.bl_idname, icon="RESTRICT_SELECT_OFF", text="")
+        bone_col.operator(SUB_OP_face_picker_select_facial_bones.bl_idname, icon="BONE_DATA", text="")
+        bone_col.operator(SUB_OP_face_picker_clear_bones.bl_idname, icon="X", text="")
+    else:
+        col.label(text="Assigned Visibility Tracks")
+        sap = get_sap(arma)
+        if sap is None or len(sap.vis_track_entries) == 0:
+            col.label(text="No vis tracks yet. Import an animation or auto-fill them first.", icon="INFO")
+        elif len(picker.track_choices) != len(sap.vis_track_entries):
+            col.label(text="Vis tracks changed. Refresh the list before assigning.", icon="ERROR")
+        row = col.row()
+        row.template_list(
+            "SUB_UL_face_picker_track_choices",
+            "",
+            picker,
+            "track_choices",
+            picker,
+            "track_choices_index",
+            rows=8,
+            maxrows=12,
+        )
+        track_col = row.column(align=True)
+        track_col.operator(SUB_OP_face_picker_refresh_tracks.bl_idname, icon="FILE_REFRESH", text="")
+        track_col.operator(SUB_OP_face_picker_match_enabled.bl_idname, icon="CHECKBOX_HLT", text="")
+        track_col.operator(SUB_OP_face_picker_select_facial.bl_idname, icon="HIDE_OFF", text="")
+        track_col.operator(SUB_OP_face_picker_clear_tracks.bl_idname, icon="X", text="")
+
+    col.operator(SUB_OP_face_picker_preview.bl_idname, icon="HIDE_OFF" if picker.active_mode == "VIS" else "BONE_DATA")
     col.operator(SUB_OP_face_picker_add.bl_idname, icon="ADD")
 
     col.separator()
     col.label(text="Saved Expressions")
+    visible_expressions = expressions_for_mode(picker, picker.active_mode)
     row = col.row()
     row.template_list(
         "SUB_UL_face_picker_expressions",
@@ -2104,10 +2683,14 @@ def draw_face_picker_layout(layout, context, show_grid=True):
     expr_col.operator(SUB_OP_face_picker_load_selected.bl_idname, icon="IMPORT", text="")
     expr_col.operator(SUB_OP_face_picker_recapture.bl_idname, icon="RENDER_STILL", text="")
 
-    if picker.expressions and 0 <= picker.active_expression_index < len(picker.expressions):
+    if visible_expressions and 0 <= picker.active_expression_index < len(picker.expressions):
         expr = picker.expressions[picker.active_expression_index]
-        names = ", ".join(track.name for track in expr.tracks) or "(no tracks)"
-        col.label(text=names)
+        if expression_mode(expr) == picker_mode_to_expression_mode(picker.active_mode):
+            if expression_mode(expr) == EXPRESSION_MODE_BONE:
+                names = ", ".join(bone_pose_data_from_expression(expr).keys()) or "(no bones)"
+            else:
+                names = ", ".join(track.name for track in expr.tracks) or "(no tracks)"
+            col.label(text=names)
 
     return picker
 
@@ -2121,7 +2704,7 @@ class SUB_PT_face_picker(Panel):
 
     @classmethod
     def poll(cls, context):
-        return context.mode in {"OBJECT", "POSE", "EDIT_ARMATURE"}
+        return False
 
     def draw(self, context):
         draw_face_picker_layout(self.layout, context, show_grid=True)
