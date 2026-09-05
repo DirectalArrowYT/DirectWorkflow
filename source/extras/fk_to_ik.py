@@ -1,14 +1,165 @@
 import bpy
-import mathutils
-from mathutils import Vector, Matrix
 import math
+import re
+from mathutils import Vector
 
 from ..anim.fcurve_compat import find_fcurve, get_fcurves, new_fcurve, remove_fcurve
 from ..blender_compat import assign_action
 
+_DUP_SUFFIX = re.compile(r'(?:\.\d{3})+$')
+_ARM_FK = re.compile(r'^Arm([LR])(\d*)$')
+_LEG_FK = re.compile(r'^Leg([LR])(\d*)$')
+
+
+def _canonical_bone_name(name):
+    return _DUP_SUFFIX.sub('', name) if name else name
+
+
+def _bone_dup_suffix(name):
+    match = _DUP_SUFFIX.search(name or '')
+    return match.group(0) if match else ''
+
+
+def iter_arm_fk_chains(armature_object):
+    """Primary ArmL/ArmR plus extra Smash arms (ArmL2) and Blender .001 copies."""
+    seen = set()
+    for pose_bone in armature_object.pose.bones:
+        match = _ARM_FK.match(_canonical_bone_name(pose_bone.name))
+        if not match:
+            continue
+        side, digits = match.group(1), match.group(2) or ''
+        suffix = _bone_dup_suffix(pose_bone.name)
+        key = (side, digits, suffix)
+        if key in seen:
+            continue
+        arm = armature_object.pose.bones.get(f'Arm{side}{digits}{suffix}')
+        hand = armature_object.pose.bones.get(f'Hand{side}{digits}{suffix}')
+        if arm is None or hand is None:
+            continue
+        seen.add(key)
+        yield {
+            'side': side,
+            'digits': digits,
+            'suffix': suffix,
+            'id': f'{side}{digits}{suffix}',
+            'shoulder': armature_object.pose.bones.get(f'Shoulder{side}{digits}{suffix}'),
+            'arm': arm,
+            'hand': hand,
+            'hand_ik': armature_object.pose.bones.get(f'HandIK{side}{digits}{suffix}'),
+            'arm_ik': armature_object.pose.bones.get(f'ArmIK{side}{digits}{suffix}'),
+        }
+
+
+def iter_leg_fk_chains(armature_object, custom=None):
+    """Primary LegL/LegR plus extra Smash legs and Blender .001 copies."""
+    seen = set()
+    if custom:
+        for side, names in custom.items():
+            leg_name, knee_name, foot_name = names
+            leg = armature_object.pose.bones.get(leg_name)
+            knee = armature_object.pose.bones.get(knee_name)
+            foot = armature_object.pose.bones.get(foot_name)
+            suffix = _bone_dup_suffix(leg.name) if leg is not None else ''
+            digits = ''
+            if leg is not None:
+                match = _LEG_FK.match(_canonical_bone_name(leg.name))
+                if match:
+                    digits = match.group(2) or ''
+            foot_ik = (
+                armature_object.pose.bones.get(f'FootIK{side}{digits}{suffix}')
+                or armature_object.pose.bones.get(f'FootIK{side}')
+            )
+            knee_ik = (
+                armature_object.pose.bones.get(f'KneeIK{side}{digits}{suffix}')
+                or armature_object.pose.bones.get(f'KneeIK{side}')
+            )
+            if not all([leg, knee, foot, foot_ik, knee_ik]):
+                continue
+            key = (foot_ik.name, knee_ik.name)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield {
+                'side': side,
+                'digits': digits,
+                'suffix': suffix,
+                'id': f'{side}{digits}{suffix}',
+                'leg': leg,
+                'knee': knee,
+                'foot': foot,
+                'foot_ik': foot_ik,
+                'knee_ik': knee_ik,
+            }
+
+    for pose_bone in armature_object.pose.bones:
+        match = _LEG_FK.match(_canonical_bone_name(pose_bone.name))
+        if not match:
+            continue
+        side, digits = match.group(1), match.group(2) or ''
+        suffix = _bone_dup_suffix(pose_bone.name)
+        leg = armature_object.pose.bones.get(f'Leg{side}{digits}{suffix}')
+        knee = armature_object.pose.bones.get(f'Knee{side}{digits}{suffix}')
+        foot = armature_object.pose.bones.get(f'Foot{side}{digits}{suffix}')
+        foot_ik = armature_object.pose.bones.get(f'FootIK{side}{digits}{suffix}')
+        knee_ik = armature_object.pose.bones.get(f'KneeIK{side}{digits}{suffix}')
+        if not all([leg, knee, foot, foot_ik, knee_ik]):
+            continue
+        key = (foot_ik.name, knee_ik.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield {
+            'side': side,
+            'digits': digits,
+            'suffix': suffix,
+            'id': f'{side}{digits}{suffix}',
+            'leg': leg,
+            'knee': knee,
+            'foot': foot,
+            'foot_ik': foot_ik,
+            'knee_ik': knee_ik,
+        }
+
+
+def _pole_follow_distance(mid_bone, pole_bone):
+    rest = (pole_bone.bone.head_local - mid_bone.bone.head_local).length
+    if rest > 0.05:
+        return rest
+    length = getattr(mid_bone, "length", 0.0) or 0.0
+    return max(length * 3.0, 0.5)
+
+
+def _set_pose_location(pose_bone, location):
+    matrix = pose_bone.matrix.copy()
+    matrix.translation = location
+    pose_bone.matrix = matrix
+
+
+def _key_pose_bone(pose_bone, frame):
+    pose_bone.keyframe_insert("location", frame=frame, group=pose_bone.name)
+    pose_bone.keyframe_insert("scale", frame=frame, group=pose_bone.name)
+    if pose_bone.rotation_mode == "QUATERNION":
+        pose_bone.keyframe_insert("rotation_quaternion", frame=frame, group=pose_bone.name)
+    elif pose_bone.rotation_mode == "AXIS_ANGLE":
+        pose_bone.keyframe_insert("rotation_axis_angle", frame=frame, group=pose_bone.name)
+    else:
+        pose_bone.keyframe_insert("rotation_euler", frame=frame, group=pose_bone.name)
+
+
 # Function to invoke the position matching dialog that can be imported by other scripts
 def invoke_position_match_dialog(cleanup_mode='LEGS'):
     bpy.ops.sub.fk_to_ik_transfer('INVOKE_DEFAULT', cleanup_mode=cleanup_mode)
+
+
+def run_fk_to_ik_match_for_raw_import(context, cleanup_mode='LEGS'):
+    """Match IK controls to FK on the current frame only (no dialogs)."""
+    if context.mode != 'POSE':
+        bpy.ops.object.mode_set(mode='POSE', toggle=False)
+    return bpy.ops.sub.fk_to_ik_transfer(
+        'EXEC_DEFAULT',
+        cleanup_mode=cleanup_mode,
+        entire_animation=False,
+    )
 
 class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
     """Perfectly positions IK controls to match the FK bone positions"""
@@ -41,15 +192,15 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
     )
 
     remove_knee_frames: bpy.props.BoolProperty(
-        name="Remove Knee Frames",
-        description="Remove all keyframes from KneeL/KneeR and LegL/LegR except the reference frame",
-        default=True
+        name="Delete Knee/Leg FK Keys",
+        description="Permanently delete Knee/Leg keys after matching. Leave off so IK/FK switch can restore the original animation",
+        default=False
     )
 
     remove_arm_frames: bpy.props.BoolProperty(
-        name="Remove Arm Frames",
-        description="Remove all keyframes from ArmL/ArmR except the reference frame",
-        default=True
+        name="Delete Arm FK Keys",
+        description="Permanently delete Arm keys after matching. Leave off so IK/FK switch can restore the original animation",
+        default=False
     )
 
     # When removing leftover FK frames, allow the user to choose the reference frame
@@ -69,292 +220,220 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         default=False
     )
 
+    custom_leg_bone_l: bpy.props.StringProperty(name="Leg L", default="LegL", options={'SKIP_SAVE'})
+    custom_knee_bone_l: bpy.props.StringProperty(name="Knee L", default="KneeL", options={'SKIP_SAVE'})
+    custom_foot_bone_l: bpy.props.StringProperty(name="Foot L", default="FootL", options={'SKIP_SAVE'})
+    custom_leg_bone_r: bpy.props.StringProperty(name="Leg R", default="LegR", options={'SKIP_SAVE'})
+    custom_knee_bone_r: bpy.props.StringProperty(name="Knee R", default="KneeR", options={'SKIP_SAVE'})
+    custom_foot_bone_r: bpy.props.StringProperty(name="Foot R", default="FootR", options={'SKIP_SAVE'})
+
+    show_progress: bpy.props.BoolProperty(
+        name="Show Progress",
+        default=True,
+        options={'SKIP_SAVE', 'HIDDEN'},
+    )
+
+    def _fk_leg_bone(self, side, part):
+        return getattr(self, f"custom_{part}_bone_{side.lower()}")
+
+    def _leg_custom_map(self):
+        return {
+            "L": (self.custom_leg_bone_l, self.custom_knee_bone_l, self.custom_foot_bone_l),
+            "R": (self.custom_leg_bone_r, self.custom_knee_bone_r, self.custom_foot_bone_r),
+        }
+
+    def _iter_legs(self, armature_object):
+        return iter_leg_fk_chains(armature_object, self._leg_custom_map())
+
+    def _should_key(self):
+        return bool(self.auto_keyframe) or not self.entire_animation
+
     @classmethod
     def poll(cls, context):
-        return (context.object and 
-                context.object.type == 'ARMATURE' and 
-                context.mode == 'POSE')
+        from .create_animation_rig import armature_has_ik, find_target_armature
+        armature = find_target_armature(context)
+        return armature is not None and armature_has_ik(armature)
 
     def process_frame(self, context):
         armature_object = context.object
-        armature = armature_object.data
         transfer_count = 0
-        
-        # Mute only the IK/copy-rotation constraints on the chains we are matching
+
         constraint_states = {}
         for pose_bone in self._iter_ik_chain_bones(armature_object):
             for i, constraint in enumerate(pose_bone.constraints):
                 if constraint.type not in {'IK', 'COPY_ROTATION'}:
                     continue
-                constraint_key = (pose_bone.name, i)
-                constraint_states[constraint_key] = constraint.mute
+                constraint_states[(pose_bone.name, i)] = constraint.mute
                 constraint.mute = True
-        
-        # Update the view layer to see the pure FK pose
+
         context.view_layer.update()
-        
-        # NOW capture the original FK bone world matrices after constraints are disabled
-        # This captures the true FK positions in world space without any IK influence
+
         original_fk_world_matrices = {}
-        for side in ["L", "R"]:
-            foot_bone = armature_object.pose.bones.get(f"Foot{side}")
-            hand_bone = armature_object.pose.bones.get(f"Hand{side}")
-            if foot_bone:
-                # Convert to world space matrix
-                world_matrix = armature_object.matrix_world @ foot_bone.matrix
-                original_fk_world_matrices[f"Foot{side}"] = world_matrix
-            if hand_bone:
-                # Convert to world space matrix
-                world_matrix = armature_object.matrix_world @ hand_bone.matrix
-                original_fk_world_matrices[f"Hand{side}"] = world_matrix
-        
-        # Track bones that need keyframes
+        leg_chains = list(self._iter_legs(armature_object))
+        for chain in leg_chains:
+            original_fk_world_matrices[f"Foot{chain['id']}"] = (
+                armature_object.matrix_world @ chain['foot'].matrix
+            )
+        arm_chains = list(iter_arm_fk_chains(armature_object))
+        for chain in arm_chains:
+            original_fk_world_matrices[f"Hand{chain['id']}"] = (
+                armature_object.matrix_world @ chain['hand'].matrix
+            )
+
         bones_to_keyframe = []
-        
-        # Process arms and legs with IK
-        for side in ["L", "R"]:
-            # -- LEG CHAIN --
-            leg_bone = armature_object.pose.bones.get(f"Leg{side}")
-            knee_bone = armature_object.pose.bones.get(f"Knee{side}")
-            foot_bone = armature_object.pose.bones.get(f"Foot{side}")
-            foot_ik_bone = armature_object.pose.bones.get(f"FootIK{side}")
-            knee_ik_bone = armature_object.pose.bones.get(f"KneeIK{side}")
-            
-            if all([leg_bone, knee_bone, foot_bone, foot_ik_bone, knee_ik_bone]):
-                # Get world space positions
-                leg_pos = leg_bone.matrix.to_translation()
-                knee_pos = knee_bone.matrix.to_translation()
-                foot_pos = foot_bone.matrix.to_translation()
-                
-                # Position foot IK at EXACT foot position with EXACT rotation
-                # Copy the entire matrix to ensure perfect positioning
-                foot_ik_bone.matrix = foot_bone.matrix.copy()
-                
-                # Calculate knee pole target position
-                # Vector from leg to foot (IK chain direction)
-                leg_to_foot = foot_pos - leg_pos
-                leg_to_foot.normalize()
-                
-                # Projected knee position onto leg-foot line
-                knee_proj = leg_pos + leg_to_foot * leg_to_foot.dot(knee_pos - leg_pos)
-                
-                # Vector from projected knee to actual knee (bend direction)
-                pole_dir = knee_pos - knee_proj
-                
-                # If knee is almost perfectly straight, use armature object relative direction
-                if pole_dir.length < 0.001:
-                    arm_obj_forward_local = Vector((0.0, -1.0, 0.0)) 
-                    arm_obj_forward_world = armature_object.matrix_world.to_3x3() @ arm_obj_forward_local
-                    
-                    chain_axis = (foot_pos - leg_pos).normalized()
-                    
-                    pole_dir = arm_obj_forward_world - arm_obj_forward_world.project(chain_axis)
-                    if pole_dir.length < 0.01: # If char forward is aligned with leg, use char up
-                        arm_obj_up_local = Vector((0.0, 0.0, 1.0))
-                        arm_obj_up_world = armature_object.matrix_world.to_3x3() @ arm_obj_up_local
-                        pole_dir = arm_obj_up_world - arm_obj_up_world.project(chain_axis)
-                        if pole_dir.length < 0.01: # Fallback if char up is also aligned (e.g. leg pointing up)
-                            arm_obj_right_local = Vector((1.0, 0.0, 0.0))
-                            arm_obj_right_world = armature_object.matrix_world.to_3x3() @ arm_obj_right_local
-                            pole_dir = arm_obj_right_world - arm_obj_right_world.project(chain_axis)
-                    
-                    if pole_dir.length > 0.0001: # Ensure pole_dir is not zero
-                        pole_dir.normalize()
-                    else: # Ultimate fallback to a world vector if all else fails
-                        pole_dir = Vector((0,1,0)) # Default to world +Y (arbitrary)
+        for chain in leg_chains:
+            transfer_count += self._place_leg_ik(armature_object, chain, bones_to_keyframe)
 
-                else:
-                    pole_dir.normalize()
-                    
-                # Scale the vector and position the pole target
-                pole_distance = 4.0
-                knee_ik_bone.matrix = Matrix.Translation(knee_pos + pole_dir * pole_distance)
-                
-                # Add to keyframing list
-                bones_to_keyframe.append(foot_ik_bone)
-                bones_to_keyframe.append(knee_ik_bone)
-                
-                transfer_count += 1
-                
-            # -- ARM CHAIN --
-            shoulder_bone = armature_object.pose.bones.get(f"Shoulder{side}")
-            arm_bone = armature_object.pose.bones.get(f"Arm{side}")
-            hand_bone = armature_object.pose.bones.get(f"Hand{side}")
-            hand_ik_bone = armature_object.pose.bones.get(f"HandIK{side}")
-            arm_ik_bone = armature_object.pose.bones.get(f"ArmIK{side}")
-            
-            if all([arm_bone, hand_bone, hand_ik_bone, arm_ik_bone]):
-                # Get world space positions
-                if shoulder_bone:
-                    shoulder_pos = shoulder_bone.matrix.to_translation()
-                else:
-                    # Fake a shoulder position if none exists
-                    shoulder_dir = arm_bone.matrix.to_translation() - hand_bone.matrix.to_translation()
-                    shoulder_dir.normalize()
-                    shoulder_pos = arm_bone.matrix.to_translation() + shoulder_dir * 1.0
-                
-                arm_pos = arm_bone.matrix.to_translation()
-                hand_pos = hand_bone.matrix.to_translation()
-                
-                # Position hand IK at EXACT hand position with EXACT rotation
-                # Copy the entire matrix to ensure perfect positioning
-                hand_ik_bone.matrix = hand_bone.matrix.copy()
-                
-                # Calculate elbow pole target position
-                # Vector from shoulder to hand (IK chain direction)
-                shoulder_to_hand = hand_pos - shoulder_pos
-                shoulder_to_hand.normalize()
-                
-                # Projected elbow position onto shoulder-hand line
-                arm_proj = shoulder_pos + shoulder_to_hand * shoulder_to_hand.dot(arm_pos - shoulder_pos)
-                
-                # Vector from projected elbow to actual elbow (bend direction)
-                pole_dir = arm_pos - arm_proj
-                
-                # If elbow is almost perfectly straight, use armature object relative direction
-                if pole_dir.length < 0.001:
-                    arm_obj_backward_local = Vector((0.0, 1.0, 0.0))
-                    arm_obj_backward_world = armature_object.matrix_world.to_3x3() @ arm_obj_backward_local
-                    
-                    # Ensure shoulder_pos is valid (it's calculated earlier)
-                    chain_axis = (hand_pos - shoulder_pos).normalized()
+        for chain in arm_chains:
+            if chain['hand_ik'] is None or chain['arm_ik'] is None:
+                continue
+            transfer_count += self._place_arm_ik(armature_object, chain, bones_to_keyframe)
 
-                    pole_dir = arm_obj_backward_world - arm_obj_backward_world.project(chain_axis)
-                    if pole_dir.length < 0.01: # If char backward is aligned with arm, use char up
-                        arm_obj_up_local = Vector((0.0, 0.0, 1.0))
-                        arm_obj_up_world = armature_object.matrix_world.to_3x3() @ arm_obj_up_local
-                        pole_dir = arm_obj_up_world - arm_obj_up_world.project(chain_axis)
-                        if pole_dir.length < 0.01: # Fallback if char up is also aligned
-                            arm_obj_right_local = Vector((1.0, 0.0, 0.0))
-                            arm_obj_right_world = armature_object.matrix_world.to_3x3() @ arm_obj_right_local
-                            pole_dir = arm_obj_right_world - arm_obj_right_world.project(chain_axis)
-
-                    if pole_dir.length > 0.0001: # Ensure pole_dir is not zero
-                        pole_dir.normalize()
-                    else: # Ultimate fallback
-                        pole_dir = Vector((0,-1,0)) # Default to world -Y for arms
-
-                else:
-                    pole_dir.normalize()
-                    
-                # Scale the vector and position the pole target
-                pole_distance = 4.0
-                arm_ik_bone.matrix = Matrix.Translation(arm_pos + pole_dir * pole_distance)
-                
-                # Add to keyframing list
-                bones_to_keyframe.append(hand_ik_bone)
-                bones_to_keyframe.append(arm_ik_bone)
-                
-                transfer_count += 1
-        
-        # Update view layer before restoring constraints
         context.view_layer.update()
-        
-        # Get FK positions again for pole angle calculation, as they are clean here
-        # (constraints are off, IK bones are placed but not yet influencing)
-        fk_positions = {}
-        for side in ["L", "R"]:
-            fk_positions[f'leg_pos{side}'] = armature_object.pose.bones.get(f"Leg{side}").matrix.to_translation() if armature_object.pose.bones.get(f"Leg{side}") else None
-            fk_positions[f'knee_pos{side}'] = armature_object.pose.bones.get(f"Knee{side}").matrix.to_translation() if armature_object.pose.bones.get(f"Knee{side}") else None
-            fk_positions[f'foot_pos{side}'] = armature_object.pose.bones.get(f"Foot{side}").matrix.to_translation() if armature_object.pose.bones.get(f"Foot{side}") else None
-            
-            # Shoulder pos might be faked if Shoulder bone doesn't exist, retrieve the one used for pole calc
-            shoulder_bone = armature_object.pose.bones.get(f"Shoulder{side}")
-            arm_bone = armature_object.pose.bones.get(f"Arm{side}")
-            hand_bone = armature_object.pose.bones.get(f"Hand{side}")
-            if shoulder_bone:
-                fk_positions[f'shoulder_pos{side}'] = shoulder_bone.matrix.to_translation()
-            elif arm_bone and hand_bone: # Reconstruct faked shoulder if necessary
-                shoulder_dir_temp = arm_bone.matrix.to_translation() - hand_bone.matrix.to_translation()
-                if shoulder_dir_temp.length > 0.001: shoulder_dir_temp.normalize()
-                fk_positions[f'shoulder_pos{side}'] = arm_bone.matrix.to_translation() + shoulder_dir_temp * 1.0
-            else:
-                fk_positions[f'shoulder_pos{side}'] = None
-            
-            fk_positions[f'arm_pos{side}'] = arm_bone.matrix.to_translation() if arm_bone else None
-            fk_positions[f'hand_pos{side}'] = hand_bone.matrix.to_translation() if hand_bone else None
 
-        # Restore all constraints (without changing pole angles yet)
-        for (bone_name, constraint_idx), original_state in constraint_states.items():
+        for (bone_name, constraint_idx) in constraint_states:
             bone = armature_object.pose.bones.get(bone_name)
             if bone and constraint_idx < len(bone.constraints):
-                constraint = bone.constraints[constraint_idx]
-                constraint.mute = original_state
-        
-        # One IK update, then solve both knee pole angles analytically
+                bone.constraints[constraint_idx].mute = False
+
         context.view_layer.update()
-        self._apply_knee_pole_angles(armature_object)
-        context.view_layer.update()
-        
-        # Final positioning: Force FootIK and HandIK to exact ORIGINAL FK positions
-        # This ensures perfect positioning using the original FK world positions before any IK influence
-        for side in ["L", "R"]:
-            # Leg chain final positioning using original FK world matrix
-            foot_ik_bone = armature_object.pose.bones.get(f"FootIK{side}")
-            if foot_ik_bone and f"Foot{side}" in original_fk_world_matrices:
-                # Convert world matrix back to bone space
-                world_matrix = original_fk_world_matrices[f"Foot{side}"]
-                bone_matrix = armature_object.matrix_world.inverted() @ world_matrix
-                foot_ik_bone.matrix = bone_matrix
-                if foot_ik_bone not in bones_to_keyframe:
-                    bones_to_keyframe.append(foot_ik_bone)
-            
-            # Arm chain final positioning using original FK world matrix
-            hand_ik_bone = armature_object.pose.bones.get(f"HandIK{side}")
-            if hand_ik_bone and f"Hand{side}" in original_fk_world_matrices:
-                # Convert world matrix back to bone space
-                world_matrix = original_fk_world_matrices[f"Hand{side}"]
-                bone_matrix = armature_object.matrix_world.inverted() @ world_matrix
-                hand_ik_bone.matrix = bone_matrix
-                if hand_ik_bone not in bones_to_keyframe:
-                    bones_to_keyframe.append(hand_ik_bone)
-        
-        # Also handle arms if needed
-        for side in ["L", "R"]:
-            arm_bone = armature_object.pose.bones.get(f"Arm{side}")
-            arm_ik_bone = armature_object.pose.bones.get(f"ArmIK{side}")
-            shoulder_bone = armature_object.pose.bones.get(f"Shoulder{side}")
-            hand_bone = armature_object.pose.bones.get(f"Hand{side}")
-            
-            if all([arm_bone, arm_ik_bone]) and hand_bone:
-                # Find the IK constraint on the arm bone
-                ik_constraint = None
-                for constraint in arm_bone.constraints:
-                    if constraint.type == 'IK':
-                        ik_constraint = constraint
-                        break
-                
-                if ik_constraint:
-                    ik_constraint.pole_angle = 0.0
-        
-        # Auto keyframe if needed
-        if self.entire_animation and self.auto_keyframe:
+        self._apply_limb_pole_angles(armature_object)
+
+        world_inv = armature_object.matrix_world.inverted()
+        for chain in leg_chains:
+            key = f"Foot{chain['id']}"
+            if key not in original_fk_world_matrices:
+                continue
+            chain['foot_ik'].matrix = world_inv @ original_fk_world_matrices[key]
+            if chain['foot_ik'] not in bones_to_keyframe:
+                bones_to_keyframe.append(chain['foot_ik'])
+
+        for chain in arm_chains:
+            hand_ik_bone = chain['hand_ik']
+            key = f"Hand{chain['id']}"
+            if hand_ik_bone is None or key not in original_fk_world_matrices:
+                continue
+            hand_ik_bone.matrix = world_inv @ original_fk_world_matrices[key]
+            if hand_ik_bone not in bones_to_keyframe:
+                bones_to_keyframe.append(hand_ik_bone)
+
+        self._refine_arm_pole_angles(armature_object)
+
+        if self._should_key():
             current_frame = context.scene.frame_current
             if getattr(self, "_collect_keys", False):
                 self._record_bone_keys(current_frame, bones_to_keyframe)
+                self._record_pole_keys(armature_object, current_frame)
             else:
                 for bone in bones_to_keyframe:
-                    bone.keyframe_insert(data_path="location", frame=current_frame, group=bone.name)
-                    bone.keyframe_insert(data_path="rotation_quaternion", frame=current_frame, group=bone.name)
-                    bone.keyframe_insert(data_path="rotation_euler", frame=current_frame, group=bone.name)
-                    bone.keyframe_insert(data_path="scale", frame=current_frame, group=bone.name)
-        
-        # Final update
+                    _key_pose_bone(bone, current_frame)
+                self._key_limb_pole_angles(armature_object, current_frame)
+
         context.view_layer.update()
-        
         return transfer_count
 
+    def _place_leg_ik(self, armature_object, chain, bones_to_keyframe):
+        """Place FootIK on the FK foot and KneeIK along the knee bend."""
+        leg_bone = chain['leg']
+        knee_bone = chain['knee']
+        foot_bone = chain['foot']
+        foot_ik_bone = chain['foot_ik']
+        knee_ik_bone = chain['knee_ik']
+        leg_pos = leg_bone.matrix.to_translation()
+        knee_pos = knee_bone.matrix.to_translation()
+        foot_pos = foot_bone.matrix.to_translation()
+        foot_ik_bone.matrix = foot_bone.matrix.copy()
+
+        chain_vec = foot_pos - leg_pos
+        if chain_vec.length < 1e-6:
+            chain_dir = Vector((0.0, 0.0, -1.0))
+        else:
+            chain_dir = chain_vec.normalized()
+        knee_proj = leg_pos + chain_dir * chain_dir.dot(knee_pos - leg_pos)
+        pole_dir = knee_pos - knee_proj
+        if pole_dir.length < 0.001:
+            pole_dir = self._fallback_pole_dir(armature_object, chain_dir, Vector((0.0, -1.0, 0.0)))
+        else:
+            pole_dir.normalize()
+
+        _set_pose_location(
+            knee_ik_bone,
+            knee_pos + pole_dir * _pole_follow_distance(knee_bone, knee_ik_bone),
+        )
+        bones_to_keyframe.append(foot_ik_bone)
+        bones_to_keyframe.append(knee_ik_bone)
+        return 1
+
+    def _fallback_pole_dir(self, armature_object, chain_dir, preferred_local):
+        rot = armature_object.matrix_world.to_3x3()
+        for local in (preferred_local, Vector((0.0, 0.0, 1.0)), Vector((1.0, 0.0, 0.0))):
+            world = rot @ local
+            pole_dir = world - world.project(chain_dir)
+            if pole_dir.length > 0.01:
+                return pole_dir.normalized()
+        return Vector((0.0, 1.0, 0.0))
+
+    def _place_arm_ik(self, armature_object, chain, bones_to_keyframe):
+        """Place HandIK on the FK hand and ArmIK along the elbow bend."""
+        shoulder_bone = chain['shoulder']
+        arm_bone = chain['arm']
+        hand_bone = chain['hand']
+        hand_ik_bone = chain['hand_ik']
+        arm_ik_bone = chain['arm_ik']
+        if shoulder_bone:
+            shoulder_pos = shoulder_bone.matrix.to_translation()
+        else:
+            shoulder_dir = arm_bone.matrix.to_translation() - hand_bone.matrix.to_translation()
+            if shoulder_dir.length > 0.001:
+                shoulder_dir.normalize()
+            shoulder_pos = arm_bone.matrix.to_translation() + shoulder_dir * 1.0
+
+        arm_pos = arm_bone.matrix.to_translation()
+        hand_pos = hand_bone.matrix.to_translation()
+        hand_ik_bone.matrix = hand_bone.matrix.copy()
+
+        chain_vec = hand_pos - shoulder_pos
+        if chain_vec.length < 1e-6:
+            chain_dir = Vector((1.0, 0.0, 0.0))
+        else:
+            chain_dir = chain_vec.normalized()
+        arm_proj = shoulder_pos + chain_dir * chain_dir.dot(arm_pos - shoulder_pos)
+        pole_dir = arm_pos - arm_proj
+
+        if pole_dir.length < 0.001:
+            pole_dir = self._fallback_pole_dir(armature_object, chain_dir, Vector((0.0, 1.0, 0.0)))
+        else:
+            pole_dir.normalize()
+
+        _set_pose_location(
+            arm_ik_bone,
+            arm_pos + pole_dir * _pole_follow_distance(arm_bone, arm_ik_bone),
+        )
+        bones_to_keyframe.append(hand_ik_bone)
+        bones_to_keyframe.append(arm_ik_bone)
+        return 1
+
     def _iter_ik_chain_bones(self, armature_object):
+        yielded = set()
         names = []
-        for side in ("L", "R"):
+        for chain in self._iter_legs(armature_object):
             names.extend((
-                f"Leg{side}", f"Knee{side}", f"Foot{side}",
-                f"Shoulder{side}", f"Arm{side}", f"Hand{side}",
-                f"FootIK{side}", f"KneeIK{side}", f"HandIK{side}", f"ArmIK{side}",
+                chain['leg'].name, chain['knee'].name, chain['foot'].name,
+                chain['foot_ik'].name, chain['knee_ik'].name,
             ))
+        for chain in iter_arm_fk_chains(armature_object):
+            names.extend(
+                bone.name for bone in (
+                    chain['shoulder'], chain['arm'], chain['hand'],
+                    chain['hand_ik'], chain['arm_ik'],
+                ) if bone is not None
+            )
         for name in names:
+            if name in yielded:
+                continue
             bone = armature_object.pose.bones.get(name)
             if bone:
+                yielded.add(name)
                 yield bone
 
     def _find_ik_constraint(self, pose_bone):
@@ -373,17 +452,22 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         axis = axis.normalized()
         return math.atan2(axis.dot(v1.cross(v2)), v1.dot(v2))
 
-    def _pole_angle_from_zero(self, knee_bone, knee_ik_bone, leg_bone, foot_bone):
-        """Pole angle that points the knee at KneeIK, assuming the constraint is currently 0."""
-        leg_pos = leg_bone.matrix.to_translation()
-        foot_pos = foot_bone.matrix.to_translation()
-        chain_axis = foot_pos - leg_pos
+    def _pole_angle_from_zero(self, knee_bone, knee_ik_bone, leg_bone, foot_bone, end_pos=None):
+        """Pole angle that points the mid-joint at the pole, from the current pose.
+
+        Does not require the constraint to be 0; the value is the remaining
+        signed angle from the current mid-joint to the pole around the chain.
+        """
+        start = leg_bone.matrix.to_translation()
+        if end_pos is None:
+            end_pos = foot_bone.matrix.to_translation()
+        chain_axis = end_pos - start
         if chain_axis.length < 1e-6:
             return 0.0
         chain_axis.normalize()
 
         def project(point):
-            direction = point - leg_pos
+            direction = point - start
             return direction - direction.dot(chain_axis) * chain_axis
 
         current = project(knee_bone.matrix.to_translation())
@@ -392,56 +476,196 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
             return 0.0
         return self._signed_angle(current, target, chain_axis)
 
-    def _apply_knee_pole_angles(self, armature_object):
-        """Solve both knees with one depsgraph sample at pole_angle 0."""
-        jobs = []
-        for side in ("L", "R"):
-            knee_bone = armature_object.pose.bones.get(f"Knee{side}")
-            knee_ik_bone = armature_object.pose.bones.get(f"KneeIK{side}")
-            leg_bone = armature_object.pose.bones.get(f"Leg{side}")
-            foot_bone = armature_object.pose.bones.get(f"Foot{side}")
-            ik_constraint = self._find_ik_constraint(knee_bone)
-            if not all([knee_bone, knee_ik_bone, leg_bone, foot_bone, ik_constraint]):
-                continue
-            jobs.append((knee_bone, knee_ik_bone, leg_bone, foot_bone, ik_constraint))
+    def _arm_chain_end(self, arm_bone, hand_bone):
+        tail = getattr(arm_bone, "tail", None)
+        if tail is not None:
+            return tail.copy()
+        return hand_bone.matrix.to_translation()
 
-        if not jobs:
+    def _pole_alignment(self, mid_bone, pole_bone, start_bone, end_pos):
+        start = start_bone.matrix.to_translation()
+        chain_axis = end_pos - start
+        if chain_axis.length < 1e-6:
+            return 1.0
+        chain_axis.normalize()
+        current = mid_bone.matrix.to_translation() - start
+        target = pole_bone.matrix.to_translation() - start
+        current = current - current.dot(chain_axis) * chain_axis
+        target = target - target.dot(chain_axis) * chain_axis
+        if current.length < 1e-4 or target.length < 1e-4:
+            return 1.0
+        return current.normalized().dot(target.normalized())
+
+    def _arm_pole_alignment(self, arm_bone, arm_ik_bone, shoulder_bone, hand_bone):
+        return self._pole_alignment(
+            arm_bone,
+            arm_ik_bone,
+            shoulder_bone,
+            self._arm_chain_end(arm_bone, hand_bone),
+        )
+
+    def _iter_pole_constraints(self, armature_object):
+        for chain in self._iter_legs(armature_object):
+            constraint = self._find_ik_constraint(chain['knee'])
+            if constraint is not None:
+                yield chain['knee'], constraint
+        for chain in iter_arm_fk_chains(armature_object):
+            constraint = self._find_ik_constraint(chain['arm'])
+            if constraint is not None:
+                yield chain['arm'], constraint
+
+    def _apply_limb_pole_angles(self, armature_object):
+        """Zero all poles, sample once, then solve knees and arms independently."""
+        knee_jobs = []
+        for chain in self._iter_legs(armature_object):
+            ik_constraint = self._find_ik_constraint(chain['knee'])
+            if ik_constraint is None:
+                continue
+            knee_jobs.append((chain, ik_constraint))
+
+        arm_jobs = []
+        for chain in iter_arm_fk_chains(armature_object):
+            arm_bone = chain['arm']
+            arm_ik_bone = chain['arm_ik']
+            shoulder_bone = chain['shoulder']
+            hand_bone = chain['hand']
+            ik_constraint = self._find_ik_constraint(arm_bone)
+            if not all([arm_bone, arm_ik_bone, hand_bone, ik_constraint]):
+                continue
+            if shoulder_bone is None:
+                ik_constraint.pole_angle = (
+                    math.radians(-90.0) if chain['side'] == 'L' else 0.0
+                )
+                continue
+            arm_jobs.append((chain, ik_constraint))
+
+        if not knee_jobs and not arm_jobs:
             return
 
-        for _knee, _pole, _leg, _foot, ik_constraint in jobs:
+        for _chain, ik_constraint in knee_jobs:
+            ik_constraint.pole_angle = 0.0
+        for _chain, ik_constraint in arm_jobs:
             ik_constraint.pole_angle = 0.0
         bpy.context.view_layer.update()
 
-        pole_sign = getattr(self, "_pole_sign", 1.0)
-        computed = []
-        for knee_bone, knee_ik_bone, leg_bone, foot_bone, ik_constraint in jobs:
-            angle = self._pole_angle_from_zero(knee_bone, knee_ik_bone, leg_bone, foot_bone)
-            computed.append((ik_constraint, angle))
-            ik_constraint.pole_angle = pole_sign * angle
+        knee_signs = getattr(self, "_knee_pole_signs", None)
+        if knee_signs is None:
+            knee_signs = {}
+            self._knee_pole_signs = knee_signs
+        arm_signs = getattr(self, "_arm_pole_signs", None)
+        if arm_signs is None:
+            arm_signs = {}
+            self._arm_pole_signs = arm_signs
 
-        if getattr(self, "_pole_sign_checked", False):
-            return
+        computed_knees = []
+        for chain, ik_constraint in knee_jobs:
+            angle = self._pole_angle_from_zero(
+                chain['knee'], chain['knee_ik'], chain['leg'], chain['foot']
+            )
+            sign = knee_signs.get(chain['id'], 1.0)
+            ik_constraint.pole_angle = sign * angle
+            computed_knees.append((chain, ik_constraint, angle, sign))
+
+        computed_arms = []
+        for chain, ik_constraint in arm_jobs:
+            end_pos = self._arm_chain_end(chain['arm'], chain['hand'])
+            angle = self._pole_angle_from_zero(
+                chain['arm'], chain['arm_ik'], chain['shoulder'], chain['hand'],
+                end_pos=end_pos,
+            )
+            sign = arm_signs.get(chain['id'], 1.0)
+            ik_constraint.pole_angle = sign * angle
+            computed_arms.append((chain, ik_constraint, angle, sign))
 
         bpy.context.view_layer.update()
-        worst_alignment = 1.0
-        for knee_bone, knee_ik_bone, leg_bone, foot_bone, _ik in jobs:
-            leg_pos = leg_bone.matrix.to_translation()
-            chain_axis = foot_bone.matrix.to_translation() - leg_pos
-            if chain_axis.length < 1e-6:
-                continue
-            chain_axis.normalize()
-            current = (knee_bone.matrix.to_translation() - leg_pos)
-            target = (knee_ik_bone.matrix.to_translation() - leg_pos)
-            current = current - current.dot(chain_axis) * chain_axis
-            target = target - target.dot(chain_axis) * chain_axis
-            if current.length > 1e-4 and target.length > 1e-4:
-                worst_alignment = min(worst_alignment, current.normalized().dot(target.normalized()))
 
-        if worst_alignment < 0.85:
-            self._pole_sign = -pole_sign
-            for ik_constraint, angle in computed:
-                ik_constraint.pole_angle = self._pole_sign * angle
-        self._pole_sign_checked = True
+        for chain, ik_constraint, angle, sign in computed_knees:
+            alignment = self._pole_alignment(
+                chain['knee'], chain['knee_ik'], chain['leg'],
+                chain['foot'].matrix.to_translation(),
+            )
+            if alignment < 0.85:
+                sign = -sign
+                knee_signs[chain['id']] = sign
+                ik_constraint.pole_angle = sign * angle
+            elif chain['id'] not in knee_signs:
+                knee_signs[chain['id']] = sign
+
+        for chain, ik_constraint, angle, sign in computed_arms:
+            alignment = self._arm_pole_alignment(
+                chain['arm'], chain['arm_ik'], chain['shoulder'], chain['hand']
+            )
+            if alignment < 0.85:
+                sign = -sign
+                arm_signs[chain['id']] = sign
+                ik_constraint.pole_angle = sign * angle
+            elif chain['id'] not in arm_signs:
+                arm_signs[chain['id']] = sign
+
+    def _refine_arm_pole_angles(self, armature_object):
+        """Correct leftover elbow-to-pole error after the HandIK snap."""
+        for _ in range(3):
+            bpy.context.view_layer.update()
+            proposals = []
+            for chain in iter_arm_fk_chains(armature_object):
+                arm_bone = chain['arm']
+                arm_ik_bone = chain['arm_ik']
+                shoulder_bone = chain['shoulder']
+                hand_bone = chain['hand']
+                ik_constraint = self._find_ik_constraint(arm_bone)
+                if not all([arm_bone, arm_ik_bone, shoulder_bone, hand_bone, ik_constraint]):
+                    continue
+                delta = self._pole_angle_from_zero(
+                    arm_bone,
+                    arm_ik_bone,
+                    shoulder_bone,
+                    hand_bone,
+                    end_pos=self._arm_chain_end(arm_bone, hand_bone),
+                )
+                if abs(delta) < 1e-5:
+                    continue
+                proposals.append((
+                    ik_constraint,
+                    delta,
+                    ik_constraint.pole_angle,
+                    self._arm_pole_alignment(arm_bone, arm_ik_bone, shoulder_bone, hand_bone),
+                    arm_bone,
+                    arm_ik_bone,
+                    shoulder_bone,
+                    hand_bone,
+                ))
+            if not proposals:
+                break
+            for ik_constraint, delta, original, _before, *_rest in proposals:
+                ik_constraint.pole_angle = original + delta
+            bpy.context.view_layer.update()
+            retries = []
+            for item in proposals:
+                ik_constraint, delta, original, before, arm_bone, arm_ik_bone, shoulder_bone, hand_bone = item
+                after = self._arm_pole_alignment(arm_bone, arm_ik_bone, shoulder_bone, hand_bone)
+                if after + 1e-4 < before:
+                    retries.append(item)
+            if retries:
+                for ik_constraint, delta, original, _before, *_rest in retries:
+                    ik_constraint.pole_angle = original - delta
+                bpy.context.view_layer.update()
+                for ik_constraint, delta, original, before, arm_bone, arm_ik_bone, shoulder_bone, hand_bone in retries:
+                    after = self._arm_pole_alignment(arm_bone, arm_ik_bone, shoulder_bone, hand_bone)
+                    if after + 1e-4 < before:
+                        ik_constraint.pole_angle = original
+
+    def _key_limb_pole_angles(self, armature_object, frame):
+        for _pose_bone, constraint in self._iter_pole_constraints(armature_object):
+            try:
+                constraint.keyframe_insert("pole_angle", frame=frame)
+            except RuntimeError:
+                pass
+
+    def _record_pole_keys(self, armature_object, frame):
+        store = self._pole_store
+        for pose_bone, constraint in self._iter_pole_constraints(armature_object):
+            path = f'pose.bones["{pose_bone.name}"].constraints["{constraint.name}"].pole_angle'
+            store.setdefault(path, []).append((frame, constraint.pole_angle))
 
     def _record_bone_keys(self, frame, bones):
         store = self._key_store
@@ -521,9 +745,55 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
             for index in range(3):
                 write_channel(scl_path, index, [value[index] for value in scl_values])
 
+        for data_path, frames in getattr(self, "_pole_store", {}).items():
+            if not frames:
+                continue
+            frames = sorted(frames, key=lambda item: item[0])
+            frame_nums = [item[0] for item in frames]
+            values = [item[1] for item in frames]
+            frame_min = frame_nums[0]
+            frame_max = frame_nums[-1]
+            group = ""
+            if 'pose.bones["' in data_path:
+                group = data_path.split('pose.bones["', 1)[-1].split('"]', 1)[0]
+            fcurve = find_fcurve(action, data_path, index=0)
+            if fcurve is None:
+                fcurve = new_fcurve(action, data_path, index=0, action_group=group)
+            else:
+                for i in range(len(fcurve.keyframe_points) - 1, -1, -1):
+                    frame = fcurve.keyframe_points[i].co[0]
+                    if frame_min - 0.001 <= frame <= frame_max + 0.001:
+                        fcurve.keyframe_points.remove(fcurve.keyframe_points[i])
+            for frame, value in zip(frame_nums, values):
+                fcurve.keyframe_points.insert(frame, value, options={'FAST'})
+            fcurve.update()
+
     def execute(self, context):
+        from .create_animation_rig import (
+            find_target_armature,
+            _activate_armature,
+            _set_ik_control_fcurves_muted,
+            _set_ik_driven_fcurves_muted,
+            _set_ik_enabled,
+        )
+
+        armature_object = find_target_armature(context)
+        if armature_object is None:
+            self.report({'ERROR'}, "Select a Smash Ultimate armature.")
+            return {'CANCELLED'}
+
+        _activate_armature(context, armature_object)
+        if context.mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+
+        _set_ik_driven_fcurves_muted(armature_object, False)
+        _set_ik_control_fcurves_muted(armature_object, True)
+
+        self._knee_pole_signs = {}
+        self._arm_pole_signs = {}
+        self._pole_store = {}
+
         if self.entire_animation:
-            # Process all frames in the animation
             original_frame = context.scene.frame_current
             start_frame = context.scene.frame_start
             end_frame = context.scene.frame_end
@@ -532,65 +802,60 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
             total_transfers = 0
             self._collect_keys = bool(self.auto_keyframe)
             self._key_store = {}
-            self._pole_sign = 1.0
-            self._pole_sign_checked = False
             
-            # Show a progress indicator in the status bar
-            context.window_manager.progress_begin(0, 100)
+            if self.show_progress:
+                context.window_manager.progress_begin(0, 100)
             
             try:
                 for frame_num in range(start_frame, end_frame + 1):
-                    # Update progress
-                    progress = (frame_num - start_frame) / total_frames * 100
-                    context.window_manager.progress_update(progress)
+                    if self.show_progress:
+                        progress = (frame_num - start_frame) / total_frames * 100
+                        context.window_manager.progress_update(progress)
                     
-                    # Set the current frame
                     context.scene.frame_set(frame_num)
-                    
-                    # Process this frame
-                    transfers = self.process_frame(context)
-                    total_transfers += transfers
+                    total_transfers += self.process_frame(context)
 
                 if self._collect_keys:
-                    self._flush_recorded_keys(context.object)
+                    self._flush_recorded_keys(armature_object)
                     
-                # End progress indicator
-                context.window_manager.progress_end()
+                if self.show_progress:
+                    context.window_manager.progress_end()
                 
-                # Return to the original frame
                 context.scene.frame_set(original_frame)
                 
                 keep_frame = start_frame if self.reference_frame == 'FIRST' else end_frame
                 if self._should_remove_knee_frames() and self.remove_knee_frames:
-                    self.remove_fk_keyframes(context, keep_frame, ["KneeL", "KneeR", "LegL", "LegR"], "knee/leg")
+                    knee_leg_names = []
+                    for chain in self._iter_legs(armature_object):
+                        knee_leg_names.extend((chain['knee'].name, chain['leg'].name))
+                    self.remove_fk_keyframes(context, keep_frame, knee_leg_names, "knee/leg")
                 if self._should_remove_arm_frames() and self.remove_arm_frames:
-                    self.remove_fk_keyframes(context, keep_frame, ["ArmL", "ArmR"], "arm")
+                    arm_names = [chain['arm'].name for chain in iter_arm_fk_chains(armature_object)]
+                    self.remove_fk_keyframes(context, keep_frame, arm_names or ["ArmL", "ArmR"], "arm")
                 
-                # Reset foot FK bones if requested
                 if self.reset_foot_bones:
                     self.reset_foot_bone_transforms(context)
-                
-                # Report success
+
+                _set_ik_enabled(context, armature_object, True)
                 self.report({'INFO'}, f"Successfully positioned IK controllers across {total_frames} frames")
                 return {'FINISHED'}
                 
             except Exception as e:
-                # End progress indicator if there was an error
-                context.window_manager.progress_end()
+                if self.show_progress:
+                    context.window_manager.progress_end()
                 context.scene.frame_set(original_frame)
+                _set_ik_control_fcurves_muted(armature_object, False)
                 self.report({'ERROR'}, f"Error processing animation: {str(e)}")
                 return {'CANCELLED'}
         else:
-            # Process only the current frame
-            self._pole_sign = 1.0
-            self._pole_sign_checked = False
             self._collect_keys = False
             transfer_count = self.process_frame(context)
             
-            # Report success
             if transfer_count > 0:
+                _set_ik_enabled(context, armature_object, True)
                 self.report({'INFO'}, f"Successfully positioned {transfer_count} IK controllers")
             else:
+                _set_ik_control_fcurves_muted(armature_object, False)
                 self.report({'WARNING'}, "No IK controllers could be positioned")
                 
             return {'FINISHED'}
@@ -670,8 +935,8 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         
         # Foot bones to process
         foot_bones = [
-            armature_object.pose.bones.get("FootL"),
-            armature_object.pose.bones.get("FootR")
+            armature_object.pose.bones.get(self.custom_foot_bone_l),
+            armature_object.pose.bones.get(self.custom_foot_bone_r),
         ]
         
         # Filter out None values (in case a bone doesn't exist)
