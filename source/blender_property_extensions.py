@@ -14,6 +14,30 @@ from .model.material import sub_matl_data
 from .model.skel import helper_bone_data
 
 
+def _update_smash_viewport(self, context):
+    try:
+        from .extras.smash_viewport import update_smash_viewport
+        update_smash_viewport(self, context)
+    except Exception:
+        pass
+
+
+def _update_smash_vp_background(self, context):
+    try:
+        from .extras.smash_viewport import update_smash_vp_background
+        update_smash_vp_background(self, context)
+    except Exception:
+        pass
+
+
+def _update_smash_vp_lighting(self, context):
+    try:
+        from .extras.smash_viewport import update_smash_vp_lighting
+        update_smash_vp_lighting(self, context)
+    except Exception:
+        pass
+
+
 def poll_armature_object(_self, obj):
     return obj is not None and getattr(obj, 'type', None) == 'ARMATURE'
 
@@ -154,6 +178,91 @@ class UserPoseItem(PropertyGroup):
 
 
 class SubSceneProperties(PropertyGroup):
+    raw_animation_import_folder_path: StringProperty(
+        name="Raw Animation Import Folder Path",
+        description="Path to the folder containing .rawanim files",
+        default=""
+    )
+    raw_animation_import_files: CollectionProperty(
+        name="Raw Animation Import Files",
+        description="List of found raw animation files",
+        type=AnimationImportFile
+    )
+    raw_animation_import_files_index: IntProperty(
+        name="Raw Animation Import Files Index",
+        default=0
+    )
+    raw_animations_expanded: BoolProperty(
+        name="Raw Animations Expanded",
+        description="Whether the Raw Animations section is expanded",
+        default=True
+    )
+    clean_keyframes_after_rig: BoolProperty(
+        name="Clean keyframes after creation",
+        description="After creating the animation rig, remove keys that sit on baked interpolation so only the keys that change the pose remain",
+        default=True,
+    )
+    bulk_ik_expanded: BoolProperty(
+        name="Bulk IK Expanded",
+        description="Whether the Bulk IK section is expanded",
+        default=False
+    )
+    bulk_ik_leg_l: StringProperty(name="Leg L", default="LegL")
+    bulk_ik_knee_l: StringProperty(name="Knee L", default="KneeL")
+    bulk_ik_foot_l: StringProperty(name="Foot L", default="FootL")
+    bulk_ik_leg_r: StringProperty(name="Leg R", default="LegR")
+    bulk_ik_knee_r: StringProperty(name="Knee R", default="KneeR")
+    bulk_ik_foot_r: StringProperty(name="Foot R", default="FootR")
+    anim_include_raw_animation: BoolProperty(
+        name="Include Raw Animation",
+        description="Also export a sparse .rawanim file alongside the .nuanmb export",
+        default=False,
+    )
+    sap_auto_sync_enabled: BoolProperty(
+        name="SAP Auto-Sync",
+        description=(
+            "Automatically keep visibility/material SAP actions matched to the bone action. "
+            "Turn off while using Rendered viewport shading if sampling restarts endlessly"
+        ),
+        default=True,
+    )
+    mirror_smash_y_anim_flip: BoolProperty(
+        name="Smash Y Anim Flip",
+        description="Use Studio SB anim_flip for Y-axis mirroring (best for imported nuanmb animations on standard Smash rigs). Off uses fcurve mirroring like X/Z",
+        default=False,
+    )
+    smash_viewport: BoolProperty(
+        name="Smash Viewport",
+        description=(
+            "Set the scene render engine to Smash Viewport. Then use Rendered "
+            "shading in the 3D View, the same way you would with Cycles. "
+            "Overlays, selection, and object visibility stay under Blender"
+        ),
+        default=False,
+        update=_update_smash_viewport,
+    )
+    smash_vp_bg_color: FloatVectorProperty(
+        name="Background",
+        description="3D View background while Smash Viewport is the render engine",
+        subtype="COLOR",
+        size=3,
+        min=0.0,
+        max=1.0,
+        default=(0.0, 0.0, 0.0),
+        update=_update_smash_vp_background,
+    )
+    smash_vp_light_path: StringProperty(
+        name="Stage Lights",
+        description="Stage light.nuanmb used by Smash Viewport (same as SSBH Editor)",
+        default="",
+        subtype="FILE_PATH",
+        update=_update_smash_vp_lighting,
+    )
+    stage_light_drive_smash_viewport: BoolProperty(
+        name="Drive Smash Viewport",
+        description="Push Stage Tools light edits into Smash Viewport so you can tweak lighting there live",
+        default=True,
+    )
     model_import_folder_path: StringProperty(
         name="Model Import Folder Path",
         description="Path to the folder containing the model files",
