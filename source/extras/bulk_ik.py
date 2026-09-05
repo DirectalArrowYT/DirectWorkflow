@@ -260,9 +260,9 @@ class SUB_OP_bulk_ik_match_all(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     remove_knee_frames: bpy.props.BoolProperty(
-        name="Remove Knee/Leg FK Keyframes",
-        description="Keep only a reference frame on the FK leg bones after matching",
-        default=True,
+        name="Delete Knee/Leg FK Keyframes",
+        description="Permanently delete Knee/Leg keys after matching. Leave off so the original FK animation is kept (muted while IK is on)",
+        default=False,
     )
 
     reference_frame: bpy.props.EnumProperty(

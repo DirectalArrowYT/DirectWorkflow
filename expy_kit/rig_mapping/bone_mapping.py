@@ -106,6 +106,7 @@ class HumanFingers(HumanLimb):
 class HumanSkeleton:
     face = None
     root = None
+    throw = None
     spine = None
 
     left_arm = None
@@ -144,6 +145,7 @@ class HumanSkeleton:
             self.custom = preset.custom
 
             self.root = preset.root
+            self.throw = getattr(preset, 'throw', '') or ''
 
     @property
     def deformation_bone_map(self):
@@ -209,6 +211,8 @@ class HumanSkeleton:
     def bone_names(self):
         if self.root:
             yield self.root
+        if self.throw:
+            yield self.throw
 
         for limb_name, bone_name in self.spine.items():
             yield bone_name
@@ -286,6 +290,8 @@ class HumanSkeleton:
 
         if self.root:
             bone_map[self.root] = target_skeleton.root
+        if self.throw and getattr(target_skeleton, 'throw', None):
+            bone_map[self.throw] = target_skeleton.throw
 
         face_map = self.face
         if face_map:

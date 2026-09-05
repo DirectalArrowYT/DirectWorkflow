@@ -3,6 +3,7 @@ import mathutils
 from mathutils import Vector
 import math  # Import the math module
 from . import fk_to_ik
+from .ik_leg_placement import place_leg_ik_edit_bones
 from ..blender_compat import assign_bone_to_collection, ensure_bone_collection
 
 class SUB_OP_create_ik_bones_operator(bpy.types.Operator):
@@ -48,18 +49,9 @@ class SUB_OP_create_ik_bones_operator(bpy.types.Operator):
             # NOTE: Removed base bone modifications to preserve armature integrity
             # The original code modified base bone positions which caused armature deformation
             
-            # Create knee IK pole target
-            knee_ik_bone = armature.edit_bones.new("KneeIK"+i)
-            knee_ik_bone.head = Vector((knee_bone.head.x, -4.0, knee_bone.head.z))
-            knee_ik_bone.tail = Vector((knee_bone.head.x, -5.5, knee_bone.head.z))
-            
-            # Scale the knee pole target bone for better visibility
-            leg_bone_length = (leg_bone.tail - leg_bone.head).length
-            if leg_bone_length > 0.001:
-                pole_length = leg_bone_length * 0.2 * ik_scale_factor
-                pole_dir = (knee_ik_bone.tail - knee_ik_bone.head).normalized()
-                knee_ik_bone.tail = knee_ik_bone.head + pole_dir * pole_length
-            
+            # Create leg IK targets from actual bone geometry
+            place_leg_ik_edit_bones(armature, i, leg_bone, knee_bone, foot_bone, ik_scale_factor)
+
             # Create arm IK pole target
             arm_ik_bone = armature.edit_bones.new("ArmIK"+i)
             arm_ik_bone.head = Vector((arm_bone.head.x, 4.0, arm_bone.head.z))
@@ -71,17 +63,6 @@ class SUB_OP_create_ik_bones_operator(bpy.types.Operator):
                 pole_length = arm_bone_length * 0.2 * ik_scale_factor
                 pole_dir = (arm_ik_bone.tail - arm_ik_bone.head).normalized()
                 arm_ik_bone.tail = arm_ik_bone.head + pole_dir * pole_length
-            
-            # Create foot IK target
-            foot_ik_bone = armature.edit_bones.new("FootIK"+i)
-            foot_ik_bone.head = knee_bone.tail
-            
-            # Make the foot IK bone larger
-            foot_ik_length = foot_bone.length if foot_bone.length > 0.01 else leg_bone.length * 0.3
-            foot_ik_length *= ik_scale_factor
-            
-            foot_ik_bone.tail = Vector((knee_bone.tail.x, knee_bone.tail.y, knee_bone.tail.z - foot_ik_length))
-            foot_ik_bone.roll = math.radians(90.0)
             
             # Create hand IK target
             hand_ik_bone = armature.edit_bones.new("HandIK"+i)

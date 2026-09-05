@@ -365,6 +365,7 @@ class AddPresetArmatureRetarget(AddPresetBase, Operator):
         "skeleton.custom",
         "skeleton.custom.name",
         "skeleton.root",
+        "skeleton.throw",
 
         "skeleton.deform_preset"
     ]
@@ -412,7 +413,13 @@ class ClearArmatureRetarget(Operator):
                     continue
 
         skeleton.root = ''
+        skeleton.throw = ''
         skeleton.deform_preset = '--'
+        skeleton.active_preset = ''
+        skeleton.custom.name = ''
+        skeleton.custom.entries.clear()
+        skeleton.custom.ui_version += 1
+        skeleton.custom.sync_all_dynamic_props()
 
         return {'FINISHED'}
 
@@ -445,9 +452,9 @@ class SetToActiveBone(Operator):
         active_bone_name = context.active_pose_bone.name
 
         if not self.slot_name:
-            if self.attr_name == 'root':
-                setattr(skeleton, 'root', active_bone_name)
-                self.report({'INFO'}, f"Set root bone to '{active_bone_name}'")
+            if self.attr_name in {'root', 'throw'}:
+                setattr(skeleton, self.attr_name, active_bone_name)
+                self.report({'INFO'}, f"Set {self.attr_name} bone to '{active_bone_name}'")
             
             return {'FINISHED'}
 
@@ -861,7 +868,7 @@ class VIEW3D_PT_expy_retarget_arms(RetargetBasePanel, bpy.types.Panel):
 
 
 class VIEW3D_PT_expy_retarget_spine(RetargetBasePanel, bpy.types.Panel):
-    bl_label = "Spine"
+    bl_label = "Core"
 
     def draw(self, context):
         ob = context.object
@@ -872,7 +879,7 @@ class VIEW3D_PT_expy_retarget_spine(RetargetBasePanel, bpy.types.Panel):
 
         skeleton = ob.data.expykit_retarget
 
-        for slot in ('head', 'neck', 'spine2', 'spine1', 'spine', 'hips'):
+        for slot in ('head', 'neck', 'spine2', 'spine1', 'hips'):
             split = layout.split(factor=0.80)
             slot_labels = {'spine2': 'Bust', 'spine1': 'Waist'}
             split.prop_search(skeleton.spine, slot, ob.data, "bones", text=slot_labels.get(slot, slot.title()))
@@ -937,6 +944,12 @@ class VIEW3D_PT_expy_retarget_root(RetargetBasePanel, bpy.types.Panel):
         s_props.attr_name = 'root'
         s_props.sub_attr_name = ''
 
+        split = layout.split(factor=0.80)
+        split.prop_search(skeleton, 'throw', ob.data, "bones", text="Throw")
+        t_props = split.operator(SetToActiveBone.bl_idname, text="", icon='EYEDROPPER')
+        t_props.attr_name = 'throw'
+        t_props.sub_attr_name = ''
+
         layout.separator()
         row = layout.row()
         row.prop(skeleton, 'deform_preset')
@@ -965,15 +978,21 @@ class AddCustomBone(bpy.types.Operator):
     def execute(self, context):
         skeleton = context.active_object.data.expykit_retarget
         if context.active_pose_bone:
-            # Clean the identifier to create a valid property name
-            identifier = self.identifier.lower().replace(" ", "_").replace("-", "_")
-            
-            # Add the custom bone with the given identifier
+            identifier = self._clean_identifier(self.identifier)
+
             if skeleton.custom.add_bone(identifier, context.active_pose_bone.name):
                 self.report({'INFO'}, f"Added custom bone '{identifier}'")
             else:
                 self.report({'ERROR'}, f"Failed to add custom bone '{identifier}'")
+
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                area.tag_redraw()
         return {'FINISHED'}
+
+    @staticmethod
+    def _clean_identifier(identifier):
+        return identifier.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
     
     def invoke(self, context, event):
         if context.active_pose_bone:
@@ -999,6 +1018,10 @@ class RemoveCustomBone(bpy.types.Operator):
             self.report({'INFO'}, f"Removed custom bone '{self.identifier}'")
         else:
             self.report({'ERROR'}, f"Could not find custom bone '{self.identifier}'")
+
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                area.tag_redraw()
         return {'FINISHED'}
 
 
@@ -1010,31 +1033,30 @@ class VIEW3D_PT_expy_retarget_custom(RetargetBasePanel, bpy.types.Panel):
         layout = self.layout
         ob = context.active_object
         skeleton = ob.data.expykit_retarget
-        
+        custom = skeleton.custom
+
         row = layout.row()
         row.operator("object.expy_kit_add_custom_bone", text="Add Active Bone")
-        
+
         row = layout.row()
         row.label(text="Custom bones with the same identifier will be matched when binding")
-        
-        # Get all custom bones
-        custom_bones = skeleton.custom.get_bones()
-        if custom_bones:
+
+        custom.migrate_legacy_bones()
+        _ = custom.ui_version
+
+        if custom.entries:
             box = layout.box()
             row = box.row()
             row.label(text="Custom Bones:")
-            
-            for identifier, bone_name in custom_bones:
-                row = box.row()
-                split = row.split(factor=0.4)
-                split.label(text=identifier + ":")
-                
-                bone_row = split.row(align=True)
-                # We need to dynamically access the property by name
-                bone_row.prop_search(skeleton.custom, identifier, ob.data, "bones", text="")
-                
+
+            for item in custom.entries:
+                row = box.row(align=True)
+                split = row.split(factor=0.35, align=True)
+                split.prop(item, "identifier", text="")
+                split.prop_search(item, "bone", ob.data, "bones", text="")
+
                 remove_op = row.operator("object.expy_kit_remove_custom_bone", text="", icon='X')
-                remove_op.identifier = identifier
+                remove_op.identifier = item.identifier
 
 
 def register_classes():

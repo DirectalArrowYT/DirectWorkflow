@@ -416,7 +416,7 @@ def collect_excluded_bone_names(armature, include_fingers=True):
     }
 
 
-def mirror_smash_pose_data(pose_data, excluded_bones=None):
+def mirror_smash_pose_data(pose_data, excluded_bones=None, source_bones=None, in_place=False):
     """
     Apply anim_flip to Smash-space pose dicts used by the idle pose library.
 
@@ -426,11 +426,13 @@ def mirror_smash_pose_data(pose_data, excluded_bones=None):
     excluded_bones = excluded_bones or set()
     mirrored = {}
     for bone_name, data in pose_data.items():
+        if source_bones is not None and bone_name not in source_bones:
+            continue
         if is_untouchable_mirror_bone(bone_name):
             continue
         if bone_name in excluded_bones:
             continue
-        target_name = swap_lr_bone_name(bone_name)
+        target_name = bone_name if in_place else swap_lr_bone_name(bone_name)
         flipped = dict(data)
         if "translation" in flipped:
             flipped["translation"] = flip_smash_translation(flipped["translation"])
@@ -440,7 +442,15 @@ def mirror_smash_pose_data(pose_data, excluded_bones=None):
     return mirrored
 
 
-def mirror_evaluated_pose(armature, excluded_bones=None, target_bones=None, pose_data=None, bone_filter=None):
+def mirror_evaluated_pose(
+    armature,
+    excluded_bones=None,
+    target_bones=None,
+    source_bones=None,
+    pose_data=None,
+    bone_filter=None,
+    in_place=False,
+):
     """
     Flip Smash TRS (cached nuanmb or recovered importer inverse), then apply
     with the same function Idle Pose Library Mirrored uses.
@@ -448,7 +458,12 @@ def mirror_evaluated_pose(armature, excluded_bones=None, target_bones=None, pose
     excluded_bones = excluded_bones or set()
     if pose_data is None:
         pose_data = smash_pose_data_from_armature(armature, bone_filter=bone_filter)
-    pose_data = mirror_smash_pose_data(pose_data, excluded_bones=excluded_bones)
+    pose_data = mirror_smash_pose_data(
+        pose_data,
+        excluded_bones=excluded_bones,
+        source_bones=source_bones,
+        in_place=in_place,
+    )
     return apply_smash_pose_data(
         armature,
         pose_data,

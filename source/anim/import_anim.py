@@ -17,8 +17,16 @@ from bpy.props import IntProperty, StringProperty, BoolProperty, FloatProperty, 
 from bpy.types import Operator, Panel
 from mathutils import Matrix, Quaternion, Vector
 from ..model.import_model import get_blender_transform
-from ..blender_compat import assign_action, draw_progress
-from .fcurve_compat import new_fcurve
+from ..blender_compat import assign_action, draw_progress, ensure_action_slot
+from .fcurve_compat import find_fcurve, new_fcurve, style_material_fcurve, style_visibility_fcurve
+from .raw_anim import (
+    RAW_ANIM_EXTENSION,
+    import_raw_animation,
+    is_fighter_motion_body_path,
+    refresh_raw_animation_import_list,
+    schedule_raw_animation_list_refresh,
+    get_raw_anim_import_directory,
+)
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -27,7 +35,170 @@ if TYPE_CHECKING:
     from ..model.material.sub_matl_data import SUB_PG_sub_matl_data
     from ..blender_property_extensions import SubSceneProperties
 
+ANIM_FOLDER_KEY = "sub_anim_import_folder"
+_last_anim_sync_ptr = 0
+
+
+def fill_animation_import_list(ssp, folder):
+    ssp.animation_import_files.clear()
+    if not folder or not os.path.isdir(folder):
+        ssp.animation_import_folder_path = folder or ""
+        return 0
+    ssp.animation_import_folder_path = folder
+    count = 0
+    try:
+        names = sorted(
+            name for name in os.listdir(folder) if name.endswith(".nuanmb")
+        )
+    except OSError:
+        return 0
+    for anim_file in names:
+        anim_item = ssp.animation_import_files.add()
+        anim_item.name = os.path.splitext(anim_file)[0]
+        anim_item.path = str(Path(folder) / anim_file)
+        count += 1
+    return count
+
+
+def bind_anim_folder_to_armature(armature, folder):
+    if armature is None or not folder:
+        return
+    try:
+        armature[ANIM_FOLDER_KEY] = folder
+        if armature.data is not None:
+            armature.data[ANIM_FOLDER_KEY] = folder
+    except Exception:
+        pass
+
+
+def anim_folder_for_armature(armature):
+    if armature is None:
+        return ""
+    folder = armature.get(ANIM_FOLDER_KEY, "") or ""
+    if folder:
+        return folder
+    data = getattr(armature, "data", None)
+    if data is not None:
+        folder = data.get(ANIM_FOLDER_KEY, "") or ""
+        if folder:
+            return folder
+    smash = armature.get("sub_smash_model_folder", "") or ""
+    if data is not None and not smash:
+        smash = data.get("sub_smash_model_folder", "") or ""
+    if smash:
+        motion = smash.replace("model", "motion")
+        if os.path.isdir(motion):
+            nuanmb = [name for name in os.listdir(motion) if name.endswith(".nuanmb")]
+            if nuanmb:
+                return motion
+            body = Path(motion) / "body" if os.path.basename(motion) != "body" else Path(motion)
+            if not str(body).endswith("body"):
+                fighter = Path(smash).parent.parent.parent
+                body = fighter / "motion" / "body"
+            if body.is_dir():
+                subs = [name for name in os.listdir(body) if os.path.isdir(body / name)]
+                if subs:
+                    return str(body / subs[0])
+    return ""
+
+
+def sync_anim_importer_to_active(context=None):
+    global _last_anim_sync_ptr
+    context = context or bpy.context
+    obj = getattr(context, "object", None)
+    if obj is None or getattr(obj, "type", "") != "ARMATURE":
+        return
+    try:
+        ptr = int(obj.as_pointer())
+    except Exception:
+        ptr = 0
+    if ptr == _last_anim_sync_ptr:
+        return
+    folder = anim_folder_for_armature(obj)
+    if not folder:
+        _last_anim_sync_ptr = ptr
+        return
+    ssp = getattr(getattr(context, "scene", None), "sub_scene_properties", None)
+    if ssp is None:
+        return
+    current = getattr(ssp, "animation_import_folder_path", "") or ""
+    if os.path.normcase(os.path.normpath(current)) == os.path.normcase(os.path.normpath(folder)):
+        _last_anim_sync_ptr = ptr
+        return
+    fill_animation_import_list(ssp, folder)
+    try:
+        from .raw_anim import refresh_raw_animation_import_list
+        refresh_raw_animation_import_list(ssp)
+    except Exception:
+        pass
+    _last_anim_sync_ptr = ptr
+
+
+def import_animation_file(
+    context: bpy.types.Context,
+    operator: bpy.types.Operator,
+    obj: bpy.types.Object,
+    filepath: str,
+    include_transform: bool,
+    include_material: bool,
+    include_visibility: bool,
+    first_frame: int,
+) -> bool:
+    def refresh_smash_viewport():
+        # Action assignment can update Blender at the current frame without a
+        # frame-change event. Make the native Smash model consume that pose on
+        # its very next draw instead of waiting for playback to start.
+        try:
+            from ..extras.smash_viewport import invalidate_animation_state
+            invalidate_animation_state()
+        except Exception:
+            pass
+
+    if filepath.lower().endswith(RAW_ANIM_EXTENSION):
+        if obj.type != 'ARMATURE':
+            operator.report({'ERROR'}, 'Raw animation import requires an armature.')
+            return False
+        old_mode = context.mode
+        if old_mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE', toggle=False)
+        success = import_raw_animation(context, obj, filepath, operator)
+        if context.mode != old_mode:
+            bpy.ops.object.mode_set(mode=old_mode, toggle=False)
+        if success:
+            refresh_smash_viewport()
+        return success
+
+    if obj.type == 'ARMATURE':
+        old_mode = context.mode
+        if old_mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE', toggle=False)
+        import_model_anim(
+            context,
+            filepath,
+            include_transform,
+            include_material,
+            include_visibility,
+            first_frame,
+            armature_object=obj,
+        )
+        if context.mode != old_mode:
+            bpy.ops.object.mode_set(mode=old_mode, toggle=False)
+    else:
+        import_camera_anim(operator, context, filepath, first_frame)
+    refresh_smash_viewport()
+    return True
+
+
 class SUB_UL_animation_import_list(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            layout.label(text=item.name)
+        elif self.layout_type in {'GRID'}:
+            layout.alignment = 'CENTER'
+            layout.label(text=item.name)
+
+
+class SUB_UL_raw_animation_import_list(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             layout.label(text=item.name)
@@ -174,12 +345,16 @@ class SUB_OP_import_all_animations(bpy.types.Operator):
         else:
             try:
                 obj = context.object
-                if obj.type == 'ARMATURE':
-                    import_model_anim(context, anim_item.path,
-                                    self.include_transform, self.include_material,
-                                    self.include_visibility, self.first_frame)
-                else:
-                    import_camera_anim(self, context, anim_item.path, self.first_frame)
+                import_animation_file(
+                    context,
+                    self,
+                    obj,
+                    anim_item.path,
+                    self.include_transform,
+                    self.include_material,
+                    self.include_visibility,
+                    self.first_frame,
+                )
                 
                 self.imported_count += 1
                 
@@ -305,20 +480,188 @@ class SUB_OP_import_selected_anim(bpy.types.Operator):
         
         use_keyframe_insert_auto = bpy.context.scene.tool_settings.use_keyframe_insert_auto
         bpy.context.scene.tool_settings.use_keyframe_insert_auto = False
-        if obj.type == 'ARMATURE':
-            # Theres a bpy.ops in import_model_anim that requires being in pose mode
-            # The mode setting stuff should be removed when the bpy.ops is no longer required
-            old_mode = context.mode
-            bpy.ops.object.mode_set(mode='POSE', toggle=False)
-            import_model_anim(context, selected_anim.path,
-                                    include_transform, include_material,
-                                    include_visibility, first_frame)
-            bpy.ops.object.mode_set(mode=old_mode, toggle=False)
-        else:
-            import_camera_anim(self, context, selected_anim.path, first_frame)
+        import_animation_file(
+            context,
+            self,
+            obj,
+            selected_anim.path,
+            include_transform,
+            include_material,
+            include_visibility,
+            first_frame,
+        )
         bpy.context.scene.tool_settings.use_keyframe_insert_auto = use_keyframe_insert_auto
         
         return {'FINISHED'}
+
+
+class SUB_OP_browse_raw_animation_folder(Operator):
+    bl_idname = 'sub.browse_raw_animation_folder'
+    bl_label = 'Browse Raw Animation Folder'
+    bl_options = {'UNDO'}
+
+    directory: StringProperty(subtype="DIR_PATH")
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'ARMATURE' and obj.select_get()
+
+    def invoke(self, context, _event):
+        ssp = context.scene.sub_scene_properties
+        if ssp.raw_animation_import_folder_path:
+            self.directory = ssp.raw_animation_import_folder_path
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        ssp = context.scene.sub_scene_properties
+        folder_path = refresh_raw_animation_import_list(ssp, self.directory)
+        if folder_path and os.path.isdir(folder_path):
+            count = len(ssp.raw_animation_import_files)
+            self.report({'INFO'}, f'Found {count} raw animation(s) in: {folder_path}')
+        elif folder_path:
+            self.report({'INFO'}, f'Raw animation folder not found yet: {folder_path}')
+        else:
+            self.report({'INFO'}, 'No raw animation folder selected.')
+        return {'FINISHED'}
+
+
+class SUB_OP_import_raw_anim_file(Operator, ImportHelper):
+    bl_idname = 'sub.import_raw_anim_file'
+    bl_label = 'Import Raw Animation File'
+    bl_description = 'Import a single .rawanim onto the selected armature'
+    bl_options = {'UNDO'}
+
+    filter_glob: StringProperty(default='*.rawanim', options={'HIDDEN'})
+    filename_ext = '.rawanim'
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'ARMATURE' and obj.select_get()
+
+    def invoke(self, context, event):
+        ssp = context.scene.sub_scene_properties
+        folder = get_raw_anim_import_directory(ssp)
+        if folder and os.path.isdir(folder):
+            self.filepath = os.path.join(folder, '')
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        obj = context.active_object
+        filepath = self.filepath
+        if not filepath or not os.path.isfile(filepath):
+            self.report({'ERROR'}, 'No raw animation file selected.')
+            return {'CANCELLED'}
+        if not filepath.lower().endswith(RAW_ANIM_EXTENSION):
+            self.report({'ERROR'}, 'Selected file is not a .rawanim.')
+            return {'CANCELLED'}
+        use_keyframe_insert_auto = context.scene.tool_settings.use_keyframe_insert_auto
+        context.scene.tool_settings.use_keyframe_insert_auto = False
+        try:
+            ok = import_animation_file(
+                context, self, obj, filepath, True, False, False, 1
+            )
+        finally:
+            context.scene.tool_settings.use_keyframe_insert_auto = use_keyframe_insert_auto
+        if not ok:
+            return {'CANCELLED'}
+        folder = os.path.dirname(filepath)
+        if folder:
+            refresh_raw_animation_import_list(context.scene.sub_scene_properties, folder)
+        self.report({'INFO'}, f"Imported raw animation: {os.path.basename(filepath)}")
+        return {'FINISHED'}
+
+
+class SUB_OP_refresh_raw_animation_list(Operator):
+    bl_idname = 'sub.refresh_raw_animation_list'
+    bl_label = 'Refresh Raw Animation List'
+    bl_options = {'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'ARMATURE' and obj.select_get()
+
+    def execute(self, context):
+        ssp = context.scene.sub_scene_properties
+        folder_path = refresh_raw_animation_import_list(ssp)
+        count = len(ssp.raw_animation_import_files)
+        if folder_path:
+            self.report({'INFO'}, f'Found {count} raw animation(s) in: {folder_path}')
+        else:
+            self.report({'INFO'}, 'No raw animation folder detected.')
+        return {'FINISHED'}
+
+
+class SUB_OP_import_selected_raw_anim(Operator):
+    bl_idname = 'sub.import_selected_raw_anim'
+    bl_label = 'Import Selected Raw Animation'
+    bl_options = {'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'ARMATURE':
+            return False
+        ssp = context.scene.sub_scene_properties
+        return (
+            len(ssp.raw_animation_import_files) > 0
+            and ssp.raw_animation_import_files_index < len(ssp.raw_animation_import_files)
+        )
+
+    def execute(self, context):
+        ssp = context.scene.sub_scene_properties
+        selected_anim = ssp.raw_animation_import_files[ssp.raw_animation_import_files_index]
+        if not Path(selected_anim.path).exists():
+            self.report({'ERROR'}, f"Raw animation file not found: {selected_anim.path}")
+            return {'CANCELLED'}
+
+        obj = context.active_object
+        use_keyframe_insert_auto = context.scene.tool_settings.use_keyframe_insert_auto
+        context.scene.tool_settings.use_keyframe_insert_auto = False
+        import_animation_file(context, self, obj, selected_anim.path, True, False, False, 1)
+        context.scene.tool_settings.use_keyframe_insert_auto = use_keyframe_insert_auto
+        self.report({'INFO'}, f"Imported raw animation: {selected_anim.name}")
+        return {'FINISHED'}
+
+
+class SUB_OP_import_all_raw_anims(Operator):
+    bl_idname = 'sub.import_all_raw_anims'
+    bl_label = 'Import All Raw Animations'
+    bl_options = {'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'ARMATURE':
+            return False
+        ssp = context.scene.sub_scene_properties
+        return len(ssp.raw_animation_import_files) > 0
+
+    def execute(self, context):
+        ssp = context.scene.sub_scene_properties
+        obj = context.active_object
+        use_keyframe_insert_auto = context.scene.tool_settings.use_keyframe_insert_auto
+        context.scene.tool_settings.use_keyframe_insert_auto = False
+
+        imported_count = 0
+        for anim_item in ssp.raw_animation_import_files:
+            if not Path(anim_item.path).exists():
+                self.report({'WARNING'}, f"Raw animation file not found: {anim_item.path}")
+                continue
+            try:
+                import_animation_file(context, self, obj, anim_item.path, True, False, False, 1)
+                imported_count += 1
+            except Exception as exc:
+                self.report({'ERROR'}, f"Failed to import raw animation '{anim_item.name}': {exc}")
+
+        context.scene.tool_settings.use_keyframe_insert_auto = use_keyframe_insert_auto
+        self.report({'INFO'}, f"Imported {imported_count}/{len(ssp.raw_animation_import_files)} raw animations")
+        return {'FINISHED'}
+
 
 class SUB_PT_import_anim(Panel):
     bl_space_type = 'VIEW_3D'
@@ -396,13 +739,105 @@ class SUB_PT_import_anim(Panel):
                     row = box.row()
                     row.operator(SUB_OP_import_all_animations.bl_idname, text="Import All Animations")
 
+
+class SUB_PT_raw_animations(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Ultimate'
+    bl_label = 'Raw Animations'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode in {"POSE", "OBJECT"}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        ssp = context.scene.sub_scene_properties
+        obj = context.active_object
+
+        help_box = layout.box()
+        help_box.label(text="What are Raw Animations?", icon='INFO')
+        col = help_box.column(align=True)
+        col.scale_y = 0.9
+        col.label(text="Sparse .rawanim files for animator round-trips.")
+        col.label(text="They keep pose/IK keys without baking every frame,")
+        col.label(text="unlike game .nuanmb exports.")
+
+        if obj is None or not obj.select_get() or obj.type != 'ARMATURE':
+            layout.label(text="Select an armature to import or export raw anims.")
+            return
+
+        if (
+            not ssp.raw_animation_import_folder_path
+            and is_fighter_motion_body_path(ssp.animation_import_folder_path)
+        ):
+            schedule_raw_animation_list_refresh(context)
+
+        import_box = layout.box()
+        import_box.label(text="Import", icon='IMPORT')
+
+        row = import_box.row()
+        row.operator(
+            SUB_OP_browse_raw_animation_folder.bl_idname,
+            icon='ZOOM_ALL',
+            text='Browse Raw Animation Folder',
+        )
+        row.operator(SUB_OP_refresh_raw_animation_list.bl_idname, icon='FILE_REFRESH', text='')
+
+        row = import_box.row()
+        row.operator(
+            SUB_OP_import_raw_anim_file.bl_idname,
+            icon='IMPORT',
+            text='Import Raw Animation File',
+        )
+
+        display_raw_folder = get_raw_anim_import_directory(ssp)
+        if display_raw_folder:
+            row = import_box.row()
+            row.label(text=f"Folder: {display_raw_folder}")
+
+        if len(ssp.raw_animation_import_files) > 0:
+            row = import_box.row()
+            row.template_list(
+                "SUB_UL_raw_animation_import_list",
+                "",
+                ssp,
+                "raw_animation_import_files",
+                ssp,
+                "raw_animation_import_files_index",
+                rows=3,
+            )
+            row = import_box.row()
+            row.operator(
+                SUB_OP_import_selected_raw_anim.bl_idname,
+                text="Import Selected Raw Animation",
+            )
+            row = import_box.row()
+            row.operator(
+                SUB_OP_import_all_raw_anims.bl_idname,
+                text="Import All Raw Animations",
+            )
+        elif display_raw_folder:
+            row = import_box.row()
+            row.label(text="No .rawanim files found in this folder.", icon='INFO')
+
+        export_box = layout.box()
+        export_box.label(text="Export", icon='EXPORT')
+        export_box.prop(ssp, "anim_include_raw_animation", text="Include Raw with .NUANMB Export")
+        row = export_box.row()
+        row.scale_y = 1.2
+        row.operator('sub.raw_anim_export', icon='EXPORT', text='Export Raw Animation')
+
+
 class SUB_OP_import_anim(Operator):
     bl_idname = 'sub.import_anim'
     bl_label = 'Import Anim'
     bl_options = {'UNDO'}
 
     filter_glob: StringProperty(
-        default='*.nuanmb',
+        default='*.nuanmb;*.rawanim',
         options={'HIDDEN'}
     )
     include_transform_track: BoolProperty(
@@ -455,7 +890,6 @@ class SUB_OP_import_anim(Operator):
         ssp.last_anim_import_dir = str(Path(self.filepath).parent)
         obj: bpy.types.Object = context.object
         
-        # Use scene properties instead of operator properties
         include_transform = ssp.anim_include_transform
         include_material = ssp.anim_include_material  
         include_visibility = ssp.anim_include_visibility
@@ -463,17 +897,16 @@ class SUB_OP_import_anim(Operator):
         
         use_keyframe_insert_auto = bpy.context.scene.tool_settings.use_keyframe_insert_auto
         bpy.context.scene.tool_settings.use_keyframe_insert_auto = False
-        if obj.type == 'ARMATURE':
-            # Theres a bpy.ops in import_model_anim that requires being in pose mode
-            # The mode setting stuff should be removed when the bpy.ops is no longer required
-            old_mode = context.mode
-            bpy.ops.object.mode_set(mode='POSE', toggle=False)
-            import_model_anim(context, self.filepath,
-                                    include_transform, include_material,
-                                    include_visibility, first_frame)
-            bpy.ops.object.mode_set(mode=old_mode, toggle=False)
-        else:
-            import_camera_anim(self, context, self.filepath, first_frame)
+        import_animation_file(
+            context,
+            self,
+            obj,
+            self.filepath,
+            include_transform,
+            include_material,
+            include_visibility,
+            first_frame,
+        )
         bpy.context.scene.tool_settings.use_keyframe_insert_auto = use_keyframe_insert_auto
 
         return {'FINISHED'}
@@ -640,20 +1073,53 @@ def reset_bones_to_rest_pose(armature):
         bpy.ops.object.mode_set(mode=old_mode, toggle=False)
 
 
+def remove_visibility_drivers(context):
+    remove_visibility_drivers_for_armature(context.object)
+
+
+def remove_visibility_drivers_for_armature(armature_object):
+    if armature_object is None:
+        return
+    mesh_children = [child for child in armature_object.children if child.type == 'MESH']
+    for mesh in mesh_children:
+        if not mesh.animation_data:
+            continue
+        drivers = mesh.animation_data.drivers
+        for driver in list(drivers):
+            if driver.data_path in {'hide_viewport', 'hide_render'}:
+                drivers.remove(driver)
+
+
 def import_model_anim(context: bpy.types.Context, filepath: str,
                       include_transform_track, include_material_track,
-                      include_visibility_track, first_blender_frame):
+                      include_visibility_track, first_blender_frame,
+                      armature_object: bpy.types.Object | None = None):
     # Load the anim data first with ssbh_data_py since blender setup relies on data from it
     ssbh_anim_data = ssbh_data_py.anim_data.read_anim(filepath)
     # Blender Action setup
-    arma: bpy.types.Object = context.object
+    arma: bpy.types.Object = armature_object or context.object
+    if arma is None or arma.type != 'ARMATURE':
+        raise ValueError("import_model_anim requires an armature object")
+    if context.view_layer.objects.active != arma:
+        for scene_obj in context.view_layer.objects:
+            scene_obj.select_set(scene_obj == arma)
+        context.view_layer.objects.active = arma
     if arma.animation_data is None: # For the bones
         arma.animation_data_create()
     if arma.data.animation_data is None: # For vis and mat tracks
         arma.data.animation_data_create()
 
     bone_action = bpy.data.actions.new(Path(filepath).name)
-    sap_action = bpy.data.actions.new(arma.name + ' ' + Path(filepath).name + ' SAP Data')
+    sap_action = bpy.data.actions.new(f"{arma.name} {bone_action.name} SAP Data")
+    try:
+        bone_action["sub_anim_source_path"] = str(Path(filepath).resolve())
+        sap_action["sub_anim_source_path"] = str(Path(filepath).resolve())
+    except Exception:
+        bone_action["sub_anim_source_path"] = filepath
+        sap_action["sub_anim_source_path"] = filepath
+    ensure_action_slot(bone_action, arma)
+    ensure_action_slot(sap_action, arma.data)
+    assign_action(arma.animation_data, bone_action)
 
     # Blender frame range setup
     scene = context.scene
@@ -717,30 +1183,18 @@ def import_model_anim(context: bpy.types.Context, filepath: str,
             bone_fcurves.set_keyframe_values_from_stash()
         bone_action["sub_smash_pose_cache"] = json.dumps(smash_pose_cache)
 
-    # Visibility group import stuff
     visibility_group = name_to_group_dict.get('Visibility') if include_visibility_track else None
+    material_group = name_to_group_dict.get('Material') if include_material_track else None
+
     if visibility_group:
         sap: SUB_PG_sub_anim_data = arma.data.sub_anim_properties
         for node in visibility_group.nodes:
-            # Setup vis_tracks in sub_anim_properties incase they haven't already been setup
             sub_vis_track_entry = sap.vis_track_entries.get(node.name)
             if sub_vis_track_entry is None:
                 sub_vis_track_entry = sap.vis_track_entries.add()
                 sub_vis_track_entry.name = node.name
-            # Setup FCurve
-            sub_vis_track_entry_index = sap.vis_track_entries.find(sub_vis_track_entry.name)
-            data_path = f'sub_anim_properties.vis_track_entries[{sub_vis_track_entry_index}].value'
-            fcurve = create_fcurve(sap_action, 'ARMATURE', data_path, action_group='Visibility')
-            # Now create and set the keyframe points
-            last_value = None
-            for index, value in enumerate(node.tracks[0].values):
-                if value != last_value:
-                    new_keyframe = fcurve.keyframe_points.insert(frame=scene.frame_start + index, value=value, options={'FAST'})
-                    new_keyframe.interpolation = 'CONSTANT'
-                    last_value = value
-            
+
     # Material group import stuff
-    material_group = name_to_group_dict.get('Material') if include_material_track else None
     if material_group:
         sap: SUB_PG_sub_anim_data = arma.data.sub_anim_properties
         # Initial Setup
@@ -769,7 +1223,43 @@ def import_model_anim(context: bpy.types.Context, filepath: str,
                     prop.sub_type = 'DIFFUSE_UV'
                 else:
                     raise TypeError(f'Unsupported track name {track.name}')
-        # Now import the values
+
+    # Bind the SAP action before writing visibility/material keys so Blender 5
+    # routes keyframe_insert/create_fcurve to the correct action slot.
+    if visibility_group or material_group:
+        assign_action(arma.data.animation_data, sap_action)
+
+    if visibility_group:
+        sap = arma.data.sub_anim_properties
+        for node in visibility_group.nodes:
+            if not node.tracks:
+                continue
+            entry_index = sap.vis_track_entries.find(node.name)
+            if entry_index < 0:
+                continue
+            data_path = f'sub_anim_properties.vis_track_entries[{entry_index}].value'
+            vis_entry = sap.vis_track_entries[entry_index]
+            last_value = None
+            for index, value in enumerate(node.tracks[0].values):
+                bool_value = bool(value)
+                if bool_value == last_value:
+                    continue
+                vis_entry.value = bool_value
+                arma.data.keyframe_insert(
+                    data_path=data_path,
+                    frame=scene.frame_start + index,
+                    group='Visibility',
+                )
+                last_value = bool_value
+            fcurve = find_fcurve(sap_action, data_path, id_type='ARMATURE')
+            if fcurve is not None:
+                for keyframe in fcurve.keyframe_points:
+                    keyframe.interpolation = 'CONSTANT'
+                style_visibility_fcurve(fcurve)
+                fcurve.update()
+
+    if material_group:
+        sap = arma.data.sub_anim_properties
         for node in material_group.nodes:
             mat_track: SUB_PG_mat_track = sap.mat_tracks.get(node.name)
             mat_track_index = sap.mat_tracks.find(mat_track.name)
@@ -786,6 +1276,8 @@ def import_model_anim(context: bpy.types.Context, filepath: str,
                         for index, value in enumerate(vector_index_values):
                             frame_and_value_flattened.extend([scene.frame_start + index, value])
                         fcurve.keyframe_points.foreach_set('co', frame_and_value_flattened)
+                        fcurve.update()
+                        style_material_fcurve(fcurve)
                 elif prop.sub_type == 'FLOAT':
                     data_path=f'sub_anim_properties.mat_tracks[{mat_track_index}].properties[{prop_index}].custom_float'
                     fcurve = create_fcurve(sap_action, 'ARMATURE', data_path, action_group=f'Material ({mat_track.name})')
@@ -794,6 +1286,8 @@ def import_model_anim(context: bpy.types.Context, filepath: str,
                     for index, value in enumerate(track.values):
                         frame_and_value_flattened.extend([scene.frame_start + index, value])
                     fcurve.keyframe_points.foreach_set('co', frame_and_value_flattened)
+                    fcurve.update()
+                    style_material_fcurve(fcurve)
                 elif prop.sub_type == 'BOOL':
                     data_path=f'sub_anim_properties.mat_tracks[{mat_track_index}].properties[{prop_index}].custom_bool'
                     fcurve = create_fcurve(sap_action, 'ARMATURE', data_path, action_group=f'Material ({mat_track.name})')
@@ -802,6 +1296,8 @@ def import_model_anim(context: bpy.types.Context, filepath: str,
                     for index, value in enumerate(track.values):
                         frame_and_value_flattened.extend([scene.frame_start + index, value])
                     fcurve.keyframe_points.foreach_set('co', frame_and_value_flattened)
+                    fcurve.update()
+                    style_material_fcurve(fcurve)
                 elif prop.sub_type == 'PATTERN':
                     data_path=f'sub_anim_properties.mat_tracks[{mat_track_index}].properties[{prop_index}].pattern_index'
                     fcurve = create_fcurve(sap_action, 'ARMATURE', data_path, action_group=f'Material ({mat_track.name})')
@@ -810,6 +1306,8 @@ def import_model_anim(context: bpy.types.Context, filepath: str,
                     for index, value in enumerate(track.values):
                         frame_and_value_flattened.extend([scene.frame_start + index, value])
                     fcurve.keyframe_points.foreach_set('co', frame_and_value_flattened)
+                    fcurve.update()
+                    style_material_fcurve(fcurve)
                 elif prop.sub_type == 'TEXTURE':
                     data_path=f'sub_anim_properties.mat_tracks[{mat_track_index}].properties[{prop_index}].texture_transform'
                     for index in (0,1,2,3,4):
@@ -829,10 +1327,12 @@ def import_model_anim(context: bpy.types.Context, filepath: str,
                         for index, value in enumerate(vector_index_values):
                             frame_and_value_flattened.extend([scene.frame_start + index, value])
                         fcurve.keyframe_points.foreach_set('co', frame_and_value_flattened)
+                        fcurve.update()
+                        style_material_fcurve(fcurve)
                 elif prop.sub_type == 'DIFFUSE_UV':
                     # TODO: implement support for diffuse UV transforms
                     pass
-    
+
     if visibility_group:
         setup_visibility_drivers(arma)
     if material_group:
@@ -841,6 +1341,14 @@ def import_model_anim(context: bpy.types.Context, filepath: str,
     # Assign actions (and slots on Blender 4.4+ / 5.x).
     assign_action(arma.animation_data, bone_action)
     assign_action(arma.data.animation_data, sap_action)
+
+    from .anim_data import mark_sap_sync_known
+    mark_sap_sync_known(arma)
+    try:
+        from ..extras.eye_rig import ensure_eye_live_preview
+        ensure_eye_live_preview(scene)
+    except Exception:
+        pass
 
 
 def get_raw_matrix(bone_to_node, bone, index, node) -> Matrix:
@@ -1077,7 +1585,8 @@ def import_camera_anim(operator, context:bpy.types.Context, filepath, first_blen
     if camera.animation_data is None:
         camera.animation_data_create()
     action = bpy.data.actions.new(action_name)
-    camera.animation_data.action = action
+    ensure_action_slot(action, camera)
+    assign_action(camera.animation_data, action)
     camera.matrix_local.identity()
     camera.rotation_mode = 'QUATERNION'
 
@@ -1167,17 +1676,17 @@ class SUB_OP_select_animation_folder(Operator):
         
         # First, try the direct selected path
         if anim_path.exists():
-            # Search for animation files (.nuanmb)
-            nuanmb_files = [f for f in os.listdir(anim_path) if f.endswith('.nuanmb')]
+            nuanmb_files = sorted(
+                file_name
+                for file_name in os.listdir(anim_path)
+                if file_name.endswith('.nuanmb')
+            )
             
-            # Add found animations to the list
             for anim_file in nuanmb_files:
                 anim_item = ssp.animation_import_files.add()
-                # Strip the .nuanmb extension from the displayed name
                 anim_item.name = os.path.splitext(anim_file)[0]
                 anim_item.path = str(anim_path / anim_file)
             
-            # If animations were found, report success
             if nuanmb_files:
                 self.report({'INFO'}, f'Found {len(nuanmb_files)} animations in: {anim_path}')
             # If no animations were found, check if we're in a fighter folder
@@ -1209,13 +1718,14 @@ class SUB_OP_select_animation_folder(Operator):
                                         # Update the stored animation path
                                         ssp.animation_import_folder_path = str(deep_anim_path)
                                         
-                                        # Search for animation files (.nuanmb)
-                                        deep_nuanmb_files = [f for f in os.listdir(deep_anim_path) if f.endswith('.nuanmb')]
+                                        deep_nuanmb_files = sorted(
+                                            file_name
+                                            for file_name in os.listdir(deep_anim_path)
+                                            if file_name.endswith('.nuanmb')
+                                        )
                                         
-                                        # Add found animations to the list
                                         for anim_file in deep_nuanmb_files:
                                             anim_item = ssp.animation_import_files.add()
-                                            # Strip the .nuanmb extension from the displayed name
                                             anim_item.name = os.path.splitext(anim_file)[0]
                                             anim_item.path = str(deep_anim_path / anim_file)
                                         
@@ -1234,6 +1744,11 @@ class SUB_OP_select_animation_folder(Operator):
                 self.report({'INFO'}, f'No animations found in: {anim_path}')
         else:
             self.report({'ERROR'}, f'Animation directory not found: {anim_path}')
+
+        refresh_raw_animation_import_list(ssp)
+        obj = getattr(context, "object", None)
+        if obj is not None and getattr(obj, "type", "") == "ARMATURE":
+            bind_anim_folder_to_armature(obj, ssp.animation_import_folder_path)
             
         return {'FINISHED'}
 

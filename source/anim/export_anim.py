@@ -7,8 +7,10 @@ import time
 import cProfile
 import pstats
 import os
+import stat
+import tempfile
 
-from mathutils import Matrix, Quaternion
+from mathutils import Euler, Matrix, Quaternion
 from bpy.types import Operator, Panel, Context, UIList
 from bpy.props import IntProperty, StringProperty, BoolProperty, CollectionProperty, PointerProperty, BoolVectorProperty
 
@@ -16,7 +18,18 @@ from pathlib import Path
 
 from ...dependencies import ssbh_data_py
 from .import_anim import get_hierarchy_order
-from .fcurve_compat import get_fcurves
+from .fcurve_compat import get_all_action_fcurves, get_fcurves, get_fcurves_for_assigned_slot
+from .raw_anim import (
+    ensure_fighter_raw_anim_directory,
+    ensure_rawanim_filename,
+    ensure_rawanim_filepath,
+    export_raw_animation,
+    get_anim_folder_path,
+    get_suggested_raw_anim_directory,
+    normalize_anim_stem,
+    resolve_raw_anim_export_path,
+    strip_rawanim_suffix,
+)
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -219,10 +232,10 @@ class SUB_PT_export_anim(Panel):
             elif obj.animation_data.action is None:
                 row.label(text=f'The selected {obj.type.lower()} has no action!', icon='ERROR')
             else:
+                ssp = context.scene.sub_scene_properties
                 row.operator(SUB_OP_anim_export.bl_idname, icon='EXPORT', text='Export Current Animation')
                 
                 # Add collapsible batch export section
-                ssp = context.scene.sub_scene_properties
                 box = layout.box()
                 header_row = box.row()
                 header_row.prop(ssp, "batch_export_actions_expanded", 
@@ -579,11 +592,8 @@ def sanitize_filename(filename):
 
 
 def strip_nuanmb_suffix(name):
-    """Remove every trailing .nuanmb so imported action names do not stack the extension."""
-    stripped = name
-    while stripped.lower().endswith('.nuanmb'):
-        stripped = stripped[:-7]
-    return stripped
+    """Remove .nuanmb, .rawanim, and Blender duplicate suffixes from a name."""
+    return normalize_anim_stem(name)
 
 
 def ensure_nuanmb_filename(filename):
@@ -597,6 +607,119 @@ def ensure_nuanmb_filepath(filepath):
     if directory:
         return os.path.join(directory, filename)
     return filename
+
+
+def export_raw_animation_for_object(
+    context: Context,
+    operator: Operator,
+    obj: bpy.types.Object,
+    filepath: str,
+    frame_start: int,
+    frame_end: int,
+) -> bool:
+    if obj.type != 'ARMATURE':
+        operator.report({'WARNING'}, 'Raw animation export is only supported for armatures.')
+        return False
+    if obj.animation_data is None or obj.animation_data.action is None:
+        operator.report({'ERROR'}, 'No action to export as raw animation.')
+        return False
+
+    raw_filepath = ensure_rawanim_filepath(filepath)
+    action = obj.animation_data.action
+    assigned = get_fcurves_for_assigned_slot(obj)
+    if not export_raw_animation(
+        obj,
+        action,
+        raw_filepath,
+        frame_start,
+        frame_end,
+        operator,
+    ):
+        return False
+
+    curve_hint = len(assigned) if assigned else "all-slots"
+    operator.report(
+        {'INFO'},
+        f"Successfully exported raw animation to {os.path.basename(raw_filepath)} "
+        f"(source curves: {curve_hint})",
+    )
+    return True
+
+
+class SUB_OP_raw_anim_export(Operator):
+    bl_idname = 'sub.raw_anim_export'
+    bl_label = 'Export Raw Animation'
+    bl_description = 'Export pose bone keyframes without baking every frame (.rawanim)'
+
+    filter_glob: StringProperty(
+        default='*.rawanim',
+        options={'HIDDEN'}
+    )
+    first_blender_frame: IntProperty(
+        name='Start Frame',
+        description='First exported frame',
+        default=1,
+    )
+    last_blender_frame: IntProperty(
+        name='End Frame',
+        description='Last exported frame',
+        default=1,
+    )
+    filepath: StringProperty(subtype="FILE_PATH")
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == 'ARMATURE'
+            and obj.animation_data is not None
+            and obj.animation_data.action is not None
+        )
+
+    def invoke(self, context: Context, _event):
+        action_name = strip_rawanim_suffix(context.active_object.animation_data.action.name)
+        safe_name = sanitize_filename(ensure_rawanim_filename(action_name))
+        self.first_blender_frame = context.scene.frame_start
+        self.last_blender_frame = context.scene.frame_end
+
+        ssp = context.scene.sub_scene_properties
+        raw_dir = get_suggested_raw_anim_directory(ssp)
+        if raw_dir:
+            ensure_fighter_raw_anim_directory(raw_dir)
+            self.filepath = os.path.join(raw_dir, safe_name)
+        else:
+            base_dir = get_anim_folder_path(ssp)
+            if base_dir:
+                self.filepath = os.path.join(base_dir, safe_name)
+            else:
+                self.filepath = safe_name
+
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "first_blender_frame")
+        layout.prop(self, "last_blender_frame")
+
+    def execute(self, context):
+        ssp = context.scene.sub_scene_properties
+        raw_filepath = ensure_rawanim_filepath(self.filepath)
+        ssp.last_anim_export_dir = os.path.dirname(raw_filepath)
+
+        obj = context.active_object
+        if not export_raw_animation_for_object(
+            context,
+            self,
+            obj,
+            raw_filepath,
+            self.first_blender_frame,
+            self.last_blender_frame,
+        ):
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
 
 class SUB_OP_anim_export(Operator):
     bl_idname = 'sub.anim_export'
@@ -804,6 +927,19 @@ class SUB_OP_anim_export(Operator):
                 self.transform_override_compensate_scale)  
 
         self.report({'INFO'}, f"Successfully exported animation to {os.path.basename(filepath)}")
+
+        if ssp.anim_include_raw_animation and obj.type == 'ARMATURE':
+            raw_filepath = resolve_raw_anim_export_path(filepath, ssp)
+            if not export_raw_animation_for_object(
+                context,
+                self,
+                obj,
+                raw_filepath,
+                self.first_blender_frame,
+                self.last_blender_frame,
+            ):
+                return {'CANCELLED'}
+
         return {'FINISHED'}
            
 class Location():
@@ -831,6 +967,43 @@ class Scale():
     def __repr__(self) -> str:
         return f'[{self.x=}, {self.y=}, {self.z=}]'
 
+class EulerXYZ():
+    def __init__(self, x, y, z):
+        self.x: float = x
+        self.y: float = y
+        self.z: float = z
+    def __repr__(self) -> str:
+        return f'[{self.x=}, {self.y=}, {self.z=}]'
+
+
+def _ssbh_quaternion(xyzw) -> Quaternion:
+    return Quaternion((xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
+
+
+def _rotation_basis_matrix(bone, index, quat_values, euler_values, bones_with_euler, bones_with_quat):
+    mode = getattr(bone, 'rotation_mode', 'QUATERNION') or 'QUATERNION'
+    use_euler = (
+        bone.name in bones_with_euler
+        and mode not in {'QUATERNION', 'AXIS_ANGLE'}
+    )
+    if not use_euler and bone.name in bones_with_euler and bone.name not in bones_with_quat:
+        use_euler = True
+    if use_euler:
+        euler = euler_values[bone.name][index]
+        rot = Euler((euler.x, euler.y, euler.z), mode)
+        return rot.to_matrix().to_4x4()
+    rot_basis_vec = quat_values[bone.name][index]
+    rot_basis_quat = Quaternion((rot_basis_vec.w, rot_basis_vec.x, rot_basis_vec.y, rot_basis_vec.z))
+    if rot_basis_quat.magnitude > 1e-8:
+        rot_basis_quat.normalize()
+    else:
+        rot_basis_quat = Quaternion((1.0, 0.0, 0.0, 0.0))
+    return rot_basis_quat.to_matrix().to_4x4()
+
+_Y_UP_TO_Z_UP = Matrix.Rotation(math.radians(90.0), 4, 'X')
+_X_MAJOR_TO_Y_MAJOR = Matrix.Rotation(math.radians(-90.0), 4, 'Z')
+
+
 def get_smash_transform(m) -> Matrix:
     # This is the inverse of the get_blender_transform permutation matrix.
     # https://en.wikipedia.org/wiki/Matrix_similarity
@@ -846,6 +1019,11 @@ def get_smash_transform(m) -> Matrix:
     except ValueError:
         # If inversion fails, the matrix is singular - this shouldn't happen for p but handle it gracefully
         raise ValueError("Cannot compute Smash transform: input matrix is singular")
+
+
+def get_smash_root_matrix(blender_pose_matrix) -> Matrix:
+    """Inverse of anim import: bone.matrix = RotX(90) @ smash @ RotZ(-90)."""
+    return _Y_UP_TO_Z_UP.inverted() @ blender_pose_matrix @ _X_MAJOR_TO_Y_MAJOR.inverted()
 
 def transform_group_fix_floating_point_inaccuracies(trans_group: ssbh_data_py.anim_data.GroupData):
     from math import isclose
@@ -875,6 +1053,71 @@ def transform_group_fix_floating_point_inaccuracies(trans_group: ssbh_data_py.an
                 if isclose(current_transform.translation[i], first_transform.translation[i], abs_tol=.00001):
                     track.values[current_transform_index].translation[i] = first_transform.translation[i]
 
+def save_ssbh_anim_data(ssbh_anim_data, filepath, operator=None):
+    """Write a .nuanmb, recovering from Windows file locks when possible."""
+    filepath = os.path.abspath(os.fspath(filepath))
+    directory = os.path.dirname(filepath)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    def _is_access_denied(exc):
+        text = str(exc).lower()
+        if "access is denied" in text or "os error 5" in text:
+            return True
+        return int(getattr(exc, "winerror", 0) or getattr(exc, "errno", 0) or 0) == 5
+
+    try:
+        if os.path.isfile(filepath):
+            try:
+                os.chmod(filepath, stat.S_IWRITE | stat.S_IREAD)
+            except Exception:
+                pass
+        ssbh_anim_data.save(filepath)
+        return filepath
+    except Exception as exc:
+        if not _is_access_denied(exc):
+            raise
+
+    fd, tmp_path = tempfile.mkstemp(prefix="smash_anim_", suffix=".nuanmb", dir=directory or None)
+    os.close(fd)
+    try:
+        ssbh_anim_data.save(tmp_path)
+        try:
+            os.replace(tmp_path, filepath)
+            return filepath
+        except Exception:
+            pass
+        base, ext = os.path.splitext(filepath)
+        alt = filepath
+        for index in range(1, 50):
+            alt = f"{base}_{index}{ext}"
+            if not os.path.exists(alt):
+                break
+        try:
+            os.replace(tmp_path, alt)
+            if operator is not None:
+                operator.report(
+                    {'WARNING'},
+                    f"Could not overwrite {filepath} because Windows locked it. Saved as {os.path.basename(alt)} instead. Close SSBH Editor or the game and try again if you need the original name.",
+                )
+            return alt
+        except Exception:
+            pass
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+    message = (
+        f"Access denied writing {filepath}. Close any program using that file "
+        "(SSBH Editor, Smash, Explorer preview) and export again."
+    )
+    if operator is not None:
+        operator.report({'ERROR'}, message)
+    raise PermissionError(message)
+
+
 def uv_transform_equality(a: ssbh_data_py.anim_data.UvTransform, b: ssbh_data_py.anim_data.UvTransform) -> bool:
     if a.rotation != b.rotation:
         return False
@@ -894,8 +1137,7 @@ def does_armature_data_have_fcurves(arma: bpy.types.Object) -> bool:
     if arma.data.animation_data.action is None:
         return False
     
-    fcurves = get_fcurves(arma.data.animation_data.action)
-    return fcurves is not None and len(fcurves) > 0
+    return len(get_all_action_fcurves(arma.data.animation_data.action)) > 0
 
 def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.types.Object, filepath, include_transform_track, include_material_track, include_visibility_track, first_blender_frame, last_blender_frame, transform_compensate_scale: bool = False, transform_override_translation: bool = False, transform_override_rotation: bool = False, transform_override_scale: bool = False, transform_override_compensate_scale: bool = False, override_bone_names: list[str] | None = None, use_exclude_list: bool = True):
     # SSBH Anim Setup
@@ -909,14 +1151,21 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         # Create value dicts ahead of time
         bone_name_to_location_values: dict[str, list[Location]] = {}
         bone_name_to_rotation_values: dict[str, list[Rotation]] = {}
+        bone_name_to_euler_values: dict[str, list[EulerXYZ]] = {}
         bone_name_to_scale_values: dict[str, list[Scale]] = {}
+        bones_with_quat: set[str] = set()
+        bones_with_euler: set[str] = set()
         bone_to_rel_matrix_local = {}
-        reordered_pose_bones = get_hierarchy_order(list(arma.pose.bones))
+        reordered_pose_bones = [
+            bone for bone in get_hierarchy_order(list(arma.pose.bones))
+            if not bone.name.startswith('BL_')
+        ]
 
         # Fill value dicts with default values. Not every bone will be animated, so for these the default values of a matrix basis will be needed
         for pose_bone in reordered_pose_bones:
             bone_name_to_location_values[pose_bone.name] = [Location(0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
             bone_name_to_rotation_values[pose_bone.name] = [Rotation(1.0, 0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
+            bone_name_to_euler_values[pose_bone.name] = [EulerXYZ(0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
             bone_name_to_scale_values[pose_bone.name] = [Scale(1.0, 1.0, 1.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
             if pose_bone.parent: # non-root bones
                 bone_to_rel_matrix_local[pose_bone] = pose_bone.parent.bone.matrix_local.inverted() @ pose_bone.bone.matrix_local
@@ -926,8 +1175,18 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         # Go through the pose bones' fcurves and store all the values at each frame.
         animated_pose_bones: set[bpy.types.PoseBone] = set()
         
+        def _ensure_export_bone(bone_name):
+            if bone_name in bone_name_to_location_values:
+                return
+            nframes = last_blender_frame - first_blender_frame + 1
+            bone_name_to_location_values[bone_name] = [Location(0.0, 0.0, 0.0) for _ in range(nframes)]
+            bone_name_to_rotation_values[bone_name] = [Rotation(1.0, 0.0, 0.0, 0.0) for _ in range(nframes)]
+            bone_name_to_euler_values[bone_name] = [EulerXYZ(0.0, 0.0, 0.0) for _ in range(nframes)]
+            bone_name_to_scale_values[bone_name] = [Scale(1.0, 1.0, 1.0) for _ in range(nframes)]
+            operator.report({'INFO'}, f"Added missing bone '{bone_name}' to animation export data")
+
         object_level_transform_reported = False
-        for fcurve in get_fcurves(arma.animation_data.action):
+        for fcurve in get_all_action_fcurves(arma.animation_data.action):
             regex = r'pose\.bones\[\"(.*)\"\]\.(.*)'
             matches = re.match(regex, fcurve.data_path)
             if matches is None: # A fcurve in the action that isn't a bone transform, such as the user keyframing the Armature Object itself.
@@ -943,17 +1202,12 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
                 operator.report(type={'WARNING'}, message=f"The fcurve with data path {fcurve.data_path} will not be exported, its format only partially matched the expected pattern of a bone fcurve.")
                 continue
             bone_name = matches.groups()[0]
+            if bone_name.startswith('BL_'):
+                continue
             transform_subtype = matches.groups()[1]
             if transform_subtype == 'location':
                 for index, frame in enumerate(range(first_blender_frame, last_blender_frame+1)):
-                    # Check if the bone exists in our dictionary before accessing it
-                    if bone_name not in bone_name_to_location_values:
-                        # Create entries for this bone if it doesn't exist (likely an IK bone)
-                        bone_name_to_location_values[bone_name] = [Location(0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        bone_name_to_rotation_values[bone_name] = [Rotation(1.0, 0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        bone_name_to_scale_values[bone_name] = [Scale(1.0, 1.0, 1.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        operator.report({'INFO'}, f"Added missing bone '{bone_name}' to animation export data")
-                    
+                    _ensure_export_bone(bone_name)
                     if fcurve.array_index == 0:
                         bone_name_to_location_values[bone_name][index].x = fcurve.evaluate(frame)
                     elif fcurve.array_index == 1:
@@ -961,15 +1215,9 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
                     elif fcurve.array_index == 2:
                         bone_name_to_location_values[bone_name][index].z = fcurve.evaluate(frame)
             elif transform_subtype == 'rotation_quaternion':
+                bones_with_quat.add(bone_name)
                 for index, frame in enumerate(range(first_blender_frame, last_blender_frame+1)):
-                    # Check if the bone exists in our dictionary before accessing it
-                    if bone_name not in bone_name_to_rotation_values:
-                        # Create entries for this bone if it doesn't exist (likely an IK bone)
-                        bone_name_to_location_values[bone_name] = [Location(0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        bone_name_to_rotation_values[bone_name] = [Rotation(1.0, 0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        bone_name_to_scale_values[bone_name] = [Scale(1.0, 1.0, 1.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        operator.report({'INFO'}, f"Added missing bone '{bone_name}' to animation export data")
-                        
+                    _ensure_export_bone(bone_name)
                     if fcurve.array_index == 0:
                         bone_name_to_rotation_values[bone_name][index].w = fcurve.evaluate(frame)
                     elif fcurve.array_index == 1:
@@ -978,16 +1226,19 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
                         bone_name_to_rotation_values[bone_name][index].y = fcurve.evaluate(frame)
                     elif fcurve.array_index == 3:
                         bone_name_to_rotation_values[bone_name][index].z = fcurve.evaluate(frame)
+            elif transform_subtype == 'rotation_euler':
+                bones_with_euler.add(bone_name)
+                for index, frame in enumerate(range(first_blender_frame, last_blender_frame+1)):
+                    _ensure_export_bone(bone_name)
+                    if fcurve.array_index == 0:
+                        bone_name_to_euler_values[bone_name][index].x = fcurve.evaluate(frame)
+                    elif fcurve.array_index == 1:
+                        bone_name_to_euler_values[bone_name][index].y = fcurve.evaluate(frame)
+                    elif fcurve.array_index == 2:
+                        bone_name_to_euler_values[bone_name][index].z = fcurve.evaluate(frame)
             elif transform_subtype == 'scale':
                 for index, frame in enumerate(range(first_blender_frame, last_blender_frame+1)):
-                    # Check if the bone exists in our dictionary before accessing it
-                    if bone_name not in bone_name_to_scale_values:
-                        # Create entries for this bone if it doesn't exist (likely an IK bone)
-                        bone_name_to_location_values[bone_name] = [Location(0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        bone_name_to_rotation_values[bone_name] = [Rotation(1.0, 0.0, 0.0, 0.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        bone_name_to_scale_values[bone_name] = [Scale(1.0, 1.0, 1.0) for _ in range(first_blender_frame, last_blender_frame + 1)]
-                        operator.report({'INFO'}, f"Added missing bone '{bone_name}' to animation export data")
-                        
+                    _ensure_export_bone(bone_name)
                     if fcurve.array_index == 0:
                         bone_name_to_scale_values[bone_name][index].x = fcurve.evaluate(frame)
                     elif fcurve.array_index == 1:
@@ -1073,29 +1324,40 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
                 # Get the matrix basis from the stored values of this frame.
                 trans_basis_vec = bone_name_to_location_values[bone.name][index]
                 trans_basis_mat = Matrix.Translation([trans_basis_vec.x, trans_basis_vec.y, trans_basis_vec.z])
-                rot_basis_vec = bone_name_to_rotation_values[bone.name][index]
-                rot_basis_quat = Quaternion([rot_basis_vec.w, rot_basis_vec.x, rot_basis_vec.y, rot_basis_vec.z])
-                rot_basis_mat = Matrix.Rotation(rot_basis_quat.angle, 4, rot_basis_quat.axis)
+                rot_basis_mat = _rotation_basis_matrix(
+                    bone,
+                    index,
+                    bone_name_to_rotation_values,
+                    bone_name_to_euler_values,
+                    bones_with_euler,
+                    bones_with_quat,
+                )
                 scale_basis_vec = bone_name_to_scale_values[bone.name][index]
                 scale_basis_mat = Matrix.Diagonal((scale_basis_vec.x, scale_basis_vec.y, scale_basis_vec.z, 1.0))
                 matrix_basis = Matrix(trans_basis_mat @ rot_basis_mat @ scale_basis_mat)
 
-                # Now we can calculate and update the world matrix.
-                if bone.parent is None: # Root bones
-                    bone_to_world_matrix[bone] = matrix_basis
-                else: # Non-root bones
-                    bone_to_world_matrix[bone] = bone_to_world_matrix[bone.parent] @ bone_to_rel_matrix_local[bone] @ matrix_basis
+                # Smash stores the full local transform. Blender fcurves store matrix_basis
+                # (the delta from rest). Root bones must go back through the same Y-up
+                # conversion import uses, including rest, or Trans identity re-imports as
+                # ~63° on Y.
+                parent_world = bone_to_world_matrix.get(bone.parent) if bone.parent else None
+                is_smash_root = parent_world is None
+                if is_smash_root:
+                    blender_pose = bone.bone.matrix_local @ matrix_basis
+                else:
+                    blender_pose = parent_world @ bone_to_rel_matrix_local[bone] @ matrix_basis
+                bone_to_world_matrix[bone] = blender_pose
 
                 # Now if theres a matching node, we can update the values for that node.
                 node = node_name_to_node.get(bone.name)
                 if node is not None:
-                    # Have to get the relative matrix from the stored matrixes, then transform that to smash orientation.
                     try:
-                        if bone.parent is None:
-                            raw_rel_matrix = bone_to_world_matrix[bone]
+                        if is_smash_root:
+                            smash_rel_matrix = get_smash_root_matrix(blender_pose)
                         else:
-                            raw_rel_matrix = bone_to_world_matrix[bone.parent].inverted() @ bone_to_world_matrix[bone]
-                        smash_rel_matrix = get_smash_transform(raw_rel_matrix)
+                            smash_rel_matrix = get_smash_transform(
+                                parent_world.inverted() @ blender_pose
+                            )
                         t,q,s = smash_rel_matrix.decompose()
                         transform = ssbh_data_py.anim_data.Transform(
                             [s.x, s.y, s.z],
@@ -1105,10 +1367,10 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
                         node.tracks[0].values.append(transform)
                         # Check for quaternion interpolation issues
                         if index > 0:
-                            pq = mathutils.Quaternion(node.tracks[0].values[index-1].rotation)
-                            cq = mathutils.Quaternion(node.tracks[0].values[index].rotation)
-                            if pq.dot(cq) < 0:
-                                node.tracks[0].values[index].rotation = [-c for c in node.tracks[0].values[index].rotation]
+                            prev = node.tracks[0].values[index-1].rotation
+                            curr = node.tracks[0].values[index].rotation
+                            if _ssbh_quaternion(prev).dot(_ssbh_quaternion(curr)) < 0:
+                                node.tracks[0].values[index].rotation = [-c for c in curr]
                     except ValueError as e:
                         # Matrix is not invertible - this can happen with zero/very small scales
                         frame_number = frame if 'frame' in locals() else first_blender_frame + index
@@ -1129,10 +1391,12 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         vis_track_index_to_name: dict[int, str] = {}
         vis_track_index_to_values: dict[int, list[bool]] = {}
         fcurve: bpy.types.FCurve
-        for fcurve in get_fcurves(arma.data.animation_data.action):
+        for fcurve in get_all_action_fcurves(arma.data.animation_data.action):
             regex = r'.*\[(\d*)\]\.value'
             matches = re.match(regex, fcurve.data_path)
             if matches is None: # Not a visibility fcurve, its probably a material track fcurve
+                continue
+            if not fcurve.data_path.startswith('sub_anim_properties.vis_track_entries'):
                 continue
             vis_track_index = int(matches.groups()[0])
             if vis_track_index >= len(sap.vis_track_entries): # this can happen if the user removes entries manually but not the fcurves
@@ -1165,7 +1429,7 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         # In addition, fcurves may only exist for a few indices of a CustomVector or TextureTransform, since the user may not have animated them all
         # Example: mat_name_prop_name_to_values['EyeL']['CustomVector31'] -> [[1.0,1.0,1.0,1.0], ...]
         mat_name_prop_name_to_values: dict[str, dict[str, list[CustomVector|CustomFloat|CustomBool|PatternIndex|TextureTransform]]] = {}
-        for fcurve in get_fcurves(arma.data.animation_data.action):
+        for fcurve in get_all_action_fcurves(arma.data.animation_data.action):
             regex = r"sub_anim_properties\.mat_tracks\[(\d+)\]\.properties\[(\d+)\](\.\w+)"
             matches = re.match(regex, fcurve.data_path)
             if matches is None: # The vis and mat track fcurves are in the same action, so its normal to not match every fcurve
@@ -1259,7 +1523,7 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
                     track.values = [track.values[0]]
     
     # Done!
-    ssbh_anim_data.save(filepath)        
+    save_ssbh_anim_data(ssbh_anim_data, filepath, operator) 
                 
 def export_camera_anim(context, operator, camera: bpy.types.Object, filepath, first_blender_frame, last_blender_frame, transform_compensate_scale: bool = False, transform_override_translation: bool = False, transform_override_rotation: bool = False, transform_override_scale: bool = False, transform_override_compensate_scale: bool = False):
     ssbh_anim_data = ssbh_data_py.anim_data.AnimData()
@@ -1311,4 +1575,4 @@ def export_camera_anim(context, operator, camera: bpy.types.Object, filepath, fi
     ssbh_anim_data.groups.append(transform_group)
     ssbh_anim_data.groups.append(camera_group)
 
-    ssbh_anim_data.save(filepath)
+    save_ssbh_anim_data(ssbh_anim_data, filepath, operator)

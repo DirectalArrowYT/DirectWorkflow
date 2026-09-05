@@ -17,6 +17,15 @@ V_OFFSET = 1.0
 _FOLD_EPS = 1e-10
 
 
+def _mesh_edit_or_object_context(context):
+    if context.mode in {"POSE", "EDIT_ARMATURE"}:
+        return False
+    active = getattr(context, "active_object", None)
+    if active is not None and active.type == "MESH":
+        return True
+    return any(obj.type == "MESH" for obj in getattr(context, "selected_objects", []) or [])
+
+
 def _iter_target_meshes(context):
     seen = set()
     objects = list(context.selected_objects)
@@ -25,24 +34,10 @@ def _iter_target_meshes(context):
         objects.append(active)
 
     for obj in objects:
-        if obj is None:
+        if obj is None or obj.type != "MESH" or obj.data in seen:
             continue
-        if obj.type == "MESH" and obj.data not in seen:
-            seen.add(obj.data)
-            yield obj
-        elif obj.type == "ARMATURE":
-            candidates = list(obj.children_recursive)
-            for other in getattr(context.scene, "objects", []):
-                if other.type != "MESH":
-                    continue
-                for modifier in other.modifiers:
-                    if modifier.type == "ARMATURE" and modifier.object == obj:
-                        candidates.append(other)
-                        break
-            for child in candidates:
-                if child.type == "MESH" and child.data not in seen:
-                    seen.add(child.data)
-                    yield child
+        seen.add(obj.data)
+        yield obj
 
 
 def _uvs_match(loop_a, loop_b, uv_layer):
@@ -340,6 +335,8 @@ def _unstack_uv_layer(bm, uv_layer):
 
 
 def unstack_uvs_on_mesh(obj):
+    if obj is None or obj.type != "MESH" or obj.data is None:
+        return 0
     mesh = obj.data
     if not mesh.uv_layers:
         return 0
@@ -375,18 +372,23 @@ class SUB_OP_unstack_uv_islands(Operator):
     bl_idname = "sub.unstack_uv_islands"
     bl_label = "Unstack UV Islands"
     bl_description = (
-        "Move truly stacked UV copies up by 1 UV unit. Packed neighbors stay put."
+        "Move truly stacked UV copies up by 1 UV unit on the selected mesh. "
+        "Does not run on armatures or bones."
     )
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
-        return any(True for _ in _iter_target_meshes(context))
+        return _mesh_edit_or_object_context(context)
 
     def execute(self, context):
+        if context.mode in {"POSE", "EDIT_ARMATURE"}:
+            self.report({"WARNING"}, "Unstack UV Islands only works on a mesh, not on bones.")
+            return {"CANCELLED"}
+
         meshes = list(_iter_target_meshes(context))
         if not meshes:
-            self.report({"WARNING"}, "Select a mesh or an armature with mesh children.")
+            self.report({"WARNING"}, "Select a mesh in Object or Edit Mesh mode.")
             return {"CANCELLED"}
 
         meshes_changed = 0
@@ -394,10 +396,16 @@ class SUB_OP_unstack_uv_islands(Operator):
         skipped_no_uv = 0
 
         for obj in meshes:
+            if obj.type != "MESH" or obj.data is None:
+                continue
             if not obj.data.uv_layers:
                 skipped_no_uv += 1
                 continue
-            moved = unstack_uvs_on_mesh(obj)
+            try:
+                moved = unstack_uvs_on_mesh(obj)
+            except Exception as exc:
+                self.report({"WARNING"}, f"Skipped {obj.name}: {exc}")
+                continue
             if moved:
                 meshes_changed += 1
                 islands_moved += moved

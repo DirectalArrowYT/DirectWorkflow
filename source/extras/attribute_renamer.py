@@ -48,6 +48,8 @@ class SUB_OP_rename_mesh_attributes(Operator):
         for selected_object in context.selected_objects:
             try:
                 for i, uv_layer in enumerate(selected_object.data.uv_layers):
+                    if uv_layer.name.startswith('.') or uv_layer.name.startswith('_sub_eye'):
+                        continue
                     if uv_layer.name not in smash_uv_names:
                         if i == 0:
                             # Only the first UV attribute can be assumed to be map1.

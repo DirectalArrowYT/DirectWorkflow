@@ -4,8 +4,8 @@ from bpy.props import EnumProperty, BoolProperty
 import logging
 import mathutils
 
-from ..anim.fcurve_compat import get_fcurves, new_fcurve, find_fcurve, remove_fcurve
-from ..blender_compat import is_armature_bone_selected, is_pose_bone_selected
+from ..anim.fcurve_compat import get_fcurves, get_all_action_fcurves, new_fcurve, find_fcurve, remove_fcurve, collect_actions_for_armatures
+from ..blender_compat import is_armature_bone_selected, is_pose_bone_selected, assign_action
 from .anim_flip import (
     collect_excluded_bone_names,
     collect_unchecked_custom_mirror_bones,
@@ -16,13 +16,14 @@ from .anim_flip import (
     load_smash_pose_cache,
     mirror_evaluated_pose,
     should_exclude_bone_from_mirroring,
+    smash_pose_data_from_armature,
     smash_pose_data_from_cache,
 )
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# Extra axes kept for the operator UI. Default Y uses Smash-space anim_flip instead.
+# Extra axes kept for the operator UI. Y uses the same fcurve mirror path as X/Z.
 NEGATE_DATA_PATH_XAXIS = (
     ('location', 0),
     ('rotation_quaternion', 2),
@@ -121,11 +122,22 @@ def _selected_pose_bone_names(context):
     if not context or not context.active_object or context.active_object.type != 'ARMATURE':
         return set()
     armature_obj = context.active_object
+    names = set()
     if context.selected_pose_bones:
-        return {bone.name for bone in context.selected_pose_bones}
+        names.update(bone.name for bone in context.selected_pose_bones)
     if armature_obj.mode == 'POSE':
-        return {pbone.name for pbone in armature_obj.pose.bones if is_pose_bone_selected(pbone)}
-    return {bone.name for bone in armature_obj.data.bones if is_armature_bone_selected(armature_obj, bone)}
+        names.update(
+            pbone.name for pbone in armature_obj.pose.bones if is_pose_bone_selected(pbone)
+        )
+        active = context.active_pose_bone
+        if active is not None and is_pose_bone_selected(active):
+            names.add(active.name)
+    else:
+        names.update(
+            bone.name for bone in armature_obj.data.bones
+            if is_armature_bone_selected(armature_obj, bone)
+        )
+    return names
 
 
 def _action_bone_names(act):
@@ -159,7 +171,144 @@ def _idle_library_pose_data(context, act):
     return None
 
 
-def mirror_action_smash_y(act, selected_bones_only=False, context=None, only_active_frame=False, include_fingers=False):
+def _should_use_smash_y_mirror(act, context, selected_bones_only, prefer_smash_y):
+    """Use Smash pose flip for Y when requested and doing a full-body mirror."""
+    return prefer_smash_y and not selected_bones_only
+
+
+def _mirror_y_axis(action, use_smash_y, smash_y_kwargs, fcurve_kwargs):
+    if use_smash_y:
+        mirror_action_smash_y(action, **smash_y_kwargs)
+        return True
+    mirror_action(action, axis='Y', **fcurve_kwargs)
+    return False
+
+
+def get_armature_actions(armature_object):
+    """Return pose actions for this armature, excluding SAP/_old backups."""
+    return collect_actions_for_armatures([armature_object])
+
+
+def _apply_hip_180_for_mirror_axis(armature, axis, only_active_frame, current_frame):
+    if axis in ('X', 'Y', 'Z'):
+        rotate_hip_180(armature, axis, only_active_frame=only_active_frame, current_frame=current_frame)
+    elif axis == 'XY':
+        rotate_hip_180(armature, 'X', only_active_frame=only_active_frame, current_frame=current_frame)
+        rotate_hip_180(armature, 'Y', only_active_frame=only_active_frame, current_frame=current_frame)
+    elif axis == 'XZ':
+        rotate_hip_180(armature, 'X', only_active_frame=only_active_frame, current_frame=current_frame)
+        rotate_hip_180(armature, 'Z', only_active_frame=only_active_frame, current_frame=current_frame)
+    elif axis == 'YZ':
+        rotate_hip_180(armature, 'Y', only_active_frame=only_active_frame, current_frame=current_frame)
+        rotate_hip_180(armature, 'Z', only_active_frame=only_active_frame, current_frame=current_frame)
+    elif axis == 'XYZ':
+        rotate_hip_180(armature, 'X', only_active_frame=only_active_frame, current_frame=current_frame)
+        rotate_hip_180(armature, 'Y', only_active_frame=only_active_frame, current_frame=current_frame)
+        rotate_hip_180(armature, 'Z', only_active_frame=only_active_frame, current_frame=current_frame)
+
+
+def apply_mirror_to_action(
+    context,
+    armature,
+    action,
+    axis,
+    *,
+    rotate_180=False,
+    selected_bones_only=False,
+    only_active_frame=False,
+    mirror_space='LOCAL',
+    include_fingers=False,
+    smash_y_anim_flip=False,
+    selected_bone_names=None,
+):
+    """Mirror one action on an armature. Returns (success, used_smash_y)."""
+    if axis == 'O':
+        return False, False
+    if not action or not get_all_action_fcurves(action):
+        return False, False
+
+    current_frame = context.scene.frame_current if only_active_frame else None
+    captured_bones = set(selected_bone_names or [])
+    if selected_bones_only:
+        if not captured_bones:
+            captured_bones = _selected_pose_bone_names(context)
+        if not captured_bones:
+            return False, False
+
+    smash_y_kwargs = dict(
+        selected_bones_only=selected_bones_only,
+        context=context,
+        only_active_frame=only_active_frame,
+        include_fingers=include_fingers,
+        selected_bone_names=captured_bones if selected_bones_only else None,
+    )
+    fcurve_kwargs = dict(
+        selected_bones_only=selected_bones_only,
+        context=context,
+        only_active_frame=only_active_frame,
+        mirror_space=mirror_space,
+        include_fingers=include_fingers,
+        selected_bone_names=captured_bones if selected_bones_only else None,
+    )
+    use_smash_y = _should_use_smash_y_mirror(
+        action, context, selected_bones_only, smash_y_anim_flip
+    )
+    used_smash_y = False
+
+    if axis == 'Y':
+        used_smash_y = _mirror_y_axis(action, use_smash_y, smash_y_kwargs, fcurve_kwargs)
+    elif axis in ('X', 'Z'):
+        mirror_action(action, axis=axis, **fcurve_kwargs)
+    elif axis == 'XY':
+        mirror_action(action, axis='X', **fcurve_kwargs)
+        used_smash_y = _mirror_y_axis(action, use_smash_y, smash_y_kwargs, fcurve_kwargs)
+    elif axis == 'XZ':
+        mirror_action(action, axis='X', **fcurve_kwargs)
+        mirror_action(action, axis='Z', **fcurve_kwargs)
+    elif axis == 'YZ':
+        used_smash_y = _mirror_y_axis(action, use_smash_y, smash_y_kwargs, fcurve_kwargs)
+        mirror_action(action, axis='Z', **fcurve_kwargs)
+    elif axis == 'XYZ':
+        mirror_action(action, axis='X', **fcurve_kwargs)
+        used_smash_y = _mirror_y_axis(action, use_smash_y, smash_y_kwargs, fcurve_kwargs)
+        mirror_action(action, axis='Z', **fcurve_kwargs)
+
+    if rotate_180:
+        _apply_hip_180_for_mirror_axis(armature, axis, only_active_frame, current_frame)
+
+    return True, used_smash_y
+
+
+def _frames_for_action(act, only_active_frame, scene, selected_bone_names=None):
+    if only_active_frame:
+        return [scene.frame_current]
+
+    if selected_bone_names:
+        frames = sorted({
+            int(round(keyframe.co[0]))
+            for fcurve in get_fcurves(act)
+            if extract_bone_name_from_path(fcurve.data_path) in selected_bone_names
+            for keyframe in fcurve.keyframe_points
+        })
+        if frames:
+            return frames
+
+    frames = sorted({
+        int(round(keyframe.co[0]))
+        for fcurve in get_fcurves(act)
+        for keyframe in fcurve.keyframe_points
+    })
+    return frames or [scene.frame_current]
+
+
+def mirror_action_smash_y(
+    act,
+    selected_bones_only=False,
+    context=None,
+    only_active_frame=False,
+    include_fingers=False,
+    selected_bone_names=None,
+):
     """
     Y-axis Smash Ultimate mirror: same Studio SB flip + importer as Idle Pose
     Library Mirrored. Prefers the Smash TRS cache written on nuanmb import.
@@ -175,41 +324,55 @@ def mirror_action_smash_y(act, selected_bones_only=False, context=None, only_act
         excluded_bones |= collect_unchecked_custom_mirror_bones(
             armature, getattr(ssp, 'mirror_custom_bones', [])
         )
+    source_bones = None
     target_bones = None
+    in_place = False
     if selected_bones_only:
-        target_bones = _selected_pose_bone_names(context)
-        if not target_bones:
+        selected_bones = set(selected_bone_names or [])
+        if not selected_bones and context is not None:
+            selected_bones = _selected_pose_bone_names(context)
+        if not selected_bones:
             print("Warning: No bones selected for 'Selected Bones Only' mode")
             return
+        source_bones = selected_bones
+        target_bones = selected_bones
+        in_place = True
+        excluded_bones -= source_bones
 
     scene = context.scene
     smash_cache = load_smash_pose_cache(act)
-    animated_bones = _action_bone_names(act)
-    if only_active_frame:
-        frames = [scene.frame_current]
-    else:
-        frames = sorted({
-            int(round(keyframe.co[0]))
-            for fcurve in get_fcurves(act)
-            for keyframe in fcurve.keyframe_points
-        })
-        if not frames:
-            frames = [scene.frame_current]
+    bone_filter = source_bones
+    if bone_filter is None:
+        animated_bones = _action_bone_names(act)
+        bone_filter = animated_bones or None
+
+    frames = _frames_for_action(
+        act,
+        only_active_frame,
+        scene,
+        selected_bone_names=source_bones,
+    )
 
     original_frame = scene.frame_current
     for frame in frames:
         if scene.frame_current != frame:
             scene.frame_set(frame)
         context.view_layer.update()
-        pose_data = smash_pose_data_from_cache(smash_cache, frame) if smash_cache else None
-        if pose_data is None:
-            pose_data = _idle_library_pose_data(context, act)
+        if in_place and source_bones:
+            # Read the selected bones directly from the evaluated pose at this frame.
+            pose_data = smash_pose_data_from_armature(armature, bone_filter=source_bones)
+        else:
+            pose_data = smash_pose_data_from_cache(smash_cache, frame) if smash_cache else None
+            if pose_data is None:
+                pose_data = _idle_library_pose_data(context, act)
         applied = mirror_evaluated_pose(
             armature,
             excluded_bones=excluded_bones,
             target_bones=target_bones,
+            source_bones=source_bones,
             pose_data=pose_data,
-            bone_filter=animated_bones or None,
+            bone_filter=bone_filter,
+            in_place=in_place,
         )
         keyframe_pose_bones(applied, frame)
 
@@ -217,9 +380,18 @@ def mirror_action_smash_y(act, selected_bones_only=False, context=None, only_act
         scene.frame_set(original_frame)
 
 
-def mirror_action(act, axis='X', selected_bones_only=False, context=None, only_active_frame=False, mirror_space='LOCAL', include_fingers=True):
+def mirror_action(
+    act,
+    axis='X',
+    selected_bones_only=False,
+    context=None,
+    only_active_frame=False,
+    mirror_space='LOCAL',
+    include_fingers=True,
+    selected_bone_names=None,
+):
     
-    if not (act and get_fcurves(act)):
+    if not (act and get_all_action_fcurves(act)):
         print("No Keyframes")
         return
     
@@ -229,22 +401,27 @@ def mirror_action(act, axis='X', selected_bones_only=False, context=None, only_a
         current_frame = context.scene.frame_current
     
     # Get selected bone names if filtering is enabled
-    selected_bone_names = set()
+    selected_bone_names = set(selected_bone_names or [])
     if selected_bones_only and context and context.active_object and context.active_object.type == 'ARMATURE':
-        armature_obj = context.active_object
-        # Try multiple methods to get selected bones for reliability
-        # Method 1: context.selected_pose_bones (works in pose mode with proper context)
-        if context.selected_pose_bones:
-            selected_bone_names = {bone.name for bone in context.selected_pose_bones}
-        # Method 2: Check pose bones directly for selection state
-        elif armature_obj.mode == 'POSE':
-            selected_bone_names = {pbone.name for pbone in armature_obj.pose.bones if is_pose_bone_selected(pbone)}
-        # Method 3: Check armature data bones for selection state
-        else:
-            selected_bone_names = {bone.name for bone in armature_obj.data.bones if is_armature_bone_selected(armature_obj, bone)}
-        
+        if not selected_bone_names:
+            armature_obj = context.active_object
+            if context.selected_pose_bones:
+                selected_bone_names = {bone.name for bone in context.selected_pose_bones}
+            elif armature_obj.mode == 'POSE':
+                selected_bone_names = {
+                    pbone.name for pbone in armature_obj.pose.bones if is_pose_bone_selected(pbone)
+                }
+            else:
+                selected_bone_names = {
+                    bone.name for bone in armature_obj.data.bones
+                    if is_armature_bone_selected(armature_obj, bone)
+                }
+
         if not selected_bone_names:
             print("Warning: No bones selected for 'Selected Bones Only' mode")
+            return
+
+    selected_only_set = selected_bone_names if selected_bones_only else set()
     
     # Get armature for bone exclusion checks
     armature = context.active_object if context and context.active_object and context.active_object.type == 'ARMATURE' else None
@@ -280,7 +457,7 @@ def mirror_action(act, axis='X', selected_bones_only=False, context=None, only_a
         # Step 1: Collect all source data first to prevent overwriting issues
         keyframe_data = []  # List of (source_path, target_path, array_index, value, left_handle, right_handle)
         
-        for fc in get_fcurves(act):
+        for fc in get_all_action_fcurves(act):
             data_path = fc.data_path
             array_index = fc.array_index
             path, _dot, attribute = data_path.rpartition('.')
@@ -288,24 +465,22 @@ def mirror_action(act, axis='X', selected_bones_only=False, context=None, only_a
             bone_name = extract_bone_name_from_path(path)
             
             # Check if this bone should be excluded from mirroring
-            if bone_name and (
+            if bone_name and bone_name not in selected_only_set and (
                 should_exclude_bone_from_mirroring(bone_name, armature, include_fingers)
                 or bone_name in custom_skip
             ):
                 continue
             
-            # Determine target data path (mirrored bone)
+            # Determine target data path (mirrored bone, or same bone when selected-only)
             target_data_path = data_path
             target_bone_name = bone_name
-            if path and (path in mirror_map):
+            if not selected_bones_only and path and (path in mirror_map):
                 target_data_path = "".join((mirror_map[path], _dot, attribute))
                 target_bone_name = extract_bone_name_from_path(mirror_map[path]) or bone_name
             
-            # Check if TARGET bone should be affected (selected bones only filter)
-            # This ensures only selected bones receive mirrored data
-            if selected_bones_only and target_bone_name:
-                if target_bone_name not in selected_bone_names:
-                    continue
+            # Check if SOURCE bone should be affected (selected bones only filter).
+            if selected_bones_only and bone_name and bone_name not in selected_bone_names:
+                continue
             
             # Find the keyframe at current frame
             current_kf = None
@@ -359,9 +534,9 @@ def mirror_action(act, axis='X', selected_bones_only=False, context=None, only_a
         # Full animation mirroring: collect all data first, delete fcurves, then create new ones
         # Step 1: Collect all fcurve data with mirrored values
         fcurve_data = []  # List of (target_path, array_index, keyframe_values, action_group)
-        fcurves_to_remove = []  # Track which fcurves to remove
+        paths_to_remove = set()  # (data_path, array_index)
         
-        for fc in get_fcurves(act):
+        for fc in get_all_action_fcurves(act):
             data_path = fc.data_path
             array_index = fc.array_index
 
@@ -372,28 +547,34 @@ def mirror_action(act, axis='X', selected_bones_only=False, context=None, only_a
             bone_name = extract_bone_name_from_path(path)
             
             # Check if this bone should be excluded from mirroring
-            if bone_name and (
+            if bone_name and bone_name not in selected_only_set and (
                 should_exclude_bone_from_mirroring(bone_name, armature, include_fingers)
                 or bone_name in custom_skip
             ):
                 continue
             
-            # Determine target path (mirrored bone)
+            # Determine target path (mirrored bone, or same bone when selected-only)
             target_data_path = data_path
             target_bone_name = bone_name
             
-            if path and (path in mirror_map):
+            if not selected_bones_only and path and (path in mirror_map):
                 target_data_path = "".join((mirror_map[path], _dot, attribute))
                 target_bone_name = extract_bone_name_from_path(mirror_map[path]) or bone_name
             
-            # Check if TARGET bone should be affected (selected bones only filter)
-            # This ensures only selected bones receive mirrored data
-            if selected_bones_only and target_bone_name:
-                if target_bone_name not in selected_bone_names:
-                    continue
+            # Check if SOURCE bone should be affected (selected bones only filter).
+            if selected_bones_only and bone_name and bone_name not in selected_bone_names:
+                continue
             
             # Studio SB anim_flip applies to Hip / Trans location as well.
             should_negate = (attribute, array_index) in negate_data_path_tuples
+            
+            if selected_bones_only and target_data_path == data_path:
+                for kf in fc.keyframe_points:
+                    if should_negate:
+                        kf.co[1] = -kf.co[1]
+                        kf.handle_left[1] = -kf.handle_left[1]
+                        kf.handle_right[1] = -kf.handle_right[1]
+                continue
             
             # Collect all keyframe data from this fcurve
             keyframe_values = []
@@ -415,11 +596,13 @@ def mirror_action(act, axis='X', selected_bones_only=False, context=None, only_a
             
             # Store the mirrored data
             fcurve_data.append((target_data_path, array_index, keyframe_values, target_bone_name))
-            fcurves_to_remove.append(fc)
+            paths_to_remove.add((data_path, array_index))
         
-        # Step 2: Remove all source fcurves
-        for fc in fcurves_to_remove:
-            remove_fcurve(act, fc)
+        # Step 2: Remove all source fcurves by path (safe on Blender 5 layered actions)
+        for data_path, array_index in paths_to_remove:
+            existing_fc = find_fcurve(act, data_path, index=array_index)
+            if existing_fc:
+                remove_fcurve(act, existing_fc)
         
         # Step 3: Create new fcurves with mirrored data
         for target_path, array_index, keyframe_values, action_group_name in fcurve_data:
@@ -587,7 +770,7 @@ class SUB_OT_mirror_action(Operator):
 
     selected_bones_only : BoolProperty(
         name="Selected Bones Only",
-        description="Mirror only selected bones (armatures only)",
+        description="Mirror only the selected bones in place (does not swap L/R sides)",
         default=False
     )
 
@@ -603,10 +786,64 @@ class SUB_OT_mirror_action(Operator):
         default=False
     )
 
+    smash_y_anim_flip : BoolProperty(
+        name="Smash Y Anim Flip",
+        description="Use Studio SB anim_flip for Y-axis (matches Idle Pose Library Mirrored). Off uses fcurve mirroring like X/Z",
+        default=False,
+    )
+
+    selected_bone_names: bpy.props.StringProperty(
+        name="Selected Bone Names",
+        description="Pose bones captured when the operator was invoked",
+        default="",
+        options={'HIDDEN'},
+    )
+
 
     @classmethod
     def poll(cls, context):
         return context.active_object
+
+    @staticmethod
+    def _parse_bone_names(name_string):
+        if not name_string:
+            return set()
+        return {name for name in name_string.split("|") if name}
+
+    @staticmethod
+    def _format_bone_names(bone_names):
+        return "|".join(sorted(bone_names))
+
+    def invoke(self, context, event):
+        if context.active_object and context.active_object.type == 'ARMATURE':
+            self.selected_bone_names = self._format_bone_names(
+                _selected_pose_bone_names(context)
+            )
+        else:
+            self.selected_bone_names = ""
+        ssp = getattr(context.scene, "sub_scene_properties", None)
+        if ssp is not None:
+            self.smash_y_anim_flip = ssp.mirror_smash_y_anim_flip
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "axis")
+        layout.prop(self, "rotate_180")
+        layout.prop(self, "selected_bones_only")
+        layout.prop(self, "only_active_frame")
+        layout.prop(self, "include_fingers")
+        if self.axis in ('Y', 'XY', 'YZ', 'XYZ'):
+            layout.prop(self, "smash_y_anim_flip")
+            if self.selected_bones_only and self.smash_y_anim_flip:
+                layout.label(text="Selected bones always use fcurve Y mirror", icon='INFO')
+
+        if self.selected_bones_only:
+            selected = self._parse_bone_names(self.selected_bone_names)
+            if selected:
+                layout.label(text=f"Bones: {', '.join(sorted(selected))}", icon='BONE_DATA')
+            else:
+                layout.label(text="Select pose bones first", icon='ERROR')
 
     def execute(self, context):
 
@@ -619,88 +856,209 @@ class SUB_OT_mirror_action(Operator):
         if not get_fcurves(context.active_object.animation_data.action):
             self.report({"ERROR"}, "No Keyframes")
             return {'CANCELLED'}
-        
-        # Get current frame for hip rotation
-        current_frame = context.scene.frame_current if self.only_active_frame else None
-        
-        # Check if selected bones only is enabled but no bones are selected
-        if self.selected_bones_only and context.active_object.type == 'ARMATURE':
-            armature_obj = context.active_object
-            has_selected = False
-            if context.selected_pose_bones:
-                has_selected = True
-            elif armature_obj.mode == 'POSE':
-                has_selected = any(is_pose_bone_selected(pbone) for pbone in armature_obj.pose.bones)
-            else:
-                has_selected = any(is_armature_bone_selected(armature_obj, bone) for bone in armature_obj.data.bones)
-            
-            if not has_selected:
+
+        armature = context.active_object
+        ssp = context.scene.sub_scene_properties
+        ssp.mirror_smash_y_anim_flip = self.smash_y_anim_flip
+
+        captured_bones = self._parse_bone_names(self.selected_bone_names)
+        if self.selected_bones_only and armature.type == 'ARMATURE':
+            selected_bones = captured_bones or _selected_pose_bone_names(context)
+            if not selected_bones:
                 self.report({"WARNING"}, "No bones selected. Select bones in Pose mode first.")
                 return {'CANCELLED'}
-        
-        # Get mirror space from scene properties, include_fingers from operator property
-        ssp = context.scene.sub_scene_properties
-        mirror_space = ssp.mirror_space
-        include_fingers = self.include_fingers
-        
-        action = context.active_object.animation_data.action
-        smash_y_kwargs = dict(
-            selected_bones_only=self.selected_bones_only,
-            context=context,
-            only_active_frame=self.only_active_frame,
-            include_fingers=include_fingers,
-        )
-        fcurve_kwargs = dict(
-            selected_bones_only=self.selected_bones_only,
-            context=context,
-            only_active_frame=self.only_active_frame,
-            mirror_space=mirror_space,
-            include_fingers=include_fingers,
-        )
+            captured_bones = selected_bones
 
-        # Apply mirroring
-        if self.axis == 'Y':
-            mirror_action_smash_y(action, **smash_y_kwargs)
-            if self.rotate_180:
-                rotate_hip_180(context.active_object, self.axis, only_active_frame=self.only_active_frame, current_frame=current_frame)
-        elif self.axis in ('X', 'Z'):
-            mirror_action(action, axis=self.axis, **fcurve_kwargs)
-            if self.rotate_180:
-                rotate_hip_180(context.active_object, self.axis, only_active_frame=self.only_active_frame, current_frame=current_frame)
-        elif self.axis == 'XY':
-            mirror_action(action, axis='X', **fcurve_kwargs)
-            mirror_action_smash_y(action, **smash_y_kwargs)
-            if self.rotate_180:
-                rotate_hip_180(context.active_object, 'X', only_active_frame=self.only_active_frame, current_frame=current_frame)
-                rotate_hip_180(context.active_object, 'Y', only_active_frame=self.only_active_frame, current_frame=current_frame)
-        elif self.axis == 'XZ':
-            mirror_action(action, axis='X', **fcurve_kwargs)
-            mirror_action(action, axis='Z', **fcurve_kwargs)
-            if self.rotate_180:
-                rotate_hip_180(context.active_object, 'X', only_active_frame=self.only_active_frame, current_frame=current_frame)
-                rotate_hip_180(context.active_object, 'Z', only_active_frame=self.only_active_frame, current_frame=current_frame)
-        elif self.axis == 'YZ':
-            mirror_action_smash_y(action, **smash_y_kwargs)
-            mirror_action(action, axis='Z', **fcurve_kwargs)
-            if self.rotate_180:
-                rotate_hip_180(context.active_object, 'Y', only_active_frame=self.only_active_frame, current_frame=current_frame)
-                rotate_hip_180(context.active_object, 'Z', only_active_frame=self.only_active_frame, current_frame=current_frame)
-        elif self.axis == 'XYZ':
-            mirror_action(action, axis='X', **fcurve_kwargs)
-            mirror_action_smash_y(action, **smash_y_kwargs)
-            mirror_action(action, axis='Z', **fcurve_kwargs)
-            if self.rotate_180:
-                rotate_hip_180(context.active_object, 'X', only_active_frame=self.only_active_frame, current_frame=current_frame)
-                rotate_hip_180(context.active_object, 'Y', only_active_frame=self.only_active_frame, current_frame=current_frame)
-                rotate_hip_180(context.active_object, 'Z', only_active_frame=self.only_active_frame, current_frame=current_frame)
-        # Skip 'O'; helps back and forth between poses
-        
-        if self.axis in ('Y', 'XY', 'YZ', 'XYZ'):
+        action = armature.animation_data.action
+        success, used_smash_y = apply_mirror_to_action(
+            context,
+            armature,
+            action,
+            self.axis,
+            rotate_180=self.rotate_180,
+            selected_bones_only=self.selected_bones_only,
+            only_active_frame=self.only_active_frame,
+            mirror_space=ssp.mirror_space,
+            include_fingers=self.include_fingers,
+            smash_y_anim_flip=self.smash_y_anim_flip,
+            selected_bone_names=captured_bones if self.selected_bones_only else None,
+        )
+        if not success:
+            self.report({"ERROR"}, "No Keyframes")
+            return {'CANCELLED'}
+
+        if used_smash_y:
             message = f"Action mirrored on {self.axis}-axis using Smash anim_flip."
         else:
-            message = f"Action mirrored on {self.axis}-axis using {mirror_space.lower()} space!"
+            message = f"Action mirrored on {self.axis}-axis using {ssp.mirror_space.lower()} space!"
         if self.rotate_180:
             message += f" Hip rotated 180° on {self.axis}-axis."
+        self.report({"INFO"}, message)
+        return {'FINISHED'}
+
+
+class SUB_OT_mirror_all_actions(Operator):
+    """Mirror every loaded animation on the active armature"""
+    bl_idname = "sub.mirror_all_actions"
+    bl_label = "Mirror All Loaded Animations"
+    bl_options = {"REGISTER", "UNDO"}
+
+    axis : EnumProperty(
+        name="Axis",
+        description="Select mirror axis",
+        default='Y',
+        items = (
+            ('X', 'X', "X axis"),
+            ('Y', 'Y', "Y axis"),
+            ('Z', 'Z', "Z axis"),
+            ('XY', 'XY', "Both XY axes"),
+            ('XZ', 'XZ', "Both XZ axes"),
+            ('YZ', 'YZ', "Both YZ axes"),
+            ('XYZ', 'XYZ', "All XYZ axes"),
+        )
+    )
+
+    rotate_180 : BoolProperty(
+        name="180 Rotate",
+        description="Rotate hip bone 180 degrees on selected axis after mirroring",
+        default=False
+    )
+
+    selected_bones_only : BoolProperty(
+        name="Selected Bones Only",
+        description="Mirror only the selected bones in place on every animation",
+        default=False
+    )
+
+    only_active_frame : BoolProperty(
+        name="Only Active Frame",
+        description="Mirror only keyframes at the current frame",
+        default=False
+    )
+
+    include_fingers : BoolProperty(
+        name="Include Fingers",
+        description="Include finger bones in the mirroring process",
+        default=False
+    )
+
+    smash_y_anim_flip : BoolProperty(
+        name="Smash Y Anim Flip",
+        description="Use Studio SB anim_flip for Y-axis on standard Smash rigs",
+        default=False,
+    )
+
+    selected_bone_names: bpy.props.StringProperty(
+        name="Selected Bone Names",
+        description="Pose bones captured when the operator was invoked",
+        default="",
+        options={'HIDDEN'},
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return obj and obj.type == 'ARMATURE' and context.mode in {'OBJECT', 'POSE'}
+
+    def invoke(self, context, event):
+        if context.object and context.object.type == 'ARMATURE':
+            self.selected_bone_names = SUB_OT_mirror_action._format_bone_names(
+                _selected_pose_bone_names(context)
+            )
+        else:
+            self.selected_bone_names = ""
+        ssp = getattr(context.scene, "sub_scene_properties", None)
+        if ssp is not None:
+            self.smash_y_anim_flip = ssp.mirror_smash_y_anim_flip
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        actions = get_armature_actions(context.object) if context.object else []
+        layout.label(text=f"Will process {len(actions)} animation(s)", icon='RENDER_ANIMATION')
+        layout.prop(self, "axis")
+        layout.prop(self, "rotate_180")
+        layout.prop(self, "selected_bones_only")
+        layout.prop(self, "only_active_frame")
+        layout.prop(self, "include_fingers")
+        if self.axis in ('Y', 'XY', 'YZ', 'XYZ'):
+            layout.prop(self, "smash_y_anim_flip")
+            if self.selected_bones_only and self.smash_y_anim_flip:
+                layout.label(text="Selected bones always use fcurve Y mirror", icon='INFO')
+        if self.selected_bones_only:
+            selected = SUB_OT_mirror_action._parse_bone_names(self.selected_bone_names)
+            if selected:
+                layout.label(text=f"Bones: {', '.join(sorted(selected))}", icon='BONE_DATA')
+            else:
+                layout.label(text="Select pose bones first", icon='ERROR')
+
+    def execute(self, context):
+        armature = context.object
+        ssp = context.scene.sub_scene_properties
+        actions = get_armature_actions(armature)
+        if not actions:
+            self.report({"ERROR"}, "No animations found for this armature")
+            return {'CANCELLED'}
+
+        captured_bones = SUB_OT_mirror_action._parse_bone_names(self.selected_bone_names)
+        if self.selected_bones_only:
+            selected_bones = captured_bones or _selected_pose_bone_names(context)
+            if not selected_bones:
+                self.report({"WARNING"}, "No bones selected. Select bones in Pose mode first.")
+                return {'CANCELLED'}
+            captured_bones = selected_bones
+
+        ssp.mirror_smash_y_anim_flip = self.smash_y_anim_flip
+
+        if not armature.animation_data:
+            armature.animation_data_create()
+
+        original_action = armature.animation_data.action
+        original_frame = context.scene.frame_current
+        context.view_layer.objects.active = armature
+        armature.select_set(True)
+
+        total_actions = len(actions)
+        context.window_manager.progress_begin(0, total_actions)
+        context.window.cursor_modal_set("WAIT")
+
+        processed = 0
+        skipped = 0
+        try:
+            for action_index, action in enumerate(actions):
+                context.window_manager.progress_update(action_index / total_actions)
+                assign_action(armature.animation_data, action)
+                success, _used_smash_y = apply_mirror_to_action(
+                    context,
+                    armature,
+                    action,
+                    self.axis,
+                    rotate_180=self.rotate_180,
+                    selected_bones_only=self.selected_bones_only,
+                    only_active_frame=self.only_active_frame,
+                    mirror_space=ssp.mirror_space,
+                    include_fingers=self.include_fingers,
+                    smash_y_anim_flip=self.smash_y_anim_flip,
+                    selected_bone_names=captured_bones if self.selected_bones_only else None,
+                )
+                if success:
+                    processed += 1
+                else:
+                    skipped += 1
+        finally:
+            context.window_manager.progress_end()
+            context.window.cursor_modal_restore()
+            if original_action:
+                assign_action(armature.animation_data, original_action)
+            context.scene.frame_set(original_frame)
+
+        if processed == 0:
+            self.report({"ERROR"}, "No animations were mirrored")
+            return {'CANCELLED'}
+
+        message = f"Mirrored {processed}/{total_actions} animation(s) on {self.axis}-axis"
+        if skipped:
+            message += f" ({skipped} skipped, no keyframes)"
         self.report({"INFO"}, message)
         return {'FINISHED'}
 
@@ -766,6 +1124,7 @@ class SUB_OT_mirror_custom_bones_set_all(Operator):
 
 classes = (
     SUB_OT_mirror_action,
+    SUB_OT_mirror_all_actions,
     SUB_UL_mirror_custom_bones,
     SUB_OT_find_custom_mirror_bones,
     SUB_OT_mirror_custom_bones_set_all,

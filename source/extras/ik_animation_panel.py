@@ -26,11 +26,11 @@ class SUB_PT_ik_animation_tools(Panel):
 
         row = box.row(align=True)
         row.scale_y = 1.2
-        if hasattr(bpy.types, 'SUB_OP_quick_switch_ik_fk') or hasattr(bpy.ops, 'sub.quick_switch_ik_fk'):
+        if hasattr(bpy.types, 'SUB_OP_quick_switch_ik_fk'):
             row.operator("sub.quick_switch_ik_fk", text="Switch IK/FK", icon="ARROW_LEFTRIGHT")
 
         row = box.row(align=True)
-        if hasattr(bpy.types, 'SUB_OP_advanced_ik_fk_control') or hasattr(bpy.ops, 'sub.advanced_ik_fk_control'):
+        if hasattr(bpy.types, 'SUB_OP_advanced_ik_fk_control'):
             row.operator("sub.advanced_ik_fk_control", text="Advanced IK/FK Control", icon="CONSTRAINT_BONE")
 
         row = box.row(align=True)
@@ -44,7 +44,7 @@ class SUB_PT_ik_animation_tools(Panel):
         col.operator("sub.create_ik_bones", text="Create IK Bones (Arms + Legs)", icon="CONSTRAINT_BONE")
         col.operator("sub.create_arm_ik", text="Create Arm IK Bones", icon="CONSTRAINT_BONE")
         col.operator("sub.create_foot_ik", text="Create Foot IK Bones", icon="CONSTRAINT_BONE")
-        if hasattr(bpy.types, 'SUB_OP_quick_switch_ik_fk') or hasattr(bpy.ops, 'sub.quick_switch_ik_fk'):
+        if hasattr(bpy.types, 'SUB_OP_quick_switch_ik_fk'):
             col.operator("sub.quick_switch_ik_fk", text="Switch IK/FK", icon="ARROW_LEFTRIGHT")
 
         # Animation Tools section

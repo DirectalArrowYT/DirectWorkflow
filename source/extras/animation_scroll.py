@@ -318,6 +318,7 @@ def draw_animation_scroll_button(self, context):
         icon = 'PLAY' if not is_running else 'PAUSE'
         label = 'Start Animation Scroll' if not is_running else 'Stop Animation Scroll'
         self.layout.operator('sub.toggle_animation_scroll_modal', text=label, icon=icon, depress=is_running)
+        self.layout.operator('sub.gif_or_photo', text='Gif or Photo', icon='RENDER_ANIMATION')
         try:
             from .face_picker import armature_has_face_picker_menu
             if armature_has_face_picker_menu(context):
