@@ -42,10 +42,11 @@ def is_entry_name_unique_in_collection_property(entry, collection) -> bool:
 def swing_bone_chain_name_update(self, context):
     sub_swing_data: SUB_PG_sub_swing_data = context.object.data.sub_swing_data
 
-    if is_entry_name_unique_in_collection_property(self, sub_swing_data.swing_bone_chains):
-       return 
-    
-    self.name = get_unique_name_for_entry_in_collection_property(self, sub_swing_data.swing_bone_chains)
+    if not is_entry_name_unique_in_collection_property(self, sub_swing_data.swing_bone_chains):
+        self.name = get_unique_name_for_entry_in_collection_property(self, sub_swing_data.swing_bone_chains)
+
+    from ..param_labels import add_hash_label
+    add_hash_label(self.name)
 
 
 class SUB_PG_armature_swing_bone(PropertyGroup):
@@ -75,6 +76,9 @@ def collision_object_name_update(self, context):
             base_name = matches.groups()[0]
             number = int(matches.groups()[1])
             self.name = f'{base_name}{number+1:003d}'
+
+    from ..param_labels import add_hash_label
+    add_hash_label(self.name)
          
 collision_types = (
     ('SPHERE', 'Sphere', 'Sphere'),
