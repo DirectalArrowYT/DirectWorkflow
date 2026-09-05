@@ -9,9 +9,9 @@ setup in four steps, each of which can be run on its own:
     3. Build    - create the sub_swing_data chains and fill in per-bone physics.
     4. Collide  - attach each swing bone to the collision shapes nearest it.
 
-Naming and parameter defaults are measured, not invented. Every vanilla
-swing.prc in the game dump (62 files, 508 chains, 1151 swing bones) was parsed
-to derive them; see PART_DEFAULTS and the note on _null in the build operator.
+Naming and physics are measured, not invented. Every vanilla swing.prc in the
+game dump was parsed to derive them; see swing_profiles.py for the parameter
+tables and the note on _null in the build operator for chain length.
 """
 
 import re
@@ -22,6 +22,8 @@ from bpy.props import (BoolProperty, CollectionProperty, FloatProperty,
                        IntProperty, PointerProperty, StringProperty)
 from bpy.types import Operator, Panel, PropertyGroup, UIList
 from mathutils import Vector
+
+from .swing_profiles import GENERIC_PROFILES, SWING_PROFILES
 
 # ---------------------------------------------------------------------------
 # Naming
@@ -159,69 +161,77 @@ def swing_bone_name(part, direction, index, is_null):
 # Physics defaults
 # ---------------------------------------------------------------------------
 
-# Median of every vanilla swing bone of that part, across all 62 fighters.
-# Pooling by part rather than by position is deliberate: the by-position
-# medians swing wildly because a 4-bone skirt and a 4-bone mantle want opposite
-# things, while within a part the values are tight. The positional shaping that
-# *is* consistent across parts is applied on top, in parameters_for().
-PART_DEFAULTS = {
-    #              air  water    minz    maxz    miny    maxy  ctip  croot  fric     goal    mass  grav  fall  wind
-    'Hair':       (5.0, 0.00,  -20.0,   40.0,  -22.5,   30.0, 0.30, 0.275, 0.30,    50.0,    1.0, 0.35, 1.00, 0.275),
-    'Headband':   (5.0, 0.00,  -20.0,   40.0,  -22.5,   30.0, 0.30, 0.275, 0.30,    50.0,    1.0, 0.35, 1.00, 0.275),
-    'ArmHair':    (8.0, 0.08,  -60.0,   60.0,  -90.0,   90.0, 0.50, 0.50,  0.30,     1.5,    0.5, 0.30, 1.80, 1.00),
-    'BustHair':  (16.0, 0.08,  -45.0,   90.0,  -40.0,   40.0, 0.45, 0.35,  0.30,     0.7,    0.5, 0.55, 2.50, 1.00),
-    'HairSide':  (60.0, 0.00,   -5.0,   50.0,  -10.0,   10.0, 0.50, 0.50,  0.30,   200.0,    0.0, 0.00, 1.00, 0.20),
-    'Skirt':      (4.0, 0.05,  -30.0,   90.0,  -30.0,   30.0, 0.25, 0.20,  0.30,    40.0,    0.8, 1.00, 4.00, 0.30),
-    'ShirtTail':  (5.0, 0.00,  -10.0,   60.0,  -20.0,   20.0, 0.20, 0.20,  0.30,    50.0,    1.0, 1.00, 4.00, 0.50),
-    'Mantle':     (4.5, 0.00, -120.0,  180.0, -180.0,  180.0, 0.30, 0.30,  0.30,    90.0,    1.0, 1.00, 2.50, 0.45),
-    'Coat':       (3.0, 0.00,  -10.0,   90.0,  -60.0,   60.0, 0.30, 0.30,  0.30,   100.0,    1.0, 1.00, 3.00, 0.15),
-    'Cape':       (3.0, 0.00,  -10.0,   90.0,  -60.0,   60.0, 0.30, 0.30,  0.30,   100.0,    1.0, 1.00, 3.00, 0.15),
-    'Sleeve':    (40.0, 0.02,  -10.0,   30.0,  -10.0,   10.0, 0.45, 0.20,  0.30,   100.0,    1.0, 0.10, 1.00, 0.20),
-    'Collar':     (8.0, 0.10,  -40.0,   52.5,  -37.5,   37.5, 0.20, 0.15,  0.30,   200.0,    1.0, 0.495, 1.00, 0.125),
-    'Belt':      (15.0, 0.00, -180.0,  180.0, -180.0,  180.0, 0.30, 0.30,  0.30,     1.0,    1.0, 1.00, 0.75, 0.70),
-    'Tail':      (60.0, 0.04, -180.0,  180.0, -180.0,  180.0, 0.50, 0.50,  0.30,  1200.0,    1.0, 0.10, 1.00, 0.00),
-    'Wing':      (60.0, 0.00,  -40.0,   50.0,  -40.0,   40.0, 0.50, 0.50,  0.30,     1.0,    1.0, 1.00, 1.00, 0.30),
-    'Scarf':      (8.0, 0.00,  -60.0,  120.0,  -45.0,   90.0, 0.50, 0.50,  1.00,     0.6,    1.0, 0.40, 1.00, 0.30),
-    'Hat':        (5.0, 0.00,  -27.5,   50.0,  -35.0,   35.0, 0.50, 0.50,  0.10,    35.0,    2.0, 0.35, 1.25, 0.20),
-    'Pias':      (60.0, 0.00,  -10.0,   30.0,  -45.0,   45.0, 0.50, 0.50,  0.30,     0.1,    0.0, 0.05, 0.10, 0.20),
-    'Bust':       (0.0, 0.00,   -2.0,    2.0,   -1.0,    1.0, 0.50, 0.35,  0.00,  2000.0, 1000.0, 0.00, 0.00, 0.00),
-}
-# Anything unrecognised falls back to the median over all 1151 vanilla bones.
-DEFAULT_PART = (6.0, 0.00, -35.0, 70.0, -30.0, 30.0, 0.40, 0.30, 0.30, 20.0, 1.0, 1.00, 1.375, 0.20)
+# Per-position vanilla profiles, keyed by (part, bone count). See
+# swing_profiles.py for how they were derived and why they are per-position.
+_PROFILE_FIELDS = (
+    'air_resistance', 'water_resistance', 'min_angle_z', 'max_angle_z',
+    'min_angle_y', 'max_angle_y', 'collision_size_tip', 'collision_size_root',
+    'friction_rate', 'goal_strength', 'inertial_mass', 'local_gravity',
+    'fall_speed_scale', 'wind_affect', 'ground_hit',
+)
 
-_FIELDS = ('air_resistance', 'water_resistance', 'min_angle_z', 'max_angle_z',
-           'min_angle_y', 'max_angle_y', 'collision_size_tip',
-           'collision_size_root', 'friction_rate', 'goal_strength',
-           'inertial_mass', 'local_gravity', 'fall_speed_scale', 'wind_affect')
+
+def _resample(rows, count):
+    """Stretch or squash a profile of len(rows) bones onto `count` bones.
+
+    Vanilla only ships certain (part, length) combinations, so a 5-bone hair
+    chain has to borrow the 4-bone shape. Sampling along the normalised root-to
+    -tip position keeps what matters - the goal strength falloff and the way
+    the angle limits open up - instead of repeating one bone's values.
+    """
+    m = len(rows)
+    if m == count:
+        return [tuple(r) for r in rows]
+    out = []
+    for i in range(count):
+        t = 0.0 if count == 1 else i / (count - 1)
+        pos = t * (m - 1)
+        lo = int(pos)
+        hi = min(lo + 1, m - 1)
+        frac = pos - lo
+        row = []
+        for a, b in zip(rows[lo], rows[hi]):
+            if a is None or b is None:
+                row.append(a if a is not None else b)
+            else:
+                row.append(a + (b - a) * frac)
+        out.append(tuple(row))
+    return out
+
+
+def _profile_rows(part, count):
+    """The best available vanilla profile for this part at this chain length."""
+    lengths = SWING_PROFILES.get(part)
+    if lengths:
+        if count in lengths:
+            return [tuple(r) for r in lengths[count]]
+        # Nearest length this part actually ships, preferring longer, since a
+        # longer profile carries more of the root-to-tip shape.
+        nearest = min(lengths, key=lambda n: (abs(n - count), -n))
+        return _resample(lengths[nearest], count)
+    if count in GENERIC_PROFILES:
+        return [tuple(r) for r in GENERIC_PROFILES[count]]
+    nearest = min(GENERIC_PROFILES, key=lambda n: (abs(n - count), -n))
+    return _resample(GENERIC_PROFILES[nearest], count)
 
 
 def parameters_for(part, index, count):
     """Physics for bone `index` of `count`, as a plain dict.
 
-    Three things vary with position in vanilla no matter which part it is, and
-    only these are shaped here:
-
-      goal_strength  falls steeply toward the tip - the root is anchored hard
-                     to the animation, the tip is free. Roughly 100/30/20 on
-                     3-bone chains, 190/80/50/40 on 4-bone.
-      ground_hit     off near the root, on for the outer half.
-      wind_affect    climbs toward the tip.
-
-    Everything else stays at the part's median, because the by-position medians
-    for those fields are dominated by which parts happen to use which chain
-    length rather than by position itself.
+    Values come straight from the vanilla profile for this part and chain
+    length. Nothing is synthesised: the falloff in goal strength and the way
+    the angle limits widen toward the tip are already in the data, and an
+    invented ramp on top of a pooled average is what made chains chatter
+    against their own angle limits.
     """
-    base = PART_DEFAULTS.get(part, DEFAULT_PART)
-    out = dict(zip(_FIELDS, base))
-
-    t = 0.0 if count <= 1 else index / (count - 1)
-
-    # Full strength at the root down to a fifth of it at the tip.
-    out['goal_strength'] = base[9] * (1.0 - 0.8 * t)
-    # Half at the root, full at the tip.
-    out['wind_affect'] = base[13] * (0.5 + 0.5 * t)
-    # Vanilla turns this on from the midpoint out; short chains leave it off.
-    out['ground_hit'] = bool(count > 2 and t >= 0.5)
+    rows = _profile_rows(part, count)
+    row = rows[max(0, min(index, len(rows) - 1))]
+    out = dict(zip(_PROFILE_FIELDS, row))
+    out['ground_hit'] = bool(round(out.get('ground_hit') or 0))
+    for key, fallback in (('inertial_mass', 1.0), ('air_resistance', 5.0),
+                          ('goal_strength', 100.0)):
+        if out.get(key) is None:
+            out[key] = fallback
     return out
 
 
@@ -806,8 +816,8 @@ class SUB_PT_auto_swing_bones(Panel):
         layout.separator()
         layout.operator('sub.auto_swing_run_all', icon='AUTO')
         info = layout.box()
-        info.label(text='Physics defaults are the median of every', icon='INFO')
-        info.label(text='vanilla swing bone of that part (508 chains).')
+        info.label(text='Physics come from vanilla chains of the', icon='INFO')
+        info.label(text='same part and length, per bone position.')
         info.label(text='Tune them in the Swing panel afterwards.')
 
 

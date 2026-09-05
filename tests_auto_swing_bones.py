@@ -1,5 +1,5 @@
 """Pure-logic tests: no Blender data needed, only the naming/parameter functions."""
-import sys, importlib.util, types, os
+import sys, importlib, importlib.util, types, os
 
 # Stub bpy hard enough that the module imports outside Blender.
 def stub():
@@ -30,9 +30,18 @@ def stub():
     sys.modules["mathutils"] = mu
 stub()
 
-PATH = r"C:/Users/Braden Shoup/AppData/Roaming/Blender Foundation/Blender/4.5/scripts/addons/smash-ultimate-blender-animation-workflow/source/extras/auto_swing_bones.py"
-spec = importlib.util.spec_from_file_location("asb", PATH)
-A = importlib.util.module_from_spec(spec); spec.loader.exec_module(A)
+# auto_swing_bones imports swing_profiles relatively, so load both inside a
+# throwaway package rather than as loose files.
+BASE = (r"C:/Users/Braden Shoup/AppData/Roaming/Blender Foundation/Blender/4.5"
+        r"/scripts/addons/smash-ultimate-blender-animation-workflow/source/extras/")
+pkg = types.ModuleType("asbpkg"); pkg.__path__ = [BASE]
+sys.modules["asbpkg"] = pkg
+for _mod in ("swing_profiles", "auto_swing_bones"):
+    _spec = importlib.util.spec_from_file_location("asbpkg." + _mod, BASE + _mod + ".py")
+    _m = importlib.util.module_from_spec(_spec)
+    sys.modules["asbpkg." + _mod] = _m
+    _spec.loader.exec_module(_m)
+A = sys.modules["asbpkg.auto_swing_bones"]
 
 fails = []
 def eq(got, want, label):
@@ -74,14 +83,17 @@ if not p0["wind_affect"] < p3["wind_affect"]:
 eq(p0["ground_hit"], False, "ground_hit off at root")
 eq(p3["ground_hit"], True,  "ground_hit on at tip")
 eq(A.parameters_for("Hair",0,1)["ground_hit"], False, "single-bone chain leaves ground_hit off")
-eq(round(p0["goal_strength"],4), 50.0, "root keeps the part median")
-eq(round(p3["goal_strength"],4), round(50.0*0.2,4), "tip is a fifth of it")
 # unknown part falls back rather than raising
-eq(A.parameters_for("Nonsense",0,2)["air_resistance"], 6.0, "unknown part falls back")
-# every part table has exactly the 14 fields
-for part, row in A.PART_DEFAULTS.items():
-    if len(row) != len(A._FIELDS):
-        fails.append(f"  PART_DEFAULTS[{part}] has {len(row)} values, expected {len(A._FIELDS)}")
+if A.parameters_for("Nonsense",0,2).get("air_resistance") is None:
+    fails.append("  unknown part did not fall back")
+# every profile row must carry every field
+for part, lengths in A.SWING_PROFILES.items():
+    for n, rows in lengths.items():
+        if len(rows) != n:
+            fails.append(f"  SWING_PROFILES[{part}][{n}] has {len(rows)} rows")
+        for r in rows:
+            if len(r) != len(A._PROFILE_FIELDS):
+                fails.append(f"  SWING_PROFILES[{part}][{n}] row width {len(r)}")
 
 # --- proposed names / _null handling ---
 class B:
