@@ -54,6 +54,16 @@ def register():
     from .source import bake_texs
     bake_texs.register()
 
+    # User-level ParamLabels.csv (%APPDATA%/Smash Ultimate Labels), so hash
+    # names resolve without editing the copy bundled in dependencies/pyprc.
+    try:
+        from .source.param_labels import ensure_param_labels, load_param_labels
+        labels_file = ensure_param_labels()
+        load_param_labels()
+        print(f'ParamLabels.csv: {labels_file}')
+    except Exception as e:
+        print(f'Could not set up ParamLabels.csv: {e}')
+
     # Register updater components
     from .source import updater
     updater.register()

@@ -3,9 +3,15 @@ import bpy
 from bpy.types import Panel, Operator
 
 from ..model.material.convert_smash_material import (
-    find_target_armature,
+    find_target_armature as find_material_armature,
     armature_has_converted_smash_materials,
     armature_has_unconverted_smash_materials,
+)
+from .create_animation_rig import (
+    armature_has_animation_rig,
+    armature_has_ik,
+    armature_ik_is_enabled,
+    find_target_armature as find_anim_rig_armature,
 )
 
 from typing import TYPE_CHECKING
@@ -29,6 +35,62 @@ class SUB_PT_animation_tools(Panel):
 
         layout = self.layout
         layout.use_property_split = False
+
+        row = layout.row(align=True)
+        row.scale_y = 1.5
+        row.operator("sub.create_animation_rig", text="Create Animation Rig", icon="OUTLINER_OB_ARMATURE")
+        row.operator("sub.remove_animation_rig", text="", icon="X")
+        layout.prop(ssp, "clean_keyframes_after_rig", text="Clean keyframes after creation")
+
+        arm = find_anim_rig_armature(context)
+        if arm is not None and armature_has_ik(arm):
+            has_arms = armature_has_ik(arm, 'ARMS')
+            has_legs = armature_has_ik(arm, 'LEGS')
+            if has_arms:
+                row = layout.row(align=True)
+                row.label(text="Arms")
+                if armature_ik_is_enabled(arm, 'ARMS'):
+                    op = row.operator("sub.anim_rig_toggle_ik_fk", text="Switch to FK", icon="BONE_DATA")
+                else:
+                    op = row.operator("sub.anim_rig_toggle_ik_fk", text="Switch to IK", icon="CON_KINEMATIC")
+                op.limbs = 'ARMS'
+            if has_legs:
+                row = layout.row(align=True)
+                row.label(text="Legs")
+                if armature_ik_is_enabled(arm, 'LEGS'):
+                    op = row.operator("sub.anim_rig_toggle_ik_fk", text="Switch to FK", icon="BONE_DATA")
+                else:
+                    op = row.operator("sub.anim_rig_toggle_ik_fk", text="Switch to IK", icon="CON_KINEMATIC")
+                op.limbs = 'LEGS'
+            if has_arms and has_legs:
+                row = layout.row(align=True)
+                row.label(text="Both")
+                op = row.operator("sub.anim_rig_toggle_ik_fk", text="IK", icon="CON_KINEMATIC")
+                op.limbs = 'BOTH'
+                op.set_enabled = True
+                op.enable_ik = True
+                op = row.operator("sub.anim_rig_toggle_ik_fk", text="FK", icon="BONE_DATA")
+                op.limbs = 'BOTH'
+                op.set_enabled = True
+                op.enable_ik = False
+
+        from .finger_sliders import has_finger_sliders, finger_sliders_are_enabled
+        if arm is not None and has_finger_sliders(arm):
+            row = layout.row(align=True)
+            row.label(text="Fingers")
+            if finger_sliders_are_enabled(arm):
+                op = row.operator("sub.toggle_finger_sliders", text="Switch to Circles", icon="MESH_CIRCLE")
+                op.set_enabled = True
+                op.enable_sliders = False
+            else:
+                op = row.operator("sub.toggle_finger_sliders", text="Switch to Sliders", icon="DRIVER")
+                op.set_enabled = True
+                op.enable_sliders = True
+
+        if arm is not None and armature_has_animation_rig(arm):
+            layout.operator("sub.bake_and_remove_rig", text="Bake and Remove Rig", icon="ACTION")
+
+        layout.separator()
 
         # Add idle pose library (moved to top)
         box = layout.box()
@@ -117,7 +179,7 @@ class SUB_PT_animation_tools(Panel):
                 col.operator("sub.create_arm_ik", text="Create Arm IK Bones")
                 col.operator("sub.create_foot_ik", text="Create Foot IK Bones")
                 # Only show buttons for operators that are registered
-                if hasattr(bpy.types, 'SUB_OP_quick_switch_ik_fk') or hasattr(bpy.ops, 'sub.quick_switch_ik_fk'):
+                if hasattr(bpy.types, 'SUB_OP_quick_switch_ik_fk'):
                     col.operator("sub.quick_switch_ik_fk", text="Switch IK/FK")
                 col.separator()
                 
@@ -128,9 +190,56 @@ class SUB_PT_animation_tools(Panel):
                 
                 # IK/FK Control section (moved to bottom)
                 col.label(text="IK/FK Control:")
-                if hasattr(bpy.types, 'SUB_OP_advanced_ik_fk_control') or hasattr(bpy.ops, 'sub.advanced_ik_fk_control'):
+                if hasattr(bpy.types, 'SUB_OP_advanced_ik_fk_control'):
                     col.operator("sub.advanced_ik_fk_control", text="Advanced IK/FK Control")
                 col.operator("sub.toggle_ik_influence", text="Toggle IK Influence")
+
+                # Bulk IK sub-section
+                bulk_box = box.box()
+                bulk_header = bulk_box.row()
+                bulk_header.prop(ssp, "bulk_ik_expanded",
+                                 icon="TRIA_DOWN" if ssp.bulk_ik_expanded else "TRIA_RIGHT",
+                                 icon_only=True, emboss=False)
+                bulk_header.label(text="Bulk IK")
+
+                if ssp.bulk_ik_expanded:
+                    arm_obj = context.object
+                    if arm_obj and arm_obj.type == 'ARMATURE':
+                        bulk_col = bulk_box.column(align=True)
+                        bulk_col.label(text="Left Leg:")
+                        row = bulk_col.row(align=True)
+                        row.prop_search(ssp, "bulk_ik_leg_l", arm_obj.data, "bones", text="Leg")
+                        op = row.operator("sub.bulk_ik_pick_bone", text="", icon='EYEDROPPER')
+                        op.target_property = "bulk_ik_leg_l"
+                        row = bulk_col.row(align=True)
+                        row.prop_search(ssp, "bulk_ik_knee_l", arm_obj.data, "bones", text="Knee")
+                        op = row.operator("sub.bulk_ik_pick_bone", text="", icon='EYEDROPPER')
+                        op.target_property = "bulk_ik_knee_l"
+                        row = bulk_col.row(align=True)
+                        row.prop_search(ssp, "bulk_ik_foot_l", arm_obj.data, "bones", text="Foot")
+                        op = row.operator("sub.bulk_ik_pick_bone", text="", icon='EYEDROPPER')
+                        op.target_property = "bulk_ik_foot_l"
+
+                        bulk_col.separator()
+                        bulk_col.label(text="Right Leg:")
+                        row = bulk_col.row(align=True)
+                        row.prop_search(ssp, "bulk_ik_leg_r", arm_obj.data, "bones", text="Leg")
+                        op = row.operator("sub.bulk_ik_pick_bone", text="", icon='EYEDROPPER')
+                        op.target_property = "bulk_ik_leg_r"
+                        row = bulk_col.row(align=True)
+                        row.prop_search(ssp, "bulk_ik_knee_r", arm_obj.data, "bones", text="Knee")
+                        op = row.operator("sub.bulk_ik_pick_bone", text="", icon='EYEDROPPER')
+                        op.target_property = "bulk_ik_knee_r"
+                        row = bulk_col.row(align=True)
+                        row.prop_search(ssp, "bulk_ik_foot_r", arm_obj.data, "bones", text="Foot")
+                        op = row.operator("sub.bulk_ik_pick_bone", text="", icon='EYEDROPPER')
+                        op.target_property = "bulk_ik_foot_r"
+
+                        bulk_col.separator()
+                        bulk_col.operator("sub.bulk_ik_match_all", text="Run Bulk IK on All Animations", icon='RENDER_ANIMATION')
+                        bulk_col.operator("sub.bulk_ik_bake_all", text="Bulk Bake & Remove IK on All Animations", icon='EXPORT')
+                    else:
+                        bulk_box.label(text="Select an armature to configure Bulk IK", icon='INFO')
 
         layout.separator()
         
@@ -151,6 +260,7 @@ class SUB_PT_animation_tools(Panel):
             text="Horizontal transfers mirror over the 3D cursor",
             icon='INFO',
         )
+
         
         # Add Mirror Animation section
         layout.separator()
@@ -173,6 +283,7 @@ class SUB_PT_animation_tools(Panel):
             
             # Mirror space option
             col.prop(ssp, "mirror_space", text="Space")
+            col.prop(ssp, "mirror_smash_y_anim_flip", text="Smash Y Anim Flip")
             
             col.separator()
             col.operator("sub.find_custom_mirror_bones", text="Find Custom Bones")
@@ -201,6 +312,7 @@ class SUB_PT_animation_tools(Panel):
             
             # Mirror Animation button
             col.operator("sub.mirror_action", text="Mirror Animation")
+            col.operator("sub.mirror_all_actions", text="Mirror All Loaded Animations", icon='RENDER_ANIMATION')
             
             # Add bottom spacing
             col.separator()
@@ -231,6 +343,9 @@ class SUB_PT_animation_tools(Panel):
         row = layout.row(align=True)
         row.operator("sub.remove_swing_bone_animation", text="Remove Animation from Swing Bones")
 
+        row = layout.row(align=True)
+        row.operator("sub.gif_or_photo", text="Gif or Photo", icon="RENDER_ANIMATION")
+
 class SUB_PT_model_tools(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -247,6 +362,17 @@ class SUB_PT_model_tools(Panel):
         layout = self.layout
         layout.use_property_split = False
         ssp = context.scene.sub_scene_properties
+
+        try:
+            row = layout.row()
+            row.scale_y = 1.4
+            row.operator(
+                "sub.smash_vp_shade_setup",
+                text="Reload Smash Model",
+                icon="FILE_REFRESH",
+            )
+        except Exception:
+            pass
 
         row = layout.row(align=True)
         row.operator("sub.limit_weights", text="Limit Weights to 4")
@@ -266,8 +392,15 @@ class SUB_PT_model_tools(Panel):
             row.operator("sub.mirror_mesh_as_separate_object", text="Mirror Mesh as Separate Object (Object Mode Only)")
 
         row = layout.row(align=True)
-        row.operator("sub.unstack_uv_islands", text="Unstack UV Islands")
-
+        selected_objects = context.selected_objects or []
+        if context.mode not in {'POSE', 'EDIT_ARMATURE'} and (
+            (context.active_object and context.active_object.type == 'MESH')
+            or any(obj.type == 'MESH' for obj in selected_objects)
+        ):
+            row.operator("sub.unstack_uv_islands", text="Unstack UV Islands")
+        else:
+            row.enabled = False
+            row.operator("sub.unstack_uv_islands", text="Unstack UV Islands (Select a Mesh)")
         row = layout.row(align=True)
         row.operator_context = 'INVOKE_DEFAULT'
         row.operator("sub.smart_hair_seams", text="Smart Seams (Hair)", icon='MOD_UVPROJECT')
@@ -279,6 +412,7 @@ class SUB_PT_model_tools(Panel):
         row = layout.row(align=True)
         row.operator_context = 'INVOKE_DEFAULT'
         row.operator("sub.protect_datablocks", text="Protect Unused Data", icon='FAKE_USER_ON')
+
 
         row = layout.row(align=True)
         if context.mode == 'OBJECT':
@@ -302,6 +436,31 @@ class SUB_PT_model_tools(Panel):
             row.enabled = False
             row.operator("sub.remove_selected_bones", text="Remove Bones (Edit Mode Only)")
 
+        row = layout.row(align=True)
+        selected_bones = context.selected_bones if context.mode == 'EDIT_ARMATURE' else None
+        selected_pose_bones = context.selected_pose_bones if context.mode == 'POSE' else None
+        if (context.mode == 'EDIT_ARMATURE' and selected_bones) or (
+            context.mode == 'POSE' and selected_pose_bones
+        ):
+            row.operator("sub.connect_bone_chain", text="Connect Bone Chain")
+        else:
+            row.enabled = False
+            row.operator("sub.connect_bone_chain", text="Connect Bone Chain (Select Bones)")
+
+        row = layout.row(align=True)
+        selected_objects = context.selected_objects or []
+        active = context.active_object
+        has_armature = bool(
+            (active and active.type == 'ARMATURE')
+            or any(obj.type == 'ARMATURE' for obj in selected_objects)
+            or (active and active.type == 'MESH' and active.find_armature())
+        )
+        if has_armature:
+            row.operator("sub.delete_unweighted_bones", text="Delete Unweighted Bones")
+        else:
+            row.enabled = False
+            row.operator("sub.delete_unweighted_bones", text="Delete Unweighted Bones (Select Armature)")
+
         col = layout.column(align=True)
         col.separator()
         col.label(text="Roll Value Copier", icon="BONE_DATA")
@@ -322,7 +481,6 @@ class SUB_PT_model_tools(Panel):
         help_box = layout.box()
         help_box.label(text="Matches bone names exactly (case-sensitive).", icon="INFO")
         help_box.label(text="Only roll values are changed.")
-
         col = layout.column(align=True)
         col.separator()
         col.label(text="Bone Symmetry", icon="MOD_MIRROR")
@@ -364,6 +522,7 @@ class SUB_PT_model_tools(Panel):
         adv.prop(ssp, "bone_sym_extra_pairs")
         adv.prop(ssp, "bone_sym_center_eps")
 
+
 class SUB_PT_misc_utilities(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -381,7 +540,6 @@ class SUB_PT_misc_utilities(Panel):
         layout.use_property_split = False
         ssp = context.scene.sub_scene_properties
 
-        # Eye Material Custom Vector 31 Modal Operator
         eye_box = layout.box()
         eye_box.label(text="Eye Look (CustomVector31)", icon="HIDE_OFF")
         eye_box.operator("sub.setup_eye_cv31", icon="DRIVER")
@@ -403,9 +561,26 @@ class SUB_PT_misc_utilities(Panel):
                 warn.label(text="No EyeL/EyeR CustomVector31 yet -", icon="ERROR")
                 warn.label(text="aiming will do nothing. Run Set Up first.")
 
+
+        arma = context.object if (context.object and context.object.type == 'ARMATURE') else None
+        if arma is not None:
+            sap = arma.data.sub_anim_properties
+            ready = any(
+                (t := sap.mat_tracks.get(n)) is not None
+                and t.properties.get('CustomVector31') is not None
+                for n in ('EyeL', 'EyeR')
+            )
+            if not ready:
+                warn = eye_box.box()
+                warn.alert = True
+                warn.label(text="No EyeL/EyeR CustomVector31 yet -", icon="ERROR")
+                warn.label(text="aiming will do nothing. Run Set Up first.")
+
         eye_box.separator()
         eye_box.label(text="Look Control Rig", icon="BONE_DATA")
-        eye_box.operator("sub.add_eye_look_control", icon="PLUS")
+        eye_box.operator("sub.add_eye_look_control", icon="BONE_DATA")
+        eye_box.operator("sub.match_eye_look_from_material", icon="KEYINGSET")
+        eye_box.operator("sub.bake_eye_look", icon="KEYFRAME")
         eye_box.prop(ssp, "eye_look_live_preview")
         eye_box.prop(ssp, "eye_look_mode")
         rowlc = eye_box.row(align=True)
@@ -430,16 +605,20 @@ class SUB_PT_misc_utilities(Panel):
             pupil_box = eye_box.box()
             pupil_box.label(text="Scale the control bone (S) to resize", icon="INFO")
             pupil_box.label(text="the pupil. Smaller bone = smaller pupil.")
-        eye_box.operator("sub.bake_eye_look", icon="ACTION")
         hint = eye_box.box()
         hint.label(text="Move the control in Pose Mode to preview,", icon="INFO")
-        hint.label(text="then Bake. Live preview alone won't export -")
+        hint.label(text="then Bake Eyes so the look exports")
+        hint.label(text="and the control bone is removed.")
+        hint.label(text="Live preview alone won't export -")
         hint.label(text="export reads keyframes, not drivers.")
+        hint.label(text="Turn on Live Preview for Solid Texture")
+        hint.label(text="and Material look, including imported")
+        hint.label(text="EyeL/EyeR material anims. Turn it off when done.")
 
         layout.separator()
         box = layout.box()
         box.label(text="Armature Materials", icon="MATERIAL")
-        armature = find_target_armature(context)
+        armature = find_material_armature(context)
         if armature is None:
             row = box.row()
             row.enabled = False
@@ -459,9 +638,10 @@ class SUB_PT_misc_utilities(Panel):
                 text="Convert All to Principled BSDF",
                 icon="MATERIAL",
             )
-        
-    
-        
+
+        layout.separator()
+        from .smash_viewport import draw_smash_viewport_ui
+        draw_smash_viewport_ui(layout, context) 
 class SUB_OP_mirror_vertex_groups(bpy.types.Operator):
     bl_idname = "sub.mirror_vertex_groups"
     bl_label = "Mirror Vertex Groups"

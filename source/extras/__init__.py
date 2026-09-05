@@ -25,6 +25,7 @@ from . import smart_hair_seams
 from . import protect_datablocks
 from . import rename_utils
 from . import fk_to_ik
+from . import bulk_ik
 from . import user_poses
 
 # Import reset_animation module and ensure it's properly registered
@@ -74,6 +75,7 @@ def register():
     
     # Register FK/IK modules
     fk_to_ik.register()
+    bulk_ik.register()
     create_ik_arms.register()
     create_ik_legs.register()
     create_ik_armsandlegs.register()
@@ -111,6 +113,7 @@ def unregister():
     create_ik_legs.unregister()
     create_ik_arms.unregister()
     ik_fk_switch.unregister()
+    bulk_ik.unregister()
     fk_to_ik.unregister()
     
     # Unregister misc_panel last
