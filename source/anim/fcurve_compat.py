@@ -165,3 +165,82 @@ def collect_actions_for_armatures(armatures):
             seen.add(name)
             results.append(action)
     return results
+
+
+def clean_redundant_keys_on_id(id_data, threshold=1e-4, skip_data_path=None):
+    """Clean baked-interpolation keys on every fcurve of this ID's action."""
+    if id_data is None:
+        return 0
+    try:
+        action = id_data.animation_data.action
+    except AttributeError:
+        return 0
+    if action is None:
+        return 0
+    removed = 0
+    for fcurve in get_all_action_fcurves(action, id_type=id_type_for_id_data(id_data)):
+        if skip_data_path is not None and skip_data_path(fcurve.data_path or ""):
+            continue
+        removed += clean_fcurve_redundant_keys(fcurve, threshold)
+    return removed
+
+
+def ensure_dopesheet_visibility_spacer(action, armature_data=None):
+    """Insert an empty Dope Sheet group above Visibility so pose keys sit apart."""
+    if action is None:
+        return
+    has_vis = any(is_visibility_fcurve(fc) for fc in get_all_action_fcurves(action, id_type='ARMATURE'))
+    if not has_vis:
+        return
+    if armature_data is not None:
+        try:
+            armature_data[DOPESHEET_SPACER_KEY] = 0.0
+        except Exception:
+            pass
+    fcurve = find_fcurve(action, DOPESHEET_SPACER_PATH, index=0, id_type='ARMATURE')
+    if fcurve is None:
+        try:
+            fcurve = new_fcurve(
+                action,
+                DOPESHEET_SPACER_PATH,
+                index=0,
+                action_group=DOPESHEET_SPACER_GROUP,
+                id_type='ARMATURE',
+            )
+        except (AttributeError, TypeError, RuntimeError):
+            return
+    fcurve.mute = True
+    try:
+        fcurve.lock = True
+    except (AttributeError, TypeError, RuntimeError):
+        pass
+    try:
+        fcurve.hide = False
+    except (AttributeError, TypeError, RuntimeError):
+        pass
+    group = getattr(fcurve, 'group', None)
+    if group is not None:
+        try:
+            group.show_expanded = False
+        except (AttributeError, TypeError, RuntimeError):
+            pass
+        try:
+            group.lock = True
+        except (AttributeError, TypeError, RuntimeError):
+            pass
+    order_armature_channel_groups(action)
+
+
+def style_ik_fk_fcurve(fcurve):
+    if fcurve is None:
+        return
+    def _ik_fk_style(value):
+        if value >= 0.5:
+            return IK_KEYFRAME_TYPE, IK_HANDLE_TYPE
+        return FK_KEYFRAME_TYPE, FK_HANDLE_TYPE
+    _style_fcurve_keys(
+        fcurve,
+        interpolation='BEZIER',
+        key_type_for_value=_ik_fk_style,
+    )
+    apply_dopesheet_key_colors()

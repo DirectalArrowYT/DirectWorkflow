@@ -1,0 +1,39 @@
+[package]
+name = "ssbh_blender_preview"
+version = "0.1.0"
+edition = "2021"
+description = "ssbh_wgpu offscreen renderer for the Smash Ultimate Blender addon"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+# The viewport is a long-lived, frame-time-sensitive plugin. Cross-crate LTO
+# helps optimize the wrapper together with ssbh_wgpu without changing output.
+lto = "thin"
+codegen-units = 1
+
+[dependencies]
+# Clone or junction ScanMountGoat/ssbh_wgpu (or your SSBH Editor vendor copy)
+# into native/vendor/ssbh_wgpu. See native/README.md.
+ssbh_wgpu = { path = "../vendor/ssbh_wgpu/ssbh_wgpu" }
+ssbh_data = "0.19.0"
+wgpu = "29.0.1"
+glam = "0.28.0"
+futures = "0.3"
+# Same GIF encoder SSBH Editor uses (GifEncoder speed 10, infinite loop).
+image = "0.25.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_OpenGL",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }

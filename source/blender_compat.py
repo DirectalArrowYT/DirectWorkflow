@@ -173,3 +173,26 @@ def ensure_action_slot(action, id_data, id_type=None):
         return slots.new(id_type, name=slot_name)
     except (AttributeError, TypeError, RuntimeError):
         return None
+
+
+def isolate_bone_in_collection(collection, bone):
+    """Put the bone only in this collection.
+
+    Pose Mode visibility in Blender 4+ is the union of a bone's collections.
+    Bone.hide only affects Edit Mode on Blender 5, so hiding one collection
+    does nothing if the bone is still in a visible collection such as
+    Standard Bones.
+    """
+    if collection is None or bone is None:
+        return
+    assign_bone_to_collection(collection, bone)
+    memberships = getattr(bone, 'collections', None)
+    if memberships is None:
+        inner = getattr(bone, 'bone', None)
+        memberships = getattr(inner, 'collections', None) if inner is not None else None
+    if memberships is None:
+        return
+    for other in list(memberships):
+        if other == collection:
+            continue
+        unassign_bone_from_collection(other, bone)
