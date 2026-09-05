@@ -34,6 +34,7 @@ from . import stage_tools
 # Import animation_scroll module
 from . import animation_scroll
 from . import vis_mesh_bake
+from . import weapon_rig
 
 # Explicit registration function for the package
 def register():
@@ -54,6 +55,7 @@ def register():
     # Register animation_scroll
     animation_scroll.register()
     vis_mesh_bake.register()
+    weapon_rig.register()
     face_picker.register()
     
     # Register misc_panel first since IK panel depends on it
@@ -71,6 +73,7 @@ def register():
     
 def unregister():
     face_picker.unregister()
+    weapon_rig.unregister()
     vis_mesh_bake.unregister()
     # Unregister animation_scroll
     animation_scroll.unregister()
