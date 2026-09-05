@@ -16,6 +16,7 @@ from . import ik_fk_switch
 from . import ik_pole_alignment
 from . import limit_weights
 from . import unstack_uvs
+from . import bone_chain
 from . import smart_hair_seams
 from . import protect_datablocks
 from . import rename_utils
@@ -44,6 +45,7 @@ def register():
     # Register mirror_animation
     mirror_animation.register()
 
+    bone_chain.register()
     roll_copy.register()
     bone_symmetry.register()
     eye_rig.register()
@@ -84,6 +86,7 @@ def unregister():
     # Unregister reset_animation
     reset_animation.unregister()
     
+    bone_chain.unregister()
     roll_copy.unregister()
     bone_symmetry.unregister()
     eye_rig.unregister()

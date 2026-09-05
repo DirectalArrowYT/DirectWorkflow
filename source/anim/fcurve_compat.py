@@ -111,3 +111,57 @@ def get_id_action_fcurves(id_data):
     if action is None:
         return None
     return get_or_create_fcurves(action)
+
+
+def get_all_action_fcurves(action: bpy.types.Action, id_type: str = 'OBJECT'):
+    """Return every fcurve on an action across all layered slots."""
+    if action is None:
+        return []
+    if uses_legacy_action_fcurves(action):
+        return list(get_fcurves(action))
+
+    fcurves = []
+    seen = set()
+    for channelbag in _iter_channelbags(action):
+        for fc in channelbag.fcurves:
+            key = (fc.data_path, fc.array_index)
+            if key not in seen:
+                seen.add(key)
+                fcurves.append(fc)
+    if not fcurves:
+        for slot_type in ('ARMATURE', 'OBJECT', id_type):
+            for fc in get_fcurves(action, id_type=slot_type):
+                key = (fc.data_path, fc.array_index)
+                if key not in seen:
+                    seen.add(key)
+                    fcurves.append(fc)
+    return fcurves
+
+
+def collect_actions_for_armatures(armatures):
+    """
+    Return actions that resolve on any of the given armatures and are eligible
+    for retarget baking (skips SAP Data and _old backups).
+    """
+    armatures = _expand_bake_armatures(armatures)
+    if not armatures:
+        return []
+
+    armature_names = {ob.name for ob in armatures}
+    results = []
+    seen = set()
+    for action in bpy.data.actions:
+        name = action.name
+        if name in seen or _is_bake_backup_action(action):
+            continue
+        if any(_action_valid_for_armature(action, ob) for ob in armatures):
+            seen.add(name)
+            results.append(action)
+            continue
+        if not action_has_pose_fcurves(action):
+            continue
+        sap_armature = sap_armature_name_for_action(name)
+        if sap_armature and sap_armature in armature_names:
+            seen.add(name)
+            results.append(action)
+    return results

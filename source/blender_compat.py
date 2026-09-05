@@ -149,3 +149,27 @@ def unregister_node_categories(identifier):
         nodeitems_utils.unregister_node_categories(identifier)
     except Exception:
         pass
+
+
+def ensure_action_slot(action, id_data, id_type=None):
+    """
+    Ensure an action has a slot named after id_data.
+
+    Blender matches slots by name when switching actions, so every imported
+    animation for the same armature/object should share that name.
+    """
+    if action is None or id_data is None:
+        return None
+    slots = getattr(action, 'slots', None)
+    if slots is None:
+        return None
+    if id_type is None:
+        id_type = id_type_for_id_data(id_data)
+    slot_name = id_data.name
+    for slot in slots:
+        if _slot_id_type(slot) == id_type and slot_display_name(slot) == slot_name:
+            return slot
+    try:
+        return slots.new(id_type, name=slot_name)
+    except (AttributeError, TypeError, RuntimeError):
+        return None
