@@ -36,6 +36,9 @@ import bpy
 from bpy.types import Operator
 
 UPDATE_AVAILABLE: bool = None
+# How local HEAD relates to the remote:
+# current / behind / ahead / diverged / unknown.
+UPDATE_RELATION: str = "current"
 LATEST_COMMIT_SHA: str = None
 LATEST_COMMIT_MESSAGE: str = None
 LATEST_COMMIT_DATE: str = None
@@ -132,6 +135,44 @@ def is_working_tree_dirty(addon_path, timeout=GIT_TIMEOUT_CHECK):
     return bool(_run_git(["status", "--porcelain"], addon_path, timeout))
 
 
+def _is_ancestor(addon_path, maybe_ancestor, descendant, timeout=GIT_TIMEOUT_CHECK):
+    """True if `maybe_ancestor` is reachable from `descendant`.
+
+    git exits 0 for yes and 1 for no, and _run_git raises on any non-zero, so
+    the "no" answer arrives as an exception rather than a return value.
+    """
+    try:
+        _run_git(["merge-base", "--is-ancestor", maybe_ancestor, descendant],
+                 addon_path, timeout)
+        return True
+    except Exception:
+        return False
+
+
+def relation_to_remote(addon_path, local_sha, remote_sha, timeout=GIT_TIMEOUT_CHECK):
+    """How local HEAD relates to the fetched remote commit.
+
+    'current'  - same commit
+    'behind'   - remote is ahead of us, a fast-forward: a real update
+    'ahead'    - we have commits the remote does not; nothing to install
+    'diverged' - both sides have unique commits; installing would lose work
+    'unknown'  - the remote commit is not in the object store, so no answer
+    """
+    if local_sha == remote_sha:
+        return "current"
+    try:
+        _run_git(["cat-file", "-e", remote_sha + "^{commit}"], addon_path, timeout)
+    except Exception:
+        return "unknown"
+    local_in_remote = _is_ancestor(addon_path, local_sha, remote_sha, timeout)
+    remote_in_local = _is_ancestor(addon_path, remote_sha, local_sha, timeout)
+    if local_in_remote:
+        return "behind"
+    if remote_in_local:
+        return "ahead"
+    return "diverged"
+
+
 def commit_info(addon_path, ref, timeout=GIT_TIMEOUT_CHECK):
     """(sha, subject, iso date) for a ref that must already exist locally."""
     sha = _run_git(["rev-parse", ref], addon_path, timeout)
@@ -211,10 +252,12 @@ def check_for_newer_version():
     global UPDATE_STATUS, UPDATE_AVAILABLE
     global LATEST_COMMIT_SHA, LATEST_COMMIT_MESSAGE, LATEST_COMMIT_DATE
     global CURRENT_COMMIT_SHA, CURRENT_COMMIT_MESSAGE
+    global UPDATE_RELATION
 
     if DISABLE_UPDATE_CHECK:
         UPDATE_STATUS = "idle"
         UPDATE_AVAILABLE = False
+        UPDATE_RELATION = "current"
         return
 
     UPDATE_STATUS = "checking"
@@ -237,11 +280,28 @@ def check_for_newer_version():
         LATEST_COMMIT_SHA = latest_sha
         LATEST_COMMIT_MESSAGE = latest_message
         LATEST_COMMIT_DATE = latest_date
-        UPDATE_AVAILABLE = current_sha != latest_sha
+        # Comparing the two SHAs for inequality is not enough. This fork is
+        # developed in place and pushed from here, so local is routinely AHEAD
+        # of the remote - and inequality alone reported that as an available
+        # update, offering to "upgrade" the addon to one of its own ancestors
+        # and delete the newer local commits on install.
+        UPDATE_RELATION = relation_to_remote(addon_path, current_sha, latest_sha)
+        UPDATE_AVAILABLE = UPDATE_RELATION == "behind"
 
-        if UPDATE_AVAILABLE:
+        if UPDATE_RELATION == "behind":
             print(f"Smash_ultimate_blender: update available - "
                   f"{current_sha[:8]} -> {latest_sha[:8]}: {latest_message[:100]}")
+        elif UPDATE_RELATION == "ahead":
+            print(f"Smash_ultimate_blender: local is ahead of the remote "
+                  f"({current_sha[:8]}, remote {latest_sha[:8]}) - nothing to install. "
+                  f"Push when ready.")
+        elif UPDATE_RELATION == "diverged":
+            print(f"Smash_ultimate_blender: local {current_sha[:8]} and remote "
+                  f"{latest_sha[:8]} have diverged - not offering an update, since "
+                  f"installing it would discard local commits.")
+        elif UPDATE_RELATION == "unknown":
+            print(f"Smash_ultimate_blender: remote commit {latest_sha[:8]} is not in "
+                  f"the local object store - can't tell whether it is newer.")
         else:
             print("Smash_ultimate_blender: plugin is up to date")
 
