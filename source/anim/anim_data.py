@@ -32,6 +32,26 @@ _last_known_actions = {}
 # Global owner object for msgbus subscriptions
 _msgbus_owner = object()
 
+
+def mark_sap_sync_known(armature_object: bpy.types.Object):
+    """Record an armature's current action as already seen by the SAP sync.
+
+    An importer assigns a new action itself, so the sync handler must not treat
+    that as a user-driven action change and go looking for a matching SAP action
+    to switch to - it would fight the import. Recording the action here makes the
+    handler's `last_action == current_action` check pass on its next run.
+
+    Upstream calls this from import_anim and raw_anim. Their SAP system differs
+    from ours, but both key off _last_known_actions with the same meaning, so the
+    helper carries over unchanged.
+    """
+    global _last_known_actions
+    if armature_object is None:
+        return
+    anim = getattr(armature_object, 'animation_data', None)
+    if anim is not None and anim.action is not None:
+        _last_known_actions[armature_object.name] = anim.action
+
 # Handler to sync SAP data action with bone animation action
 @bpy.app.handlers.persistent
 def sync_sap_action_handler(scene):
