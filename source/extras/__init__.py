@@ -22,6 +22,7 @@ from . import smash_viewport
 from . import viewport_capture
 from . import bone_chain
 from . import auto_swing_bones
+from . import swing_axis
 from . import fighter_scale
 from . import smart_hair_seams
 from . import protect_datablocks
@@ -57,6 +58,7 @@ def register():
     create_animation_rig.register()
     bone_chain.register()
     auto_swing_bones.register()
+    swing_axis.register()
     fighter_scale.register()
     roll_copy.register()
     bone_symmetry.register()
@@ -103,6 +105,7 @@ def unregister():
     smash_viewport.unregister()
     viewport_capture.unregister()
     fighter_scale.unregister()
+    swing_axis.unregister()
     auto_swing_bones.unregister()
     bone_chain.unregister()
     roll_copy.unregister()
