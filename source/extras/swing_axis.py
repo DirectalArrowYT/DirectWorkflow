@@ -27,6 +27,7 @@ with no swing tracks do occur in vanilla, so the files stay valid either way.
 
 import os
 import shutil
+import time
 
 import bpy
 from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
@@ -512,12 +513,19 @@ class SUB_OP_swing_axis_apply(Operator):
                                     want_anim=True, want_swing=False)['anim']
 
         if settings.make_backup and not settings.dry_run:
-            root = os.path.dirname(skel_path)
-            stamp = 'swing_axis_backup'
+            # Siblings of what they back up, never inside it: a backup written into the
+            # animation folder is picked up by the next run's walk and edited in turn, which
+            # would destroy the only untouched copy.
+            stamp = time.strftime('%Y%m%d_%H%M%S')
+            skel_root = os.path.dirname(skel_path)
             try:
-                backup_files([skel_path], root, os.path.join(root, stamp))
+                backup_files([skel_path], skel_root,
+                             os.path.join(os.path.dirname(skel_root.rstrip('\/')),
+                                          '_swing_axis_backup_%s' % stamp))
                 if anims and anim_root:
-                    backup_files(anims, anim_root, os.path.join(anim_root, stamp))
+                    backup_files(anims, anim_root,
+                                 os.path.join(os.path.dirname(anim_root.rstrip('\/')),
+                                              '_swing_axis_backup_%s' % stamp))
             except OSError as exc:
                 self.report({'ERROR'}, 'Backup failed, nothing written: %s' % exc)
                 return {'CANCELLED'}

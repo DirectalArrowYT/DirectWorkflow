@@ -264,6 +264,14 @@ def collect_targets(root, want_skel=True, want_mesh=True, want_anim=True,
     for dirpath, dirnames, filenames in os.walk(root):
         if '.git' in dirnames:
             dirnames.remove('.git')
+        # Never walk into a backup. These tools write originals somewhere before editing, and
+        # a second run that found those copies would happily edit them too - destroying the one
+        # copy of the untouched files. fighter_scale writes to a sibling of the root so this
+        # cannot bite it, but swing_axis writes inside the animation folder.
+        for name in list(dirnames):
+            lowered = name.lower()
+            if lowered.startswith('_scale_backup') or lowered.endswith('_backup'):
+                dirnames.remove(name)
         norm = dirpath.replace('\\', '/')
         if subfolders and not any(f in norm for f in subfolders):
             continue
