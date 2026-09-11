@@ -1931,6 +1931,86 @@ def compensate_col_for_sss(img_col, img_prm, cv11, cv30x):
     return count, clipped, float(before), float(after)
 
 
+# ---- PBR range check ---------------------------------------------------------
+# The master shader's toon viewport never draws PRM, so the values that feed it
+# can be anything and still look right in Blender - a Roughness of 0 or AO left
+# out of PRM.b only shows up in game, as a model that reads brighter and flatter
+# than its COL. These thresholds come from decoding 34 vanilla character PRMs
+# across 10 fighters (covered pixels only):
+#
+#   roughness   p10 0.44-0.50, median 0.72-0.77. Below 0.2 is a mirror: the
+#               stage cube map reflects at mip 0. Vanilla's lowest character
+#               material is a visor at 0.10.
+#   metal       vanilla metals sit at roughness 0.66-0.71. A metal has no
+#               diffuse at all, so a glossy one is nothing but reflection.
+#               Same 0.2 cutoff as above: at 0.3 Link's body texture (5%)
+#               tripped it, and that is vanilla.
+#   AO          p10 0.16-0.27. PRM.b multiplies ambient light AND every
+#               specular term, so flat 1.0 leaves both unoccluded everywhere.
+#               Vanilla ships flat AO too - 4 of 38 checked textures - so this
+#               is a note, not a verdict. It matters most on large dark areas
+#               like hair, where reflection is most of what is visible.
+#   specular    median 0.157 (def) / 0.059 (alp), p90 0.17. F0 = PRM.a * 0.2.
+#               The line is 0.3: about twice the vanilla median F0 and clear of
+#               vanilla's p90. Vanilla still crosses it in 2 of 38 textures -
+#               Marth's body (0.98 throughout) and a third of Ridley's skin
+#               (0.70) - so the note says so rather than calling it wrong.
+PBR_MIRROR_ROUGHNESS = 0.2
+PBR_SPEC_HIGH = 0.3
+PBR_AREA = 0.25          # share of covered texels before a finding is reported
+
+
+def pbr_range_notes(img_prm, covered=None, is_subsurface=False):
+    """Plain-English notes for PRM values outside what vanilla ships.
+
+    `covered` is a boolean per texel (None = all). On a subsurface shader PRM.r
+    is the SSS mask rather than metalness, so the metal checks are skipped and
+    every texel is treated as non-metal.
+    """
+    prm = img_to_np(img_prm)
+    if covered is not None:
+        prm = prm[covered]
+    if len(prm) < 64:
+        return []
+    metal = np.zeros(len(prm), bool) if is_subsurface else prm[:, 0] >= 0.5
+    rough, ao, spec = prm[:, 1], prm[:, 2], prm[:, 3]
+    notes = []
+
+    mirror = rough < PBR_MIRROR_ROUGHNESS
+    if mirror.mean() >= PBR_AREA:
+        notes.append(
+            f"PBR check: roughness below {PBR_MIRROR_ROUGHNESS} on {100 * mirror.mean():.0f}% "
+            f"of this set (median {np.median(rough):.2f}) - a mirror in game, reflecting the "
+            f"stage cube map sharply. Vanilla character PRMs sit at 0.44-1.0, median 0.72-0.77; "
+            f"only eyes and visors go this glossy. Raise the master shader's Roughness unless "
+            f"that is the intent.")
+    mirror_metal = metal & mirror
+    if mirror_metal.mean() >= 0.05:
+        notes.append(
+            f"PBR check: {100 * mirror_metal.mean():.0f}% of this set is metal with roughness "
+            f"under {PBR_MIRROR_ROUGHNESS} - pure reflection with no diffuse. Vanilla "
+            f"metals sit at roughness 0.66-0.71.")
+    if not metal.all() and np.percentile(ao[~metal], 10) > 0.99:
+        notes.append(
+            "PBR check: PRM.b (AO) is flat 1.0 - in game nothing occludes ambient light or "
+            "specular, so the set reads brighter and flatter than its COL. Vanilla p10 is "
+            "0.16-0.27. Vanilla does this on some parts; it matters most on large dark areas "
+            "like hair. If the master shader has 'AO to PRM' off, the AO only darkens COL, "
+            "which the game's ambient and specular then fill back in.")
+    dielectric = ~metal
+    if dielectric.any():
+        high = spec[dielectric] > PBR_SPEC_HIGH
+        if high.mean() >= PBR_AREA:
+            s_high = float(np.median(spec[dielectric][high]))
+            notes.append(
+                f"PBR check: specular above {PBR_SPEC_HIGH} on {100 * high.mean():.0f}% of this "
+                f"set (those texels median {s_high:.2f}, F0 {s_high * 0.2:.3f}) - vanilla median "
+                f"is 0.157 (F0 0.031) on body textures and 0.059 on alp_ ones, p90 0.17. "
+                f"Vanilla does go this high on some parts (Marth's body, Ridley's skin), so "
+                f"it only matters if this set is not meant to be shiny.")
+    return notes
+
+
 def apply_coverage_default(img, mask_img, default_rgba):
     """Replace never-baked texels with a sane default instead of black."""
     if mask_img is None:
@@ -2292,6 +2372,13 @@ def _bake_all():
                 save_image(img_prm, out_prm)
                 written.append(out_prm)
                 print(f"    PRM -> {os.path.basename(out_prm)}")
+
+                # Report PRM values the toon viewport can't show and the game will.
+                is_sss = any(MatlContext(m).is_subsurface for m in materials)
+                covered = (gray_of(img_to_np(mask)) > 0.5) if mask is not None else None
+                for note in pbr_range_notes(img_prm, covered, is_sss):
+                    print("    ! " + note)
+                    lines.append("! " + note)
 
                 # COL was saved before PRM existed; the blend it has to undo is
                 # masked by PRM.r, so the compensation runs here and re-saves it.
