@@ -106,6 +106,17 @@ class SUB_PG_bake_texs_settings(PropertyGroup):
         default=1.0, min=0.0, max=1.0,
     )
 
+    sss_compensate_col: BoolProperty(
+        name='Compensate COL For Skin SSS',
+        description=(
+            "On a subsurface (skin) shader the game shows mix(col, CustomVector11, "
+            "PRM.r * CustomVector30.x), not the COL itself - half dark red at vanilla "
+            "values. Bake the inverse so the skin comes out the colour it is in "
+            "Blender. The darkest pixels cannot be fully corrected; the bake report "
+            "says how much was clamped"
+        ),
+        default=True,
+    )
     emi_mode: EnumProperty(
         name='EMI Mode',
         items=(

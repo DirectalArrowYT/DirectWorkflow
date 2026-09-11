@@ -219,6 +219,25 @@ NOR_DEFAULT = (0.5, 0.5, 1.0, 1.0)
 PRM_DEFAULT = (0.0, 0.5, 1.0, 0.16)
 SKIP_EMPTY_MATERIALS = True
 
+# ---- COL compensation for skin SSS ------------------------------------------
+# A subsurface Smash shader does not show the COL it is given. It shows
+#     mix(col, CustomVector11.rgb, PRM.r * CustomVector30.x)
+# (Smush-Material-Research, skin_materials; ssbh_wgpu model.wgsl, same formula).
+# Vanilla skin ships CustomVector11 = (0.25, 0.0333, 0) and CustomVector30.x = 0.5
+# with PRM.r = 1, so half of every skin pixel in game is that dark red - baking
+# the master shader's colour straight in is exactly why it comes out too red.
+# The fix bakes the inverse, (target - s*CV11) / (1 - s), worked in linear space
+# because that is where the shader does the mix.
+#
+# It cannot be exact. The game adds s * 0.25 of red whatever the texture holds,
+# 0.125 at vanilla strength, and a stylised skin's lines and deep shadow are
+# darker than that - measured on Dabi, the darkest 1% of skin has almost no red at
+# all. Those pixels clamp at zero and come out slightly red-lifted. The clamped
+# inverse still cuts the in-game colour error by 63-80% across Dabi's Face, Neck
+# and Skin, while keeping vanilla SSS values; making it exact would mean driving
+# CustomVector30.x to about 0, which switches the skin look off.
+SSS_COMPENSATE_COL = True
+
 # ---- Sampling ---------------------------------------------------------------
 EMIT_SAMPLES_FLAT       = 1
 EMIT_SAMPLES_STOCHASTIC = 256
@@ -430,6 +449,7 @@ def apply_settings(props):
     global WRITE_COL, WRITE_NOR, WRITE_PRM, WRITE_EMI, WRITE_COMPONENT_DEBUG_MAPS
     global PRM_AO_MODE, COMPILE_NUTEXB, EMI_MODE, EMI_NORMALIZE_TO_CV3
     global PRM_SKIN_MASK_MODE, PRM_SKIN_MASK_CONST
+    global SSS_COMPENSATE_COL
 
     BAKE_SIZE = int(props.bake_size)
     BAKE_MARGIN = props.bake_margin
@@ -451,6 +471,7 @@ def apply_settings(props):
     PRM_AO_MODE = props.prm_ao_mode
     PRM_SKIN_MASK_MODE = props.prm_skin_mask_mode
     PRM_SKIN_MASK_CONST = props.prm_skin_mask_const
+    SSS_COMPENSATE_COL = getattr(props, 'sss_compensate_col', True)
     EMI_MODE = props.emi_mode
     EMI_NORMALIZE_TO_CV3 = props.emi_normalize_to_cv3
     COMPILE_NUTEXB = props.compile_nutexb
@@ -1839,6 +1860,77 @@ def apply_alpha(rgb_img, alpha_img):
     np_to_img(rgb_img, px)
     return rgb_img
 
+def sss_params(materials):
+    """(CustomVector11 rgb, CustomVector30.x, source name) for a bake group, or None.
+
+    Read from the same data source export uses - the side-loaded twin when that is
+    the one carrying the real matl data. Only a subsurface shader applies the
+    blend, so anything else returns None and its COL is left alone.
+    """
+    for material in materials:
+        ctx = MatlContext(material)
+        if not ctx.is_subsurface:
+            continue
+        data = getattr(ctx.data_source, 'sub_matl_data', None)
+        if data is None:
+            continue
+        v11 = data.vectors.get('CustomVector11')
+        v30 = data.vectors.get('CustomVector30')
+        if v11 is None or v30 is None:
+            continue
+        return (tuple(float(c) for c in v11.value[:3]), float(v30.value[0]),
+                ctx.data_source.name)
+    return None
+
+
+def _srgb_to_linear(c):
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(c):
+    c = np.clip(c, 0.0, 1.0)
+    return np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1.0 / 2.4) - 0.055)
+
+
+def compensate_col_for_sss(img_col, img_prm, cv11, cv30x):
+    """Rewrite COL so that, once the game blends in CustomVector11, it shows the bake.
+
+    The blend factor is per pixel, PRM.r * CustomVector30.x, taken from the PRM
+    this same bake packed - so it is exactly the mask that ships, and texels the
+    coverage default filled (PRM.r = 0) are left untouched.
+
+    Bake images are byte buffers, so .pixels holds sRGB-encoded values. The mix
+    happens in the shader after the texture is linearised, so the inverse is done
+    in linear space and encoded back.
+
+    Returns (pixels changed, fraction clamped, in-game error before, after), the
+    errors being mean absolute linear difference from the intended colour.
+    """
+    col = img_to_np(img_col)
+    prm = img_to_np(img_prm)
+    s = np.clip(prm[:, 0] * float(cv30x), 0.0, 1.0)
+    active = (s > 1e-6) & (col[:, 3] > 0.0)
+    # At full strength the texture is replaced outright and nothing can be solved for.
+    active &= s < 0.999
+    count = int(active.sum())
+    if count == 0:
+        return 0, 0.0, 0.0, 0.0
+
+    red = np.array(cv11, dtype=np.float64)
+    target = _srgb_to_linear(col[active, :3].astype(np.float64))
+    blend = s[active].astype(np.float64)[:, None]
+    solved = (target - blend * red) / (1.0 - blend)
+    clamped = np.clip(solved, 0.0, 1.0)
+
+    before = np.abs(blend * red + (1.0 - blend) * target - target).mean()
+    after = np.abs(blend * red + (1.0 - blend) * clamped - target).mean()
+    clipped = float(((solved < 0.0) | (solved > 1.0)).any(axis=1).mean())
+
+    col[active, :3] = _linear_to_srgb(clamped).astype(np.float32)
+    np_to_img(img_col, col)
+    return count, clipped, float(before), float(after)
+
+
 def apply_coverage_default(img, mask_img, default_rgba):
     """Replace never-baked texels with a sane default instead of black."""
     if mask_img is None:
@@ -2080,6 +2172,9 @@ def _bake_all():
                 save_image(img_col, out_col)
                 written.append(out_col)
                 print(f"    COL -> {os.path.basename(out_col)}")
+                if SSS_COMPENSATE_COL and not WRITE_PRM and sss_params(materials):
+                    lines.append("! COL not compensated for skin SSS - the blend is "
+                                 "masked by PRM.r, and PRM is not being baked")
 
             if WRITE_NOR:
                 passthrough_rgb = passthrough_a = None
@@ -2197,6 +2292,24 @@ def _bake_all():
                 save_image(img_prm, out_prm)
                 written.append(out_prm)
                 print(f"    PRM -> {os.path.basename(out_prm)}")
+
+                # COL was saved before PRM existed; the blend it has to undo is
+                # masked by PRM.r, so the compensation runs here and re-saves it.
+                if SSS_COMPENSATE_COL and out_col is not None:
+                    sss = sss_params(materials)
+                    if sss is not None and sss[1] > 1e-6:
+                        cv11, cv30x, src = sss
+                        n, clip_frac, err_before, err_after = compensate_col_for_sss(
+                            img_col, img_prm, cv11, cv30x)
+                        if n:
+                            save_image(img_col, out_col)
+                            msg = (f"COL SSS compensation: CV11=({cv11[0]:.3f}, "
+                                   f"{cv11[1]:.3f}, {cv11[2]:.3f}) CV30.x={cv30x:.3f} "
+                                   f"from '{src}' - {n} px, {100.0 * clip_frac:.1f}% "
+                                   f"clamped, in-game colour error {err_before:.4f} "
+                                   f"-> {err_after:.4f}")
+                            print("    " + msg)
+                            lines.append(msg)
 
                 if WRITE_COMPONENT_DEBUG_MAPS:
                     for tag, comp in (("metal", img_metal), ("rough", img_rough),

@@ -75,6 +75,9 @@ class SUB_PT_bake_texs_channels(Panel):
         sub = skin.row()
         sub.enabled = props.prm_skin_mask_mode == 'AUTO'
         sub.prop(props, 'prm_skin_mask_const')
+        comp = skin.row()
+        comp.enabled = props.write_col and props.write_prm
+        comp.prop(props, 'sss_compensate_col')
 
         emi = layout.column(align=True)
         emi.enabled = props.write_emi
