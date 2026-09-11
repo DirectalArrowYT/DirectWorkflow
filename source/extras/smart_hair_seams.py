@@ -516,6 +516,173 @@ def resolve_overlaps(context, obj, margin, max_passes=3, resolution=1024):
     return before, after, detached
 
 
+def align_islands_upright(obj, flat_below=0.02):
+    """Turn every UV island so the mesh's world up runs up the V axis.
+
+    Smash's anisotropic hair shader takes the highlight direction from the UV
+    layout, so a strand has to run top-to-bottom in UV space the way it does
+    on the model - the root at the top of its island, the tip at the bottom.
+    An unwrap or a pack that rotates freely leaves islands at any angle.
+
+    "Up" for an island is the direction world Z increases across its UVs, from
+    a least-squares plane z = a*u + b*v + c over its corners. Fitting the whole
+    island rather than taking two extreme points keeps a curled strand from
+    being judged by its tip alone. Pure rotation about the island's centre:
+    mirroring would flip the tangent basis and with it the normal map.
+
+    An island whose height barely changes - a flat cap on top of the head -
+    has no meaningful up, so anything with less vertical relief than
+    `flat_below` of its own size is left alone rather than spun at random.
+
+    Returns (turned, already_upright, flat).
+    """
+    import math
+    import numpy as np
+
+    mesh = obj.data
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    uv_layer = bm.loops.layers.uv.active
+    if uv_layer is None:
+        bm.free()
+        return 0, 0, 0
+
+    world = {v.index: obj.matrix_world @ v.co for v in bm.verts}
+    island_of = uv_islands(bm, uv_layer)
+    islands = {}
+    for face in bm.faces:
+        islands.setdefault(island_of[face.index], []).append(face)
+
+    turned = upright = flat = 0
+    for faces in islands.values():
+        loops = [loop for face in faces for loop in face.loops]
+        uv = np.array([loop[uv_layer].uv[:] for loop in loops], dtype=np.float64)
+        pos = np.array([world[loop.vert.index][:] for loop in loops], dtype=np.float64)
+        extent = float(np.ptp(pos, axis=0).max())
+        if extent <= 0.0 or float(np.ptp(pos[:, 2])) < flat_below * extent:
+            flat += 1
+            continue
+        design = np.c_[uv, np.ones(len(uv))]
+        (a, b, _c), *_ = np.linalg.lstsq(design, pos[:, 2], rcond=None)
+        if math.hypot(a, b) < 1e-9:
+            flat += 1
+            continue
+        angle = math.pi / 2 - math.atan2(b, a)
+        angle = (angle + math.pi) % (2 * math.pi) - math.pi
+        if abs(angle) < 1e-4:
+            upright += 1
+            continue
+        c, s = math.cos(angle), math.sin(angle)
+        centre = (uv.min(axis=0) + uv.max(axis=0)) / 2
+        turned_uv = (uv - centre) @ np.array([[c, s], [-s, c]]) + centre
+        for loop, (u, v) in zip(loops, turned_uv):
+            loop[uv_layer].uv = (u, v)
+        turned += 1
+
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+    return turned, upright, flat
+
+
+def pack_upright(context, obj, margin):
+    """Pack into 0-1 without rotating anything. Assumes the object is active."""
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.uv.select_all(action='SELECT')
+    bpy.ops.uv.pack_islands(
+        rotate=False, scale=True,
+        shape_method='CONCAVE', margin_method='SCALED', margin=margin)
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+
+class SUB_OP_uv_align_upright(Operator):
+    """Stand every UV island upright: the top of the mesh at the top of the UV"""
+    bl_idname = 'sub.uv_align_upright'
+    bl_label = 'Align UVs Upright (Hair)'
+    bl_description = (
+        'Rotate each UV island so the part of the mesh that is higher up sits higher in UV '
+        'space - roots at the top, tips at the bottom. Smash\'s anisotropic hair material '
+        'reads its highlight direction from the UVs and needs this. Re-packs without '
+        'rotation afterwards so nothing overlaps'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    pack_after: BoolProperty(
+        name='Re-pack (No Rotation)',
+        description=(
+            'Turning islands in place makes them overlap and leave the 0-1 tile. Pack them '
+            'again with rotation disabled, which keeps them upright'
+        ),
+        default=True,
+    )
+    pack_margin: FloatProperty(
+        name='Pack Margin',
+        description='Gap between packed islands. Keep small; the margin is per island',
+        default=0.003, min=0.0, max=0.1,
+    )
+    flat_below: FloatProperty(
+        name='Flat Below',
+        description=(
+            'Leave an island alone when its height changes by less than this share of its '
+            'size - a flat piece has no top or bottom to align to'
+        ),
+        default=0.02, min=0.0, max=0.5, subtype='FACTOR',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode in {'OBJECT', 'EDIT_MESH'} and context.selected_objects
+
+    def execute(self, context):
+        started_in_edit = context.mode == 'EDIT_MESH'
+        if started_in_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        meshes = [obj for obj in _iter_target_meshes(context) if obj.data.uv_layers]
+        if not meshes:
+            self.report({'WARNING'}, 'No mesh objects with a UV map selected.')
+            return {'CANCELLED'}
+
+        view_layer = context.view_layer
+        previous_active = view_layer.objects.active
+        previous_selection = list(context.selected_objects)
+        totals = [0, 0, 0]
+        overlaps = []
+        try:
+            for obj in meshes:
+                counts = align_islands_upright(obj, self.flat_below)
+                totals = [t + c for t, c in zip(totals, counts)]
+                if self.pack_after:
+                    bpy.ops.object.select_all(action='DESELECT')
+                    obj.select_set(True)
+                    view_layer.objects.active = obj
+                    pack_upright(context, obj, self.pack_margin)
+                    overlaps.append(uv_overlap(obj, 512)[1])
+        finally:
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+            for previous in previous_selection:
+                if previous.name in view_layer.objects:
+                    previous.select_set(True)
+            if previous_active is not None:
+                view_layer.objects.active = previous_active
+
+        if started_in_edit:
+            bpy.ops.object.mode_set(mode='EDIT')
+
+        turned, upright, flat = totals
+        message = (f'{len(meshes)} mesh(es): {turned} island(s) turned upright, '
+                   f'{upright} already were')
+        if flat:
+            message += f', {flat} flat left as-is'
+        if overlaps:
+            message += f'; overlap after re-pack {max(overlaps):.2%}'
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
 class SUB_OP_uv_resolve_overlaps(Operator):
     """Clear overlapping UVs by moving the offenders into free space"""
     bl_idname = 'sub.uv_resolve_overlaps'

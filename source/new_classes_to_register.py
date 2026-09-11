@@ -145,6 +145,7 @@ classes = [
     source.extras.smart_hair_seams.SUB_OP_smart_hair_seams,
     source.extras.protect_datablocks.SUB_OP_protect_datablocks,
     source.extras.smart_hair_seams.SUB_OP_uv_resolve_overlaps,
+    source.extras.smart_hair_seams.SUB_OP_uv_align_upright,
     source.extras.roll_copy.SUB_OT_copy_bone_rolls,
     source.extras.animation_scroll.SUB_OP_animation_scroll_modal,
     source.anim.anim_data.SUB_PT_sub_smush_anim_data_main,

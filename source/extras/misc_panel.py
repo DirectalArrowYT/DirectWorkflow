@@ -404,6 +404,8 @@ class SUB_PT_model_tools(Panel):
         row = layout.row(align=True)
         row.operator_context = 'INVOKE_DEFAULT'
         row.operator("sub.smart_hair_seams", text="Smart Seams (Hair)", icon='MOD_UVPROJECT')
+        row = layout.row(align=True)
+        row.operator("sub.uv_align_upright", text="Align UVs Upright (Hair)", icon='SORT_DESC')
 
         row = layout.row(align=True)
         row.operator_context = 'INVOKE_DEFAULT'
