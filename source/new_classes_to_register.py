@@ -372,6 +372,10 @@ classes = [
     source.bake_texs.ui.SUB_PT_bake_texs,
     source.bake_texs.ui.SUB_PT_bake_texs_channels,
     source.bake_texs.ui.SUB_PT_bake_texs_output,
+    source.bake_texs.master_shader.SUB_OP_hb_master_shader_update,
+    source.bake_texs.master_shader.SUB_OP_hb_master_shader_convert,
+    source.bake_texs.master_shader.SUB_OP_hb_master_shader_preset,
+    source.bake_texs.master_shader.SUB_PT_hb_master_shader,
 ]
 
 def register():

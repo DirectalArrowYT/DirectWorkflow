@@ -30,6 +30,10 @@
 #      and set its node NAME (not label) to BAKE_METAL / BAKE_ROUGH /
 #      BAKE_SPEC / BAKE_COL / BAKE_ALPHA. Its output is baked for that channel.
 #   3. Per-material presets set via the panel, for flat per-material constants.
+#
+#   The HB Master Shader (master_shader.py) skips step 1: its Smash PRM panel
+#   is already in PRM units, so those sockets are read straight off the
+#   material's instance of the group. Override nodes and presets still win.
 # =============================================================================
 
 import bpy
@@ -261,6 +265,11 @@ SUB_SOCKET_NOR_A     = "Texture4 Alpha (NOR Map Cavity Channel)"
 SUB_SOCKET_PRM_RGB   = "Texture6 RGB (PRM Map)"
 SUB_SOCKET_PRM_A     = "Texture6 Alpha (PRM Map Specular)"
 SUB_SOCKET_EMI_RGB   = "Texture5 RGB (Emissive Map Layer 1)"
+
+# master_shader.MASTER_NAME. Its internal Principled is named BAKE_SHADER, so
+# the generic walk already lands on it; this prefix is what lets the PRM
+# channels come from the instance sockets instead.
+HB_MASTER_PREFIX     = "HB Master Shader"
 
 
 # =============================================================================
@@ -1182,6 +1191,32 @@ def channel_from_group_input(group_node, socket_name, origin):
         return NONE_CHANNEL
     return Channel('CONST', value=const, origin=origin + ", unlinked")
 
+def hb_master_instance(path):
+    """The HB Master Shader instance a surface shader sits directly inside."""
+    if path:
+        tree = path[-1].node_tree
+        if tree is not None and tree.name.startswith(HB_MASTER_PREFIX):
+            return path[-1]
+    return None
+
+def channel_from_instance(group_node, outer_path, socket_name, origin):
+    """A group instance input, followed out to whatever drives it."""
+    return channel_from_input(group_node.inputs.get(socket_name), origin, outer_path)
+
+def scalar_from_instance(group_node, outer_path, socket_name, default):
+    """A group instance input as a number: (value, driven_by_a_node).
+
+    A driven socket has no single value, so it reports the default and True.
+    """
+    socket = group_node.inputs.get(socket_name)
+    if socket is None:
+        return default, False
+    src, _path, terminal = resolve_source(socket, outer_path)
+    if src is not None:
+        return default, True
+    const = constant_of(terminal if terminal is not None else socket)
+    return (float(const[0]) if const is not None else default), False
+
 def channel_from_override(mat, node_name, origin):
     socket, path = find_override(mat, node_name)
     if socket is None:
@@ -1342,6 +1377,42 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
                 ch['prm_donor'] = Channel('CONST', value=(0, 0, 0, 1),
                                           origin=f"PRM from '{d_node.name}' ({why})")
 
+        # The HB Master Shader keeps each Smash channel on its own socket,
+        # already in PRM units, so take them off the instance instead of
+        # reading them back out of its internal Principled - whose Specular
+        # IOR Level is PRM.a x 2.5 through a Math node and would otherwise
+        # cost a bake to recover. A texture wired into a socket still bakes.
+        hb = hb_master_instance(path)
+        if hb is not None:
+            outer = path[:-1]
+            label = f"'{hb.name}'"
+            ch['hb_master'] = hb
+            alpha = channel_from_instance(hb, outer, "Alpha", f"{label} Alpha")
+            rough = channel_from_instance(hb, outer, "Roughness", f"{label} Roughness (PRM.g)")
+            if ctx.is_subsurface:
+                sss = channel_from_instance(hb, outer, "SSS Mask", f"{label} SSS Mask (PRM.r)")
+                explicit = sss.mode == 'SOCKET' or (
+                    sss.mode == 'CONST' and abs(float(sss.value[0])) > 1e-6)
+                # Otherwise pull_principled already chose the vanilla mask.
+                if explicit or PRM_SKIN_MASK_MODE != 'AUTO':
+                    metal = sss
+                    ch['sss_note'] = (
+                        f"PRM.r from the master shader's SSS Mask - "
+                        f"{ctx.shader_label} reads it as the SSS mask")
+            else:
+                metal = channel_from_instance(hb, outer, "Metalness",
+                                              f"{label} Metalness (PRM.r)")
+            if not ctx.prm_alpha_is_rotation:
+                spec = channel_from_instance(hb, outer, "Specular", f"{label} Specular (PRM.a)")
+                ch['spec_scale'] = 1.0
+            emi = channel_from_instance(hb, outer, "Emission Color", f"{label} Emission Color")
+            strength, textured = scalar_from_instance(hb, outer, "Emission Strength", 1.0)
+            if strength <= 0.0 or emi.mode == 'NONE' or (
+                    emi.mode == 'CONST' and max(float(v) for v in emi.value[:3]) <= 0.0):
+                ch['emi'], ch['emi_scale'] = NONE_CHANNEL, 0.0
+            else:
+                ch['emi'], ch['emi_scale'] = emi, (1.0 if textured else strength)
+
     elif kind == 'GLOSSY':
         node = payload
         col   = channel_from_input(node.inputs.get("Color"), "Glossy Color", path)
@@ -1484,6 +1555,16 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
         ch['ao'] = scalar_channel(PRM_AO_CONST, "PRM_AO_MODE=CONST")
     elif PRM_AO_MODE == "BAKE":
         ch['ao'] = Channel('PASS', origin="baked AO pass")
+    elif ch.get('hb_master') is not None:
+        # The master shader tints its own AO into COL, so an AO pass here too
+        # would darken the same creases twice. Its "AO to PRM" switch decides.
+        ao_to_prm, _ = scalar_from_instance(ch['hb_master'], path[:-1], "AO to PRM", 0.0)
+        if ao_to_prm >= 0.5:
+            ch['ao'] = Channel('PASS', origin="baked AO pass (master shader: AO to PRM on)")
+        else:
+            ch['ao'] = scalar_channel(
+                PRM_AO_CONST,
+                "master shader: AO is tinted into COL (AO to PRM off), so PRM.b stays flat")
     elif kind in ('PRINCIPLED', 'GLOSSY'):
         ch['ao'] = Channel('PASS', origin="baked AO pass (AUTO: PBR shader)")
     else:
