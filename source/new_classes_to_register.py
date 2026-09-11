@@ -29,7 +29,17 @@ classes = [
     source.exo.magic_exo_skel.SUB_OP_populate_bone_list,
     source.exo.magic_exo_skel.SUB_OP_update_bone_list,
     source.exo.magic_exo_skel.SUB_OP_rename_other_bones,
-    source.exo.magic_exo_skel.SUB_PT_ultimate_exo_skel,
+    # The Rig Combiner takes the Magic Exo Skel Maker's place in the panel
+    # list; the exo operators stay registered for files that still use them.
+    source.exo.rig_combiner.SUB_PG_rig_pair,
+    source.exo.rig_combiner.SUB_PG_rig_mesh,
+    source.exo.rig_combiner.SUB_PG_rig_combiner,
+    source.exo.rig_combiner.SUB_OP_rig_combiner_pair,
+    source.exo.rig_combiner.SUB_OP_rig_combiner_align,
+    source.exo.rig_combiner.SUB_OP_rig_combiner_combine,
+    source.exo.rig_combiner.SUB_UL_rig_pairs,
+    source.exo.rig_combiner.SUB_UL_rig_meshes,
+    source.exo.rig_combiner.SUB_PT_rig_combiner,
     source.exo.magic_exo_skel.BoneListItem,
     source.exo.magic_exo_skel.PairableBoneListItem,
     source.exo.magic_exo_skel.SUB_UL_BoneList,

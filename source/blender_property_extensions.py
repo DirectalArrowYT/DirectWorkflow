@@ -5,6 +5,7 @@ from bpy.props import IntProperty, StringProperty, EnumProperty, BoolProperty, F
 from bpy.props import FloatVectorProperty
 
 from .exo import magic_exo_skel
+from .exo import rig_combiner
 
 from .model import export_model
 
@@ -371,6 +372,9 @@ class SubSceneProperties(PropertyGroup):
     )
     pairable_bone_list: CollectionProperty(
         type=magic_exo_skel.PairableBoneListItem
+    )
+    rig_combiner: PointerProperty(
+        type=rig_combiner.SUB_PG_rig_combiner
     )
     armature_prefix: StringProperty(
         name="Prefix",

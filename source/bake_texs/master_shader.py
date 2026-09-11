@@ -761,8 +761,10 @@ def convert_material(material, preset=None, ao_distance=None, include_principled
            for n in nt.nodes):
         return None
 
-    chosen = preset or guess_preset(material.name,
-                                    source.node_tree.name if old is not None else "")
+    # Material name only. The old group names say nothing about the surface:
+    # Dabi's Clothes used "SkinGroup.001" and ClothesShiny "HairGroup", and
+    # reading those made cloth convert as skin (SSS Mask 1 -> baked as skin).
+    chosen = preset or guess_preset(material.name)
     node = _new_master_node(nt, source)
     apply_preset(node, chosen)
     if ao_distance is not None:

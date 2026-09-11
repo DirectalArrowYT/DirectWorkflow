@@ -310,6 +310,7 @@ class MatlContext:
         self.prm_alpha_is_used = True
         self.is_subsurface = False
         self.reads_emissive = False
+        self.inferred = ''
         self.notes = []
 
         # Read the same material data export will read. A side-loaded twin is
@@ -337,6 +338,11 @@ class MatlContext:
 
         sub_matl_data = getattr(self.data_source, 'sub_matl_data', None)
         if sub_matl_data is None or not sub_matl_data.shader_label:
+            # No Smash shader chosen yet. The HB Master Shader already says
+            # what the surface is, so bake for the shader it will need rather
+            # than as plain PBR - otherwise a skin material bakes its Metalness
+            # look knob into PRM.r and the SSS mask never exists.
+            self._infer_from_master()
             return
 
         self.shader_label = sub_matl_data.shader_label
@@ -360,6 +366,25 @@ class MatlContext:
         self.is_subsurface = shader_info.uses_param(self.shader_label, 'CustomVector30')
         self.reads_emissive = shader_info.uses_param(self.shader_label, 'Texture5')
 
+        # A chosen shader wins, but say so when it disagrees with the master.
+        kinds = master_smash_kinds(material)
+        if 'SKIN' in kinds and not self.is_subsurface:
+            self.notes.append(
+                f"the master shader's SSS Mask marks this as skin, but {self.shader_label} "
+                f"is not a subsurface shader - apply the Skin preset or PRM.r is metalness")
+        if 'EMISSIVE' in kinds and not self.reads_emissive:
+            self.notes.append(
+                f"the master shader emits, but {self.shader_label} has no Texture5 - "
+                f"apply the Emissive preset to keep the glow")
+
+    def _infer_from_master(self):
+        kinds = master_smash_kinds(self.material)
+        if 'SKIN' in kinds:
+            self.is_subsurface = True
+        if 'EMISSIVE' in kinds:
+            self.reads_emissive = True
+        self.inferred = ' + '.join(k.title() for k in sorted(kinds))
+
     @property
     def prm_alpha_is_rotation(self):
         return abs(self.anisotropy) > 1e-6
@@ -370,10 +395,15 @@ class MatlContext:
 
     def describe(self):
         if not self.shader_label:
-            if self.uses_side_loaded_data:
-                return (f"no Smash material data on '{self.data_source.name}' - "
-                        f"baking with plain PBR rules")
-            return "no Smash material data - baking with plain PBR rules"
+            where = (f" on '{self.data_source.name}'" if self.uses_side_loaded_data else "")
+            if self.inferred:
+                bits = [f"no Smash material data{where} - {self.inferred} from the HB Master Shader"]
+                if self.is_subsurface:
+                    bits.append("subsurface (PRM.r = SSS mask)")
+                if self.reads_emissive:
+                    bits.append("writes _emi")
+                return "  |  ".join(bits)
+            return f"no Smash material data{where} - baking with plain PBR rules"
         bits = [self.shader_label]
         if self.uses_side_loaded_data:
             bits.append(f"data from '{self.data_source.name}'")
@@ -1217,6 +1247,36 @@ def scalar_from_instance(group_node, outer_path, socket_name, default):
     const = constant_of(terminal if terminal is not None else socket)
     return (float(const[0]) if const is not None else default), False
 
+def master_instance(material):
+    """The HB Master Shader node in a material's own tree, or None."""
+    if material is None or not material.use_nodes or material.node_tree is None:
+        return None
+    for node in material.node_tree.nodes:
+        if (node.type == 'GROUP' and node.node_tree is not None
+                and node.node_tree.name.startswith(HB_MASTER_PREFIX)):
+            return node
+    return None
+
+def master_smash_kinds(material):
+    """What Smash shader a master-shader material needs: {'SKIN', 'EMISSIVE'}.
+
+    SKIN   SSS Mask is above zero or textured - the Skin master preset sets 1.
+    EMISSIVE  Emission Color is not black and Emission Strength above zero.
+    """
+    node = master_instance(material)
+    if node is None:
+        return set()
+    kinds = set()
+    sss, sss_driven = scalar_from_instance(node, (), "SSS Mask", 0.0)
+    if sss_driven or sss > 1e-6:
+        kinds.add('SKIN')
+    strength, strength_driven = scalar_from_instance(node, (), "Emission Strength", 1.0)
+    emission = channel_from_instance(node, (), "Emission Color", "master Emission Color")
+    if (strength_driven or strength > 0.0) and emission.mode != 'NONE' and not (
+            emission.mode == 'CONST' and max(float(v) for v in emission.value[:3]) <= 0.0):
+        kinds.add('EMISSIVE')
+    return kinds
+
 def channel_from_override(mat, node_name, origin):
     socket, path = find_override(mat, node_name)
     if socket is None:
@@ -1398,7 +1458,7 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
                     metal = sss
                     ch['sss_note'] = (
                         f"PRM.r from the master shader's SSS Mask - "
-                        f"{ctx.shader_label} reads it as the SSS mask")
+                        f"{ctx.shader_label or 'a Smash skin shader'} reads it as the SSS mask")
             else:
                 metal = channel_from_instance(hb, outer, "Metalness",
                                               f"{label} Metalness (PRM.r)")

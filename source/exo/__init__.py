@@ -4,3 +4,4 @@ from . import exo_weight_transfer
 from . import exo_bone_align
 from . import exo_bone_cleanup
 from . import merge_rigs
+from . import rig_combiner
