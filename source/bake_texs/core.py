@@ -412,6 +412,23 @@ class MatlContext:
         kinds = master_smash_kinds(self.material)
         if 'SKIN' in kinds:
             self.is_subsurface = True
+            # The bake can only infer skin from the master shader. Export does not
+            # infer anything: a material with no Smash data gets the standard shader
+            # from create_default_matl_entry(), which reads PRM.r as METALNESS and
+            # applies no subsurface blend. So the SSS Mask baked here ships as
+            # metalness, and COL is - correctly - left uncompensated. Say so rather
+            # than skip the compensation without a word. master_instance() is the
+            # lookup master_smash_kinds() just used, so it is not None here.
+            node = master_instance(self.material)
+            mask, driven = scalar_from_instance(node, (), "SSS Mask", 1.0)
+            mask_text = "textured" if driven else "%.2f" % mask
+            self.notes.append(
+                "no Smash material data, so export writes the standard shader "
+                "(SFX_PBS_0100000008008269_opaque), which reads PRM.r as METALNESS and "
+                "applies no subsurface. This set's SSS Mask (%s) will ship as metalness "
+                "(1.0 = fully metallic) and COL is left uncompensated. Apply the 'Skin "
+                "(Subsurface)' preset to this material, or give it a side-loaded twin, "
+                "before exporting." % mask_text)
         if 'EMISSIVE' in kinds:
             self.reads_emissive = True
         self.inferred = ' + '.join(k.title() for k in sorted(kinds))
