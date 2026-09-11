@@ -117,6 +117,16 @@ class SUB_PG_bake_texs_settings(PropertyGroup):
         ),
         default=True,
     )
+    sss_fit_mask: BoolProperty(
+        name='Keep Dark Lines Out Of SSS',
+        description=(
+            "Lower the skin's SSS mask (PRM.r) only where a colour can't survive the "
+            "game's blend toward CustomVector11 - black lines and the darkest shadow - "
+            "so they stay black instead of lifting to dark red. Bright skin keeps its "
+            "full subsurface look. Makes the COL compensation exact"
+        ),
+        default=True,
+    )
     emi_mode: EnumProperty(
         name='EMI Mode',
         items=(

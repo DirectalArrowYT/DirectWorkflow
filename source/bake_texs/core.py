@@ -237,6 +237,18 @@ SKIP_EMPTY_MATERIALS = True
 # and Skin, while keeping vanilla SSS values; making it exact would mean driving
 # CustomVector30.x to about 0, which switches the skin look off.
 SSS_COMPENSATE_COL = True
+#
+# Fitting the mask. PRM.r is per texel, so the blend can be lowered exactly where
+# a colour cannot survive it. For each texel the largest blend that still lands
+# on the target is
+#     s <= T / CV11          (channels where CV11 > 0 - the red floor)
+#     s <= (1 - T)/(1 - CV11) (channels where CV11 < 1 - bright highlights)
+# and the mask is cut to that and no further. Black lines go to 0 - plain
+# diffuse, no CustomVector11 in the albedo and none of the red light the skin
+# shading term adds independently of albedo, so they stay black - while bright
+# skin keeps its full mask. The fit follows the colour, so it has no seams of
+# its own. It is only ever lowered, never raised past what the material asked.
+SSS_FIT_MASK = True
 
 # ---- Sampling ---------------------------------------------------------------
 EMIT_SAMPLES_FLAT       = 1
@@ -449,7 +461,7 @@ def apply_settings(props):
     global WRITE_COL, WRITE_NOR, WRITE_PRM, WRITE_EMI, WRITE_COMPONENT_DEBUG_MAPS
     global PRM_AO_MODE, COMPILE_NUTEXB, EMI_MODE, EMI_NORMALIZE_TO_CV3
     global PRM_SKIN_MASK_MODE, PRM_SKIN_MASK_CONST
-    global SSS_COMPENSATE_COL
+    global SSS_COMPENSATE_COL, SSS_FIT_MASK
 
     BAKE_SIZE = int(props.bake_size)
     BAKE_MARGIN = props.bake_margin
@@ -472,6 +484,7 @@ def apply_settings(props):
     PRM_SKIN_MASK_MODE = props.prm_skin_mask_mode
     PRM_SKIN_MASK_CONST = props.prm_skin_mask_const
     SSS_COMPENSATE_COL = getattr(props, 'sss_compensate_col', True)
+    SSS_FIT_MASK = getattr(props, 'sss_fit_mask', True)
     EMI_MODE = props.emi_mode
     EMI_NORMALIZE_TO_CV3 = props.emi_normalize_to_cv3
     COMPILE_NUTEXB = props.compile_nutexb
@@ -2011,6 +2024,61 @@ def pbr_range_notes(img_prm, covered=None, is_subsurface=False):
     return notes
 
 
+def fit_sss_mask_and_compensate(img_col, img_prm, cv11, cv30x):
+    """Lower PRM.r only where the colour cannot survive the blend, then invert exactly.
+
+    See SSS_FIT_MASK for the bound. PRM.r is stored in 8 bits, so the new mask
+    is rounded DOWN before COL is solved against it - rounding up would ask for a
+    little more blend than the colour can take and lift the darkest texels again.
+
+    Returns None when nothing is subsurface-masked, otherwise a dict with the
+    texel count, the share whose mask was lowered, the median and low (<0.1)
+    share of the fitted mask, and the in-game colour error before and after.
+    """
+    col = img_to_np(img_col)
+    prm = img_to_np(img_prm)
+    cv30x = float(cv30x)
+    s_mat = np.clip(prm[:, 0] * cv30x, 0.0, 1.0)
+    active = (s_mat > 1e-6) & (col[:, 3] > 0.0)
+    count = int(active.sum())
+    if count == 0 or cv30x <= 1e-6:
+        return None
+
+    red = np.array(cv11, dtype=np.float64)
+    target = _srgb_to_linear(col[active, :3].astype(np.float64))
+    s_old = s_mat[active].astype(np.float64)
+
+    floor_bound = np.full(target.shape, np.inf)
+    has_colour = red > 1e-9
+    floor_bound[:, has_colour] = target[:, has_colour] / red[has_colour]
+    ceil_bound = np.full(target.shape, np.inf)
+    below_one = red < 1.0 - 1e-9
+    ceil_bound[:, below_one] = (1.0 - target[:, below_one]) / (1.0 - red[below_one])
+    s_max = np.minimum(floor_bound.min(axis=1), ceil_bound.min(axis=1))
+
+    s_new = np.clip(np.minimum(s_old, s_max), 0.0, 0.999)
+    mask_old = prm[active, 0].astype(np.float64)
+    mask_new = np.minimum(np.floor(s_new / cv30x * 255.0) / 255.0, mask_old)
+    s_q = mask_new * cv30x
+    solved = np.clip((target - s_q[:, None] * red) / (1.0 - s_q[:, None]), 0.0, 1.0)
+
+    before = np.abs(s_old[:, None] * red + (1.0 - s_old[:, None]) * target - target).mean()
+    after = np.abs(s_q[:, None] * red + (1.0 - s_q[:, None]) * solved - target).mean()
+
+    col[active, :3] = _linear_to_srgb(solved).astype(np.float32)
+    prm[active, 0] = mask_new.astype(np.float32)
+    np_to_img(img_col, col)
+    np_to_img(img_prm, prm)
+    return {
+        'count': count,
+        'reduced': float((mask_new < mask_old - 1e-6).mean()),
+        'mask_median': float(np.median(mask_new)),
+        'mask_low': float((mask_new < 0.1).mean()),
+        'err_before': float(before),
+        'err_after': float(after),
+    }
+
+
 def apply_coverage_default(img, mask_img, default_rgba):
     """Replace never-baked texels with a sane default instead of black."""
     if mask_img is None:
@@ -2386,8 +2454,24 @@ def _bake_all():
                     sss = sss_params(materials)
                     if sss is not None and sss[1] > 1e-6:
                         cv11, cv30x, src = sss
-                        n, clip_frac, err_before, err_after = compensate_col_for_sss(
-                            img_col, img_prm, cv11, cv30x)
+                        fit = (fit_sss_mask_and_compensate(img_col, img_prm, cv11, cv30x)
+                               if SSS_FIT_MASK else None)
+                        if fit is not None:
+                            n = 0       # handled here; the plain path below is skipped
+                            save_image(img_col, out_col)
+                            save_image(img_prm, out_prm)
+                            msg = (f"COL SSS compensation, mask fitted: CV11=({cv11[0]:.3f}, "
+                                   f"{cv11[1]:.3f}, {cv11[2]:.3f}) CV30.x={cv30x:.3f} from "
+                                   f"'{src}' - {fit['count']} px, SSS mask lowered on "
+                                   f"{100.0 * fit['reduced']:.1f}% (median mask "
+                                   f"{fit['mask_median']:.2f}; {100.0 * fit['mask_low']:.1f}% "
+                                   f"below 0.1 - lines and deep shadow), in-game colour error "
+                                   f"{fit['err_before']:.4f} -> {fit['err_after']:.4f}")
+                            print("    " + msg)
+                            lines.append(msg)
+                        else:
+                            n, clip_frac, err_before, err_after = compensate_col_for_sss(
+                                img_col, img_prm, cv11, cv30x)
                         if n:
                             save_image(img_col, out_col)
                             msg = (f"COL SSS compensation: CV11=({cv11[0]:.3f}, "
