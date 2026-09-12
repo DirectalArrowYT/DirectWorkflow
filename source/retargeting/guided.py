@@ -368,12 +368,24 @@ def iter_source_meshes(source):
                 break
 
 
+def _hide_if_visible(context, ob):
+    """hide_set() raises on anything outside the view layer, and a source rig's
+    meshes routinely live in an excluded collection. Tidying up the view is not
+    worth failing a finished bake over."""
+    if ob is None or ob.name not in context.view_layer.objects:
+        return
+    try:
+        ob.hide_set(True)
+    except RuntimeError:
+        pass
+
+
 def hide_source_keep_target(context, source, target):
     """Hide the bake driver and its meshes; keep the baked armature selected."""
     if source:
-        source.hide_set(True)
+        _hide_if_visible(context, source)
         for ob in iter_source_meshes(source):
-            ob.hide_set(True)
+            _hide_if_visible(context, ob)
     _invalidate_smash_viewport()
 
     # Do not use select_only_target here. That helper intentionally resolves

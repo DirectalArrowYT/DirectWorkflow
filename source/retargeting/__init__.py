@@ -1483,6 +1483,42 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
     bl_description = "Bake Actions constrained from another Armature with selectable baking mode"
     bl_options = {'REGISTER', 'UNDO'}
     
+    source_mode: bpy.props.EnumProperty(
+        name="Actions From",
+        items=[
+            ('BLEND', "This File", "Bake the actions already in the .blend"),
+            ('PSA_FOLDER', "PSA Folder", "Import each .psa in a folder, bake it, and discard "
+                                         "the import - the .blend only keeps the baked results"),
+        ],
+        default='BLEND',
+    )
+
+    psa_folder: bpy.props.StringProperty(
+        name="PSA Folder",
+        description="Folder of .psa files for the source rig. Sub-folders are included",
+        subtype='DIR_PATH',
+        default="",
+    )
+
+    psa_recursive: bpy.props.BoolProperty(
+        name="Include Sub-folders",
+        description="Walk sub-folders too, which is how the game ships them (at, co, dm, ...)",
+        default=True,
+    )
+
+    discard_imported: bpy.props.BoolProperty(
+        name="Discard Imports After Baking",
+        description="Delete each imported source action once it is baked, so hundreds of "
+                    "sequences do not pile up in the .blend",
+        default=True,
+    )
+
+    psa_limit: bpy.props.IntProperty(
+        name="Stop After",
+        description="Bake only this many files, for a trial run. 0 bakes the whole folder",
+        default=0, min=0, max=10000,
+    )
+
     bake_mode: bpy.props.EnumProperty(
         name="Bake Mode",
         items=[
@@ -1550,6 +1586,24 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
         layout = self.layout
         column = layout.column()
         
+        column.prop(self, "source_mode", expand=True)
+        if self.source_mode == 'PSA_FOLDER':
+            box = column.box()
+            box.prop(self, "psa_folder")
+            row = box.row(align=True)
+            row.prop(self, "psa_recursive")
+            row.prop(self, "discard_imported")
+            box.prop(self, "psa_limit")
+            if self.psa_folder:
+                from . import psa_batch
+                found = len(psa_batch.iter_psa_files(self.psa_folder, self.psa_recursive))
+                box.label(text=f"{found} .psa file(s) found",
+                          icon='FILE_TICK' if found else 'ERROR')
+            else:
+                box.label(text="Pick the folder holding the source rig's PSAs", icon='INFO')
+            box.label(text="Run with the Smash rig active, already bound", icon='INFO')
+        column.separator()
+
         # Bake mode selector
         column.prop(self, "bake_mode")
         column.separator()
@@ -1638,10 +1692,70 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
             self.report({'INFO'}, "Enable 'Bake and Exit' to run the bake")
             return {'FINISHED'}
         
+        if self.source_mode == 'PSA_FOLDER':
+            return self._execute_bake_psa_folder(context)
         if self.bake_mode == 'VISIBLE':
             return self._execute_bake_visible(context)
         else:
             return self._execute_bake_constrained(context)
+
+    def _execute_bake_psa_folder(self, context):
+        """Import each PSA in a folder, bake it through the existing constraints,
+        and drop the import again."""
+        from . import psa_batch
+        from ...expy_kit.operators import resolve_bake_armature_pair
+
+        if not self.psa_folder:
+            self.report({'ERROR'}, "Pick a folder of PSA files first")
+            return {'CANCELLED'}
+
+        driver, constrained = resolve_bake_armature_pair(context.object)
+        if driver is None or constrained is None or driver == constrained:
+            self.report({'ERROR'},
+                        "No bind found. Bind the Smash rig to the source rig, then run "
+                        "this with the Smash rig active")
+            return {'CANCELLED'}
+
+        print('\n' + '=' * 66)
+        print(f'Bake Actions from PSA folder: {bpy.path.abspath(self.psa_folder)}')
+        print(f'  {driver.name} (PSAs) -> {constrained.name}')
+        print('=' * 66)
+
+        window = getattr(context, 'window', None)
+        if window:
+            window.cursor_modal_set('WAIT')
+        try:
+            summary = psa_batch.bake_psa_folder(
+                context, driver, constrained, self.psa_folder,
+                recursive=self.psa_recursive,
+                discard_imported=self.discard_imported,
+                fake_user_new=self.fake_user_new,
+                exclude_deform=self.exclude_deform,
+                keep_ik_bones=self.keep_ik_bones,
+                limit=self.psa_limit,
+            )
+        finally:
+            if window:
+                window.cursor_modal_restore()
+
+        for warning in summary['warnings']:
+            print(f'  ! {warning}')
+        print(f"  baked {len(summary['baked'])} action(s) from {summary['files']} file(s)")
+        print('=' * 66 + '\n')
+
+        if not summary['baked']:
+            self.report({'WARNING'},
+                        'Nothing baked. ' + (summary['warnings'][0] if summary['warnings'] else ''))
+            return {'CANCELLED'}
+
+        message = (f"Baked {len(summary['baked'])} action(s) from {summary['files']} PSA file(s)")
+        if summary['skipped']:
+            message += f", {len(summary['skipped'])} file(s) held nothing"
+        if summary['warnings']:
+            message += f", {len(summary['warnings'])} warning(s) - see the console"
+        self.report({'WARNING' if summary['warnings'] else 'INFO'}, message)
+        self._hide_source_after_bake(context, driver, constrained)
+        return {'FINISHED'}
     
     def _execute_bake_visible(self, context):
         """Bake using visual keying - bulk bakes all actions like the constrained mode"""

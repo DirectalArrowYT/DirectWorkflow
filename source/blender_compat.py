@@ -89,33 +89,63 @@ def ensure_action_slot(action, id_data, id_type=None):
         return None
 
 
+def slot_has_channels(action, slot):
+    """True when this slot actually holds keyframes in `action`.
+
+    From 4.4 an action's curves live in a channelbag per slot, so a slot can
+    exist and animate nothing at all.
+    """
+    if action is None or slot is None:
+        return False
+    layers = getattr(action, 'layers', None)
+    if not layers:
+        return bool(getattr(action, 'fcurves', None))
+    for layer in layers:
+        for strip in getattr(layer, 'strips', ()):
+            getter = getattr(strip, 'channelbag', None)
+            if not callable(getter):
+                continue
+            try:
+                channelbag = getter(slot)
+            except (TypeError, RuntimeError):
+                continue
+            if channelbag is not None and len(getattr(channelbag, 'fcurves', ())):
+                return True
+    return False
+
+
 def _find_action_slot(animation_data, action):
-    """Find the slot on action that matches this animation_data owner."""
+    """The slot this owner should play, preferring one that actually has curves.
+
+    Slots are matched by name, and an armature is very often not called what it
+    was called when the animation was authored - a PSA imported onto
+    SK_pl17_1101.002 and later played on mhaSRC. Binding purely by name then
+    picks an empty slot, the action evaluates to nothing, and everything baked
+    through it comes out as a still rest pose. So a slot carrying keyframes
+    always wins over a same-named empty one.
+    """
     if action is None or not hasattr(animation_data, 'action_slot'):
         return None
     owner = animation_data.id_data
     owner_name = owner.name
     id_type = id_type_for_id_data(owner)
 
-    slots = getattr(action, 'slots', None)
-    if slots:
-        for slot in slots:
-            if _slot_id_type(slot) == id_type and slot_display_name(slot) == owner_name:
+    slots = list(getattr(action, 'slots', None) or ())
+    same_type = [slot for slot in slots if _slot_id_type(slot) == id_type]
+    same_name = [slot for slot in same_type if slot_display_name(slot) == owner_name]
+    suitable = list(getattr(animation_data, 'action_suitable_slots', ()) or ())
+
+    for group in (same_name, suitable, same_type, slots):
+        for slot in group:
+            if slot_has_channels(action, slot):
                 return slot
 
-    if hasattr(animation_data, 'action_suitable_slots'):
-        for slot in animation_data.action_suitable_slots:
-            if slot_display_name(slot) == owner_name:
-                return slot
-        if animation_data.action_suitable_slots:
-            return animation_data.action_suitable_slots[0]
-
-    if slots:
-        for slot in slots:
-            if _slot_id_type(slot) == id_type:
-                return slot
-        if len(slots) > 0:
-            return slots[0]
+    # Nothing has curves yet - this is an action being written to, so fall back
+    # to name, then to anything that fits the ID.
+    for group in (same_name, [s for s in suitable if slot_display_name(s) == owner_name],
+                  suitable, same_type, slots):
+        if group:
+            return group[0]
     return None
 
 
@@ -126,8 +156,13 @@ def assign_action(animation_data, action):
     animation_data.action = action
     if action is None:
         return
-    ensure_action_slot(action, animation_data.id_data)
+    # Only make a slot when the action has none to bind: creating one named
+    # after this owner and binding that is what silently muted actions whose
+    # curves live under the name they were imported with.
     slot = _find_action_slot(animation_data, action)
+    if slot is None:
+        ensure_action_slot(action, animation_data.id_data)
+        slot = _find_action_slot(animation_data, action)
     if slot is not None:
         try:
             animation_data.action_slot = slot
