@@ -41,6 +41,15 @@ PART_PATTERNS = [
     (re.compile(r'(?i)hair'),        'Hair'),
     (re.compile(r'(?i)mantle'),      'Mantle'),
     (re.compile(r'(?i)skirt'),       'Skirt'),
+    # All Justice rips spell it 'slirt' and use Japanese words for a few parts
+    # ('eri' = collar, 'sode' = sleeve, 'mant' = mantle). Mapped onto the Smash
+    # part they behave like, so each also inherits that part's measured physics
+    # profile rather than falling back to the generic one.
+    (re.compile(r'(?i)slirt'),       'Skirt'),
+    (re.compile(r'(?i)neck_?guard'), 'Collar'),
+    (re.compile(r'(?i)eri'),         'Collar'),
+    (re.compile(r'(?i)sode'),        'Sleeve'),
+    (re.compile(r'(?i)mant'),        'Mantle'),
     (re.compile(r'(?i)scarf'),       'Scarf'),
     (re.compile(r'(?i)sleeve'),      'Sleeve'),
     (re.compile(r'(?i)collar'),      'Collar'),
@@ -72,6 +81,24 @@ DIRECTION_TOKENS = {
     'BT', 'FT', 'TB', 'TF', 'CL', 'CR', 'LC', 'RC',
 }
 
+# Bones of the standard fighter skeleton, which a part word can otherwise
+# match: 'Bust' is the chest bone on every Smash rig, not a bust accessory,
+# and renaming it S_Bust1 would break the skeleton. Helper (H_) bones are
+# driven by the nuhlpb and are never swing either.
+SMASH_CORE_BONES = {
+    'Trans', 'Rot', 'Throw', 'Hip', 'Waist', 'Bust', 'Neck', 'Head', 'Face',
+    'LegC', 'ClavicleC', 'ClavicleL', 'ClavicleR', 'Jaw', 'Tongue',
+    'Mouth_group', 'FingerL30', 'FingerR30',
+}
+
+# An already-converted chain: S_HairLB2, S_BandannaL1, S_SkirtC4_null. The part
+# is whatever word is there, so a vanilla name works even when PART_PATTERNS
+# has never heard of it - the vocabulary is only needed for rigs that have not
+# been renamed yet.
+_SMASH_SWING_NAME = re.compile(
+    r'(?i)^s_([a-z]+?)({})?(\d+)(_null)?$'.format(
+        '|'.join(sorted(DIRECTION_TOKENS, key=len, reverse=True))))
+
 # Trailing .001 / .002 that Blender appends to duplicate names.
 _BLENDER_DUP = re.compile(r'\.\d{3}$')
 _NULL_SUFFIX = re.compile(r'(?i)_null$')
@@ -99,6 +126,17 @@ def _split_tokens(name):
 
 def classify_bone(name):
     """Return (part, direction) for a bone name, or (None, '') if not a candidate."""
+    base = _BLENDER_DUP.sub('', name)
+    if base in SMASH_CORE_BONES or base.startswith('H_'):
+        return None, ''
+
+    already_named = _SMASH_SWING_NAME.match(base)
+    if already_named:
+        part = already_named.group(1)
+        # Vanilla ships some chains all-lowercase (s_hairlb1); the part is
+        # written CamelCase in the bone name either way.
+        return (part if not part.islower() else part.capitalize()),             (already_named.group(2) or '').upper()
+
     tokens = _split_tokens(name)
     if not tokens:
         return None, ''
@@ -272,7 +310,7 @@ def linear_run(bone):
     return run
 
 
-def detect_chains(armature_data, only_selected=False, min_length=2):
+def detect_chains(armature_data, only_selected=False, min_length=2, info=None):
     """Find swing candidates on `armature_data`.
 
     A candidate is the root of a linear run whose name identifies a swing part
@@ -286,6 +324,7 @@ def detect_chains(armature_data, only_selected=False, min_length=2):
 
     found = []
     claimed = set()
+    too_short = []
     for bone in bones:
         part, direction = classified.get(bone.name, (None, ''))
         if part is None or bone.name in claimed:
@@ -301,6 +340,7 @@ def detect_chains(armature_data, only_selected=False, min_length=2):
 
         run = linear_run(bone)
         if len(run) < min_length:
+            too_short.append(bone.name)
             continue
         chain = ProposedChain(run, part, direction)
         if len(run[-1].children) > 1:
@@ -322,7 +362,33 @@ def detect_chains(armature_data, only_selected=False, min_length=2):
                 chain.warnings.append(
                     'family "{}" was claimed by {} chains; numbered to keep them apart'
                     .format(family, len(chains)))
+
+    # Why candidates were passed over. Without this, a rig whose bones are all
+    # named in a vocabulary this does not know - or whose chains are single
+    # bones - reports "nothing detected" and gives no way to tell which.
+    if info is not None:
+        info['too_short'] = too_short
+        info['unrecognised'] = [b.name for b in bones
+                                if _LEADING_S.match(b.name)
+                                and classified.get(b.name, (None, ''))[0] is None]
     return found
+
+
+def detection_hint(info, min_length):
+    """One line naming what detection skipped, or '' when it skipped nothing."""
+    def sample(names):
+        return ', '.join(names[:4]) + ('...' if len(names) > 4 else '')
+
+    bits = []
+    too_short = info.get('too_short') or []
+    if too_short:
+        bits.append('{} run(s) shorter than Min Chain Length {} ({})'.format(
+            len(too_short), min_length, sample(too_short)))
+    unrecognised = info.get('unrecognised') or []
+    if unrecognised:
+        bits.append('{} S_ bone(s) with an unrecognised part word ({})'.format(
+            len(unrecognised), sample(unrecognised)))
+    return '; ' + '; '.join(bits) if bits else ''
 
 
 # ---------------------------------------------------------------------------
@@ -463,14 +529,17 @@ class SUB_OP_auto_swing_detect(Operator):
     def execute(self, context):
         ob = _armature(context)
         settings = context.scene.sub_auto_swing
+        info = {}
         chains = detect_chains(ob.data,
                                only_selected=settings.only_selected,
-                               min_length=settings.min_length)
+                               min_length=settings.min_length,
+                               info=info)
         _store(settings.proposals, chains)
+        hint = detection_hint(info, settings.min_length)
         if not chains:
-            self.report({'WARNING'}, 'No swing chains detected')
+            self.report({'WARNING'}, 'No swing chains detected' + hint)
         else:
-            self.report({'INFO'}, 'Detected {} chain(s)'.format(len(chains)))
+            self.report({'INFO'}, 'Detected {} chain(s)'.format(len(chains)) + hint)
         return {'FINISHED'}
 
 
