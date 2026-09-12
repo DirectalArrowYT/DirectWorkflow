@@ -352,11 +352,17 @@ def map_bones_by_proximity(reference_armature_obj, target_armature_obj, radius_s
         if not identifier:
             continue
 
+        # Both sides, always. conversion_map pairs custom bones by identifier
+        # and keeps only the ones BOTH skeletons carry, so writing the target
+        # alone left every leftover pair - swing chains, accessories - silently
+        # unbound.
+        ref_settings.custom.add_bone(identifier, ref_bone)
         target_settings.custom.add_bone(identifier, target_bone)
         used_targets.add(target_bone)
         mapped_ref_bones.add(ref_bone)
         parent_map[ref_bone] = target_bone
         custom_count += 1
 
+    ref_settings.custom.sync_all_dynamic_props()
     target_settings.custom.sync_all_dynamic_props()
     return mapped_count, custom_count

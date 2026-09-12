@@ -14,6 +14,7 @@ from bpy.app.handlers import persistent
 from ...expy_kit import operators, properties, preferences, ui, preset_handler
 from ..blender_compat import assign_action, set_pose_bone_select
 from . import guided
+from . import rig_detect
 
 
 # Auto-detection for Smash armatures
@@ -30,8 +31,9 @@ def ensure_armature_preset_tracked(armature_obj):
     if settings.active_preset or not settings.has_settings():
         return
 
-    if "smush_blender_import" in armature_obj.name.lower():
-        settings.active_preset = 'Smash.py'
+    preset, _matched, _total = rig_detect.detect_preset(armature_obj)
+    if preset:
+        settings.active_preset = preset
 
 
 def get_preset_display_label(armature_obj):
@@ -141,36 +143,33 @@ def load_preset_with_custom_bones(preset_name, armature_obj=None):
 
 
 def check_and_load_smash_preset(armature_obj):
-    """Check if an armature is a smash rig and load preset if needed"""
+    """Load the best-matching retarget preset for an armature that has none.
+
+    This used to match on the object being called "smush_blender_import", which
+    meant only the Smash rig was ever recognised - a character's source rig got
+    nothing and had to be mapped by hand. The armature's own bones decide now,
+    so an All Justice rip, a Mixamo download or a Smash rig each pick up their
+    own preset. The name is kept because the bind operator and the selection
+    handler both call it.
+    """
     if not armature_obj or armature_obj.type != 'ARMATURE':
         return False
-    
-    armature_name = armature_obj.name
-    if "smush_blender_import" not in armature_name.lower():
-        return False
-    
-    # Check if settings are already loaded
+
     if armature_obj.data.expykit_retarget.has_settings():
         ensure_armature_preset_tracked(armature_obj)
-        return False  # Already has settings
-    
-    # Load Smash preset with proper custom bone handling
+        return False  # Already mapped; never overwrite someone's own mapping
+
     try:
-        # Temporarily set as active to load preset
-        original_active = bpy.context.view_layer.objects.active
-        bpy.context.view_layer.objects.active = armature_obj
-        
-        if load_preset_with_custom_bones('Smash.py', armature_obj):
-            set_armature_active_preset(armature_obj, 'Smash.py')
-            print(f"Auto-loaded Smash preset for armature: {armature_name}")
-            
-            # Restore original active object
-            if original_active:
-                bpy.context.view_layer.objects.active = original_active
+        preset, matched, total = rig_detect.detect_preset(armature_obj)
+        if not preset:
+            return False
+        if rig_detect.apply_preset(armature_obj, preset):
+            print(f"Auto-loaded {preset} for armature {armature_obj.name} "
+                  f"({matched}/{total} bones matched)")
             return True
     except Exception as e:
-        print(f"Failed to auto-load Smash preset for {armature_name}: {e}")
-    
+        print(f"Failed to auto-load a preset for {armature_obj.name}: {e}")
+
     return False
 
 
@@ -1171,6 +1170,84 @@ class ULTIMATE_OT_retargeting_help(bpy.types.Operator):
 
 
 # Main Retargeting panel in Ultimate tab
+class ULTIMATE_OT_auto_detect_rigs(bpy.types.Operator):
+    """Work out which rig is which and set both sides of the retarget up"""
+    bl_idname = "object.ultimate_auto_detect_rigs"
+    bl_label = "Auto-Detect Rigs"
+    bl_description = (
+        "Read both armatures' bones to tell the source rig from the Smash rig, load the "
+        "matching preset onto each, pair up the bones no preset covers (swing chains and "
+        "accessories) and set the Bind To target"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    link_customs: bpy.props.BoolProperty(
+        name="Pair Extra Bones",
+        description=(
+            "Also pair bones no preset has a slot for - swing chains, accessories, spare "
+            "twist bones - as custom entries on both rigs, so they retarget too"
+        ),
+        default=True,
+    )
+    radius_scale: bpy.props.FloatProperty(
+        name="Match Radius",
+        description="Scales how far apart two bones may sit and still be paired by position",
+        default=1.0, min=0.1, max=50.0,
+    )
+    include_face: bpy.props.BoolProperty(
+        name="Pair Face Bones",
+        description=(
+            "Also pair the source rig's face bones. Off by default: a Smash rig has a dozen "
+            "face bones against an All Justice rig's ninety, expressions are baked as VIS "
+            "meshes instead, and pairing them by position lands eyelids on hair bones"
+        ),
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return sum(1 for o in context.view_layer.objects if o.type == 'ARMATURE') >= 2
+
+    def execute(self, context):
+        report = rig_detect.auto_setup(context, self.link_customs, self.radius_scale,
+                                       self.include_face)
+        source, target = report['source'], report['target']
+
+        print('\n' + '=' * 66)
+        print('Auto-Detect Rigs')
+        print('=' * 66)
+        for role, armature in (('source', source), ('target', target)):
+            if armature is None:
+                print(f'{role:8s} not found')
+                continue
+            preset, matched, total = report['presets'].get(armature.name, (None, 0, 0))
+            print(f'{role:8s} {armature.name:28s} '
+                  + (f'{preset} ({matched}/{total} bones)' if preset else 'no preset matched'))
+        for source_bone, target_bone, how in report['linked']:
+            print(f'  custom  {source_bone:24s} -> {target_bone:24s} ({how})')
+        for note in report['notes']:
+            print(f'  ! {note}')
+        print('=' * 66 + '\n')
+
+        if source is None or target is None:
+            self.report({'WARNING'},
+                        '; '.join(report['notes']) or 'Could not tell the two rigs apart')
+            return {'CANCELLED'}
+
+        bits = []
+        for role, armature in (('Source', source), ('Target', target)):
+            preset, matched, total = report['presets'].get(armature.name, (None, 0, 0))
+            bits.append(f'{role}: {armature.name} -> '
+                        + (f'{preset} ({matched}/{total})' if preset else 'no preset'))
+        message = '; '.join(bits)
+        if report['linked']:
+            message += f"; {len(report['linked'])} extra bone(s) paired"
+        if report['notes']:
+            message += '; ' + '; '.join(report['notes'])
+        self.report({'WARNING' if report['notes'] else 'INFO'}, message)
+        return {'FINISHED'}
+
+
 class SUB_PT_retargeting_main(Panel):
     """Main Retargeting panel in Ultimate tab"""
     bl_space_type = 'VIEW_3D'
@@ -1192,6 +1269,18 @@ class SUB_PT_retargeting_main(Panel):
         box = layout.box()
         col = box.column(align=True)
         col.label(text="Expy Kit Retargeting Tools", icon='ARMATURE_DATA')
+
+        detect = col.row()
+        detect.scale_y = 1.2
+        detect.operator("object.ultimate_auto_detect_rigs", icon='ZOOM_SELECTED')
+
+        active = context.object if (context.object and context.object.type == 'ARMATURE') else None
+        bind_target = getattr(scene, 'expykit_bind_to', None)
+        for role, armature in (("Source", active), ("Target", bind_target)):
+            if armature is None:
+                continue
+            col.label(text=f"{role}: {armature.name}  -  {get_preset_display_label(armature)}",
+                      icon='ARMATURE_DATA')
 
         row = col.row()
         row.scale_y = 1.4
@@ -1834,6 +1923,7 @@ def register():
         bpy.utils.register_class(ULTIMATE_OT_execute_preset_retarget)
         bpy.utils.register_class(ULTIMATE_OT_add_preset_retarget)
         bpy.utils.register_class(ULTIMATE_OT_map_bones_by_proximity)
+        bpy.utils.register_class(ULTIMATE_OT_auto_detect_rigs)
         bpy.utils.register_class(ULTIMATE_MT_retarget_presets)
         bpy.utils.register_class(ULTIMATE_OT_bind_armatures)
         bpy.utils.register_class(ULTIMATE_OT_retargeting_help)
