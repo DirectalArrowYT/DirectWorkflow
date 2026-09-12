@@ -10,6 +10,11 @@ This takes one PSA at a time: import it onto the source rig, bake it onto the
 Smash rig through the constraints that are already there, then throw the
 imported action away. Only the baked results stay in the file.
 
+Give it an export folder as well and the baked action is written straight out
+as .nuanmb through the addon's own animation exporter and then dropped too, so
+the round trip - import, bake, export - leaves the .blend exactly as it started
+rather than several hundred actions heavier.
+
 Sub-folders are walked, because that is how the game ships them - one Animation
 folder with a folder per category underneath.
 """
@@ -99,6 +104,55 @@ def import_psa_actions(context, armature, filepath):
     return new_actions, warnings
 
 
+class _Reporter:
+    """Stands in for the operator that export_model_anim_fast reports through."""
+
+    def __init__(self):
+        self.messages = []
+
+    def report(self, level, message):
+        self.messages.append((next(iter(level)) if level else 'INFO', message))
+
+
+def export_action(context, armature, action, folder):
+    """Write one action out as .nuanmb, the same way the Animation Exporter does.
+
+    Returns the file path. The action has to be the one on the rig when the
+    exporter walks the frames, so it is assigned first.
+    """
+    from ..anim.export_anim import (ensure_nuanmb_filename, export_model_anim_fast,
+                                    sanitize_filename)
+    from ..blender_compat import assign_action
+
+    directory = bpy.path.abspath(folder)
+    os.makedirs(directory, exist_ok=True)
+
+    if armature.animation_data is None:
+        armature.animation_data_create()
+    assign_action(armature.animation_data, action)
+
+    start, end = action.frame_range
+    first_frame = int(round(start))
+    last_frame = max(int(round(end)), first_frame)
+
+    filepath = os.path.join(directory,
+                            ensure_nuanmb_filename(sanitize_filename(action.name)))
+
+    scene_properties = context.scene.sub_scene_properties
+    override_bones = [item.name for item in
+                      getattr(scene_properties, 'anim_override_bone_list', ())]
+    use_exclude_list = getattr(scene_properties, 'anim_override_use_exclude_list', True)
+
+    reporter = _Reporter()
+    export_model_anim_fast(
+        context, reporter, armature, filepath,
+        True, True, True,            # transform, material and visibility tracks
+        first_frame, last_frame,
+        False, False, False, False, False,
+        override_bones, use_exclude_list)
+    return filepath, [message for _level, message in reporter.messages]
+
+
 def discard_action(armature, action):
     """Delete an imported action, unhooking it first so nothing keeps it alive."""
     animation_data = armature.animation_data
@@ -113,12 +167,16 @@ def discard_action(armature, action):
 
 def bake_psa_folder(context, driver, constrained, folder, recursive=True,
                     discard_imported=True, fake_user_new=True, exclude_deform=False,
-                    keep_ik_bones=True, limit=0):
-    """Import, bake and discard every PSA under `folder`. Returns a summary dict.
+                    keep_ik_bones=True, limit=0, export_folder='', discard_baked=True):
+    """Import, bake and (optionally) export every PSA under `folder`.
 
     `driver` is the rig the PSAs are authored for (the source rig the Smash rig
     is bound to) and `constrained` is the rig that gets the baked actions.
-    `limit` above zero stops after that many files, for a trial run.
+    `limit` above zero stops after that many files, for a trial run. With an
+    `export_folder`, each baked action is written out as .nuanmb and then
+    dropped when `discard_baked` is set, so nothing accumulates in the .blend.
+
+    Returns a summary dict.
     """
     from ...expy_kit.operators import (select_bones_for_visual_bake,
                                        bake_one_constrained_action)
@@ -126,7 +184,7 @@ def bake_psa_folder(context, driver, constrained, folder, recursive=True,
     files = iter_psa_files(folder, recursive)
     if limit > 0:
         files = files[:limit]
-    summary = {'files': len(files), 'baked': [], 'skipped': [], 'warnings': []}
+    summary = {'files': len(files), 'baked': [], 'exported': [], 'skipped': [], 'warnings': []}
     if not files:
         summary['warnings'].append('no .psa files found in {}'.format(folder))
         return summary
@@ -166,7 +224,24 @@ def bake_psa_folder(context, driver, constrained, folder, recursive=True,
                 summary['warnings'].append('{}: nothing baked'.format(source_name))
             else:
                 summary['baked'].append(baked.name)
-                print('  [{}/{}] {} -> {}'.format(index, len(files), filename, baked.name))
+                line = '  [{}/{}] {} -> {}'.format(index, len(files), filename, baked.name)
+
+                if export_folder:
+                    try:
+                        filepath, messages = export_action(
+                            context, constrained, baked, export_folder)
+                    except Exception as error:
+                        summary['warnings'].append(
+                            '{}: export failed ({})'.format(baked.name, error))
+                    else:
+                        summary['exported'].append(filepath)
+                        summary['warnings'].extend(
+                            '{}: {}'.format(baked.name, m) for m in messages)
+                        line += ' -> {}'.format(os.path.basename(filepath))
+                        # Exported and on disk, so the .blend does not need it.
+                        if discard_baked:
+                            discard_action(constrained, baked)
+                print(line)
 
             # The bake renames the imported action to <name>_old; this is the
             # same datablock, so it goes whether it was renamed or not.

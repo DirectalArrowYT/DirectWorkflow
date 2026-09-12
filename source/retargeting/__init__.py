@@ -1513,6 +1513,22 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
         default=True,
     )
 
+    export_folder: bpy.props.StringProperty(
+        name="Export Folder",
+        description="Write each baked action here as .nuanmb, using the addon's own "
+                    "Animation Exporter. Leave empty to keep the baked actions in the .blend "
+                    "instead",
+        subtype='DIR_PATH',
+        default="",
+    )
+
+    discard_baked: bpy.props.BoolProperty(
+        name="Discard Baked After Export",
+        description="Delete each baked action once it is written out, so importing, baking "
+                    "and exporting leaves the .blend as it started",
+        default=True,
+    )
+
     psa_limit: bpy.props.IntProperty(
         name="Stop After",
         description="Bake only this many files, for a trial run. 0 bakes the whole folder",
@@ -1590,9 +1606,13 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
         if self.source_mode == 'PSA_FOLDER':
             box = column.box()
             box.prop(self, "psa_folder")
+            box.prop(self, "export_folder")
             row = box.row(align=True)
             row.prop(self, "psa_recursive")
             row.prop(self, "discard_imported")
+            row = box.row(align=True)
+            row.enabled = bool(self.export_folder)
+            row.prop(self, "discard_baked")
             box.prop(self, "psa_limit")
             if self.psa_folder:
                 from . import psa_batch
@@ -1733,6 +1753,8 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
                 exclude_deform=self.exclude_deform,
                 keep_ik_bones=self.keep_ik_bones,
                 limit=self.psa_limit,
+                export_folder=self.export_folder,
+                discard_baked=self.discard_baked,
             )
         finally:
             if window:
@@ -1740,7 +1762,8 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
 
         for warning in summary['warnings']:
             print(f'  ! {warning}')
-        print(f"  baked {len(summary['baked'])} action(s) from {summary['files']} file(s)")
+        print(f"  baked {len(summary['baked'])} action(s) from {summary['files']} file(s)"
+              + (f", exported {len(summary['exported'])}" if summary['exported'] else ''))
         print('=' * 66 + '\n')
 
         if not summary['baked']:
@@ -1749,6 +1772,10 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
             return {'CANCELLED'}
 
         message = (f"Baked {len(summary['baked'])} action(s) from {summary['files']} PSA file(s)")
+        if summary['exported']:
+            message += f", exported {len(summary['exported'])}"
+            if self.discard_baked:
+                message += " and kept none in the .blend"
         if summary['skipped']:
             message += f", {len(summary['skipped'])} file(s) held nothing"
         if summary['warnings']:
