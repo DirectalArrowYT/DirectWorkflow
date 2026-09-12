@@ -1216,7 +1216,7 @@ class ULTIMATE_OT_auto_detect_rigs(bpy.types.Operator):
         print('\n' + '=' * 66)
         print('Auto-Detect Rigs')
         print('=' * 66)
-        for role, armature in (('source', source), ('target', target)):
+        for role, armature in (('motion from', source), ('animating', target)):
             if armature is None:
                 print(f'{role:8s} not found')
                 continue
@@ -1235,10 +1235,10 @@ class ULTIMATE_OT_auto_detect_rigs(bpy.types.Operator):
             return {'CANCELLED'}
 
         bits = []
-        for role, armature in (('Source', source), ('Target', target)):
+        for role, armature in (('Animating', target), ('from', source)):
             preset, matched, total = report['presets'].get(armature.name, (None, 0, 0))
-            bits.append(f'{role}: {armature.name} -> '
-                        + (f'{preset} ({matched}/{total})' if preset else 'no preset'))
+            bits.append(f'{role} {armature.name} '
+                        + (f'({preset} {matched}/{total})' if preset else '(no preset)'))
         message = '; '.join(bits)
         if report['linked']:
             message += f"; {len(report['linked'])} extra bone(s) paired"
@@ -1274,9 +1274,11 @@ class SUB_PT_retargeting_main(Panel):
         detect.scale_y = 1.2
         detect.operator("object.ultimate_auto_detect_rigs", icon='ZOOM_SELECTED')
 
+        # Binding animates the ACTIVE rig using the one in Bind To, so that is
+        # how they are labelled here - "Bind To" alone reads either way round.
         active = context.object if (context.object and context.object.type == 'ARMATURE') else None
         bind_target = getattr(scene, 'expykit_bind_to', None)
-        for role, armature in (("Source", active), ("Target", bind_target)):
+        for role, armature in (("Animating", active), ("Motion from", bind_target)):
             if armature is None:
                 continue
             col.label(text=f"{role}: {armature.name}  -  {get_preset_display_label(armature)}",

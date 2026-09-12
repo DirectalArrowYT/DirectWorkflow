@@ -103,6 +103,47 @@ class HumanFingers(HumanLimb):
             self.pinky = pinky
 
 
+def _custom_bone_items(custom):
+    """(identifier, bone name) pairs actually stored on one skeleton.
+
+    NOT a dir() walk. Both custom-bone containers add their dynamic properties
+    to the CLASS, with the bone name as the property default, so every other
+    skeleton reports that same bone until it sets its own value. Enumerating
+    with dir() therefore invented pairs out of another rig's bones: mapping
+    AC_R_slirt_A to AC_R_slirt_A, and aiming a constraint at a bone the target
+    armature does not have.
+
+    The collection (Blender) and the instance dict (preset) hold only what was
+    really set on this skeleton. A rig whose entries have not been migrated yet
+    still falls back to the old walk, so nothing saved earlier is lost.
+    """
+    if not custom:
+        return []
+
+    entries = getattr(custom, 'entries', None)
+    if entries is not None and len(entries):
+        return [(item.identifier, item.bone) for item in entries
+                if item.identifier and item.bone]
+
+    instance_dict = getattr(custom, '__dict__', None)
+    if isinstance(instance_dict, dict) and instance_dict:
+        return [(key, value) for key, value in instance_dict.items()
+                if key != 'name' and isinstance(value, str) and value]
+
+    items = []
+    for attr_name in dir(custom):
+        if attr_name.startswith('__') or attr_name == 'name':
+            continue
+        try:
+            value = getattr(custom, attr_name)
+        except Exception:
+            continue
+        if callable(value) or not isinstance(value, str) or not value:
+            continue
+        items.append((attr_name, value))
+    return items
+
+
 class HumanSkeleton:
     face = None
     root = None
@@ -258,17 +299,8 @@ class HumanSkeleton:
             yield self.custom.name
             
         # Support for dynamic custom bone properties
-        if self.custom:
-            for attr_name in dir(self.custom):
-                # Skip methods, special attributes, and the name property
-                if (callable(getattr(self.custom, attr_name)) or 
-                    attr_name.startswith('__') or 
-                    attr_name == 'name'):
-                    continue
-                    
-                bone_name = getattr(self.custom, attr_name)
-                if bone_name and isinstance(bone_name, str):
-                    yield bone_name
+        for _identifier, bone_name in _custom_bone_items(self.custom):
+            yield bone_name
 
     def conversion_map(self, target_skeleton, skip_ik=False):
         """Return a dictionary that maps skeleton bone names to target bone names
@@ -360,36 +392,12 @@ class HumanSkeleton:
             
         # Support for dynamic custom bone properties
         if self.custom and target_skeleton.custom:
-            # Get all custom bone properties from source and target
-            src_props = {}
-            trg_props = {}
-            
-            # Process source custom properties
-            for attr_name in dir(self.custom):
-                if (callable(getattr(self.custom, attr_name)) or 
-                    attr_name.startswith('__') or 
-                    attr_name == 'name'):
-                    continue
-                
-                bone_name = getattr(self.custom, attr_name)
-                if bone_name and isinstance(bone_name, str):
-                    src_props[attr_name] = bone_name
-            
-            # Process target custom properties
-            for attr_name in dir(target_skeleton.custom):
-                if (callable(getattr(target_skeleton.custom, attr_name)) or 
-                    attr_name.startswith('__') or 
-                    attr_name == 'name'):
-                    continue
-                
-                bone_name = getattr(target_skeleton.custom, attr_name)
-                if bone_name and isinstance(bone_name, str):
-                    trg_props[attr_name] = bone_name
-            
-            # Map source bones to target bones by matching property names
-            for prop_name in src_props:
-                if prop_name in trg_props:
-                    bone_map[src_props[prop_name]] = trg_props[prop_name]
+            src_props = dict(_custom_bone_items(self.custom))
+            trg_props = dict(_custom_bone_items(target_skeleton.custom))
+            for prop_name, src_bone in src_props.items():
+                trg_bone = trg_props.get(prop_name)
+                if trg_bone:
+                    bone_map[src_bone] = trg_bone
 
         return bone_map
 

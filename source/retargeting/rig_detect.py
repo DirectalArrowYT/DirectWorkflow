@@ -256,6 +256,52 @@ def _combiner_name(source_name):
     return merged_name(source_name, 'S_', 'H_')
 
 
+def prune_custom_bones(armature):
+    """Drop custom entries naming a bone this armature does not have.
+
+    An entry pointing at a bone that is not there binds nothing, and the stale
+    name is how a rename (S_R_slirt_A becoming S_SkirtR1) turns a working pair
+    into a dead one. Returns the identifiers removed.
+    """
+    settings = armature.data.expykit_retarget
+    settings.custom.migrate_legacy_bones()
+    bones = {bone.name for bone in armature.data.bones}
+    stale = [item.identifier for item in settings.custom.entries
+             if item.bone and item.bone not in bones]
+    for identifier in stale:
+        settings.custom.remove_bone(identifier)
+    if stale:
+        settings.custom.sync_all_dynamic_props()
+    return stale
+
+
+def drop_half_pairs(source_settings, target_settings):
+    """Remove custom entries whose identifier is missing on the other rig.
+
+    A custom bone binds only when BOTH skeletons carry the identifier, so a
+    lone entry does nothing - and it still marks its bone as spoken for, which
+    is how a rename quietly kills a pair for good: the Smash side is pruned as
+    stale, the source side survives, and the bone is then skipped as already
+    claimed instead of being matched to its new name. Dropping both halves lets
+    the pair be rebuilt. Returns the identifiers removed.
+    """
+    source_settings.custom.migrate_legacy_bones()
+    target_settings.custom.migrate_legacy_bones()
+    source_ids = {i for i, _bone in source_settings.custom.get_bones()}
+    target_ids = {i for i, _bone in target_settings.custom.get_bones()}
+
+    dropped = []
+    for settings, orphans in ((source_settings, source_ids - target_ids),
+                              (target_settings, target_ids - source_ids)):
+        for identifier in sorted(orphans):
+            settings.custom.remove_bone(identifier)
+            dropped.append(identifier)
+    if dropped:
+        source_settings.custom.sync_all_dynamic_props()
+        target_settings.custom.sync_all_dynamic_props()
+    return dropped
+
+
 def link_custom_bones(source, target, radius_scale=1.0, include_face=False):
     """Pair leftover bones between two rigs as custom entries on BOTH skeletons.
 
@@ -270,6 +316,9 @@ def link_custom_bones(source, target, radius_scale=1.0, include_face=False):
 
     source_settings = source.data.expykit_retarget
     target_settings = target.data.expykit_retarget
+    prune_custom_bones(source)
+    prune_custom_bones(target)
+    drop_half_pairs(source_settings, target_settings)
 
     claimed_source = _slot_bone_names(source_settings)
     claimed_target = _slot_bone_names(target_settings)
@@ -340,7 +389,11 @@ def apply_preset(armature, preset_name):
 
 
 def auto_setup(context, link_customs=True, radius_scale=1.0, include_face=False):
-    """Detect both rigs, load their presets, pair the leftovers. Returns a report."""
+    """Detect both rigs, load their presets, pair the leftovers. Returns a report.
+
+    report['source'] is the rig the animation comes from (the All Justice rip)
+    and report['target'] is the Smash rig being animated.
+    """
     source, target, notes = detect_pair(candidate_armatures(context))
     report = {'source': source, 'target': target, 'notes': notes,
               'presets': {}, 'linked': []}
@@ -356,17 +409,22 @@ def auto_setup(context, link_customs=True, radius_scale=1.0, include_face=False)
     if link_customs:
         report['linked'] = link_custom_bones(source, target, radius_scale, include_face)
 
+    # Which way round binding wants them: expykit_constrain_to_armature
+    # constrains "bones of selected armatures to active armature", so the
+    # ACTIVE rig is the one the motion is read from and the SELECTED rig is the
+    # one that gets the constraints. Bind Armatures then swaps them itself -
+    # it makes expykit_bind_to active - so Bind To has to name the rig the
+    # animation comes FROM, and the Smash rig has to be the active one.
     scene = context.scene
     if hasattr(scene, 'expykit_bind_to'):
-        scene.expykit_bind_to = target
-    # Binding reads the source off the active object.
-    if source.name not in context.view_layer.objects:
+        scene.expykit_bind_to = source
+    if target.name not in context.view_layer.objects:
         report['notes'].append(
             '{} is not in this view layer - its collection is excluded, so binding '
-            'cannot make it active'.format(source.name))
+            'cannot make it active'.format(target.name))
     else:
         for obj in context.selected_objects:
             obj.select_set(False)
-        source.select_set(True)
-        context.view_layer.objects.active = source
+        target.select_set(True)
+        context.view_layer.objects.active = target
     return report
