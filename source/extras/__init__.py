@@ -27,6 +27,7 @@ from . import fighter_scale
 from . import smart_hair_seams
 from . import smart_normals
 from . import rotate_animation
+from . import eye_converter
 from . import protect_datablocks
 from . import rename_utils
 from . import fk_to_ik

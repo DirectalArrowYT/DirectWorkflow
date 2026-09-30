@@ -548,6 +548,31 @@ class SUB_PT_model_roll_preset(_SidebarPanel, Panel):
         box.label(text="Extra bones (scarves, coats, IK) are untouched.")
 
 
+class SUB_PT_model_eyes(_SidebarPanel, Panel):
+    bl_label = 'Eye Converter (MHA)'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.scale_y = 0.8
+        col.label(text="Turns an MHA eye + iris mesh into Smash", icon="INFO")
+        col.label(text="scrolling eyes (iris decal on uvSet,")
+        col.label(text="EyeL/EyeR materials, CustomVector31).")
+        obj = context.active_object
+        row = layout.row()
+        row.scale_y = 1.3
+        row.enabled = obj is not None and obj.type == 'MESH'
+        row.operator_context = 'INVOKE_DEFAULT'
+        row.operator("sub.convert_mha_eyes", icon="HIDE_OFF")
+        if obj is None or obj.type != 'MESH':
+            layout.label(text="Select the mesh with the eyes.")
+
+
 # Parents before children.
 PANELS = (
     SUB_PT_anim_rig,
@@ -555,7 +580,7 @@ PANELS = (
     SUB_PT_anim_eyes,
     SUB_PT_anim_utilities, SUB_PT_anim_mirror,
     SUB_PT_anim_legacy_ik, SUB_PT_anim_bulk_ik,
-    SUB_PT_model_viewport, SUB_PT_model_mesh, SUB_PT_model_uvs,
+    SUB_PT_model_viewport, SUB_PT_model_mesh, SUB_PT_model_uvs, SUB_PT_model_eyes,
     SUB_PT_model_bones, SUB_PT_model_bone_rolls, SUB_PT_model_bone_symmetry, SUB_PT_model_roll_preset,
 )
 

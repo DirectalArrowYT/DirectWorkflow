@@ -44,6 +44,7 @@ LAYOUT = {
         "SUB_PT_model_viewport",
         "SUB_PT_model_mesh",
         "SUB_PT_model_uvs",
+        "SUB_PT_model_eyes",
         "SUB_PT_model_bones",
         "SUB_PT_bake_texs",
         "SUB_PT_vis_mesh_bake",
