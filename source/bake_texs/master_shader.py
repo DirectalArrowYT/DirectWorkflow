@@ -995,7 +995,7 @@ class SUB_OP_hb_master_shader_preset(Operator):
 class SUB_PT_hb_master_shader(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Master Shader'
     bl_parent_id = "SUB_PT_bake_texs"
     bl_options = {'DEFAULT_CLOSED'}

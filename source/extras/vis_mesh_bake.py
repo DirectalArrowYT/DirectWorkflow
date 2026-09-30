@@ -967,7 +967,7 @@ class SUB_OP_vis_bake_run(Operator):
 class SUB_PT_vis_mesh_bake(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'VIS Mesh Bake'
     bl_options = {'DEFAULT_CLOSED'}
 

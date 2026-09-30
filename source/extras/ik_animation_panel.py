@@ -8,7 +8,7 @@ class SUB_PT_ik_animation_tools(Panel):
     bl_idname = "SUB_PT_ik_animation_tools"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "SUB_PT_animation_tools"
 
     @classmethod

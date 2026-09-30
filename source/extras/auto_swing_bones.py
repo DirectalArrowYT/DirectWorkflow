@@ -835,7 +835,7 @@ class SUB_UL_auto_swing_proposals(UIList):
 class SUB_PT_auto_swing_bones(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Auto Swing Bones'
     bl_options = {'DEFAULT_CLOSED'}
 

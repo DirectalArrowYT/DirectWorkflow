@@ -4,7 +4,7 @@ from bpy.types import Panel
 class SUB_PT_bake_texs(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Bake Textures'
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -53,7 +53,7 @@ class SUB_PT_bake_texs(Panel):
 class SUB_PT_bake_texs_channels(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Channels'
     bl_parent_id = "SUB_PT_bake_texs"
     bl_options = {'DEFAULT_CLOSED'}
@@ -93,7 +93,7 @@ class SUB_PT_bake_texs_channels(Panel):
 class SUB_PT_bake_texs_output(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Bake & Output Settings'
     bl_parent_id = "SUB_PT_bake_texs"
     bl_options = {'DEFAULT_CLOSED'}

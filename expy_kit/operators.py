@@ -3626,6 +3626,14 @@ def register_classes():
     bpy.types.Action.expykit_name_candidates = bpy.props.CollectionProperty(type=ActionNameCandidates)
 
 
+def _safe_unregister(cls):
+    """Unregister a class if it is registered. The Smash retargeting module unregisters some of
+    these (Expy Kit's own panels, ConstrainToArmature) and replaces them, and one failure here
+    used to abort the rest, which left classes behind and broke re-enabling the add-on."""
+    if getattr(cls, 'is_registered', False):
+        bpy.utils.unregister_class(cls)
+
+
 def unregister_classes():
     # Clean up SAP sync timer and data
     if bpy.app.timers.is_registered(_sap_sync_timer_func):
@@ -3638,22 +3646,22 @@ def unregister_classes():
 
     del bpy.types.Action.expykit_name_candidates
 
-    bpy.utils.unregister_class(ActionRangeToScene)
-    bpy.utils.unregister_class(ActionEndToLastKeyframe)
-    bpy.utils.unregister_class(ConstraintStatus)
-    bpy.utils.unregister_class(SelectConstrainedControls)
-    bpy.utils.unregister_class(ConvertBoneNaming)
-    bpy.utils.unregister_class(ConvertGameFriendly)
-    bpy.utils.unregister_class(ExtractMetarig)
-    bpy.utils.unregister_class(MergeHeadTails)
-    bpy.utils.unregister_class(RevertDotBoneNames)
-    bpy.utils.unregister_class(ConstrainToArmature)
-    bpy.utils.unregister_class(BakeConstrainedActions)
-    bpy.utils.unregister_class(ClearSAPSync)
-    bpy.utils.unregister_class(RenameActionsFromFbxFiles)
-    bpy.utils.unregister_class(CreateTransformOffset)
-    bpy.utils.unregister_class(AddRootMotion)
-    bpy.utils.unregister_class(ActionNameCandidates)
+    _safe_unregister(ActionRangeToScene)
+    _safe_unregister(ActionEndToLastKeyframe)
+    _safe_unregister(ConstraintStatus)
+    _safe_unregister(SelectConstrainedControls)
+    _safe_unregister(ConvertBoneNaming)
+    _safe_unregister(ConvertGameFriendly)
+    _safe_unregister(ExtractMetarig)
+    _safe_unregister(MergeHeadTails)
+    _safe_unregister(RevertDotBoneNames)
+    _safe_unregister(ConstrainToArmature)
+    _safe_unregister(BakeConstrainedActions)
+    _safe_unregister(ClearSAPSync)
+    _safe_unregister(RenameActionsFromFbxFiles)
+    _safe_unregister(CreateTransformOffset)
+    _safe_unregister(AddRootMotion)
+    _safe_unregister(ActionNameCandidates)
 
 # --- Utility: Sync vis/material track entries from source to target armature data ---
 def sync_vis_and_mat_tracks(source_data, target_data):

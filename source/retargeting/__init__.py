@@ -2,7 +2,7 @@
 Retargeting module - Integration of expy_kit into Smash Ultimate Blender Tools
 This module provides 1:1 integration of expy_kit retargeting tools.
 Panels are always visible and will guide the user to enter POSE mode when necessary.
-All functionality is consolidated in the 'Retargeting' section of the 'Ultimate' tab.
+All functionality is consolidated in the 'Retargeting' section of the 'Smash Anim' tab.
 """
 import bpy
 import os
@@ -1252,7 +1252,7 @@ class SUB_PT_retargeting_main(Panel):
     """Main Retargeting panel in Ultimate tab"""
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Retargeting'
     bl_options = {'DEFAULT_CLOSED'}
     bl_order = 80
@@ -1302,7 +1302,7 @@ class SUB_PT_retargeting_main(Panel):
 
 class ULTIMATE_PT_expy_retarget(ui.VIEW3D_PT_expy_retarget):
     """Expy Mapping panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "SUB_PT_retargeting_main"
     
     @classmethod
@@ -1344,7 +1344,7 @@ class ULTIMATE_PT_expy_retarget(ui.VIEW3D_PT_expy_retarget):
 
 class ULTIMATE_PT_BindPanel(ui.VIEW3D_PT_BindPanel):
     """Bind To panel in Ultimate tab with custom bind operator"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "SUB_PT_retargeting_main"
     bl_label = "Bind To"
     
@@ -1371,7 +1371,7 @@ class ULTIMATE_PT_BindSettings(Panel):
     """Legacy duplicate panel. Kept only so addon reload can unregister it."""
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = "Bind to Active Armature"
     bl_parent_id = "SUB_PT_retargeting_main"
 
@@ -1387,7 +1387,7 @@ class ULTIMATE_PT_ActionsPanel(Panel):
     """Actions panel - contains Binding, Conversion, and Animation operators"""
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = "Actions"
     bl_parent_id = "SUB_PT_retargeting_main"
     bl_options = {'DEFAULT_CLOSED'}
@@ -1407,7 +1407,7 @@ class ULTIMATE_PT_ActionsBinding(Panel):
     """Binding sub-panel under Actions"""
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = "Binding"
     bl_parent_id = "ULTIMATE_PT_ActionsPanel"
     bl_options = {'DEFAULT_CLOSED'}
@@ -1430,7 +1430,7 @@ class ULTIMATE_PT_ActionsConversion(Panel):
     """Conversion sub-panel under Actions"""
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = "Conversion"
     bl_parent_id = "ULTIMATE_PT_ActionsPanel"
     bl_options = {'DEFAULT_CLOSED'}
@@ -1454,7 +1454,7 @@ class ULTIMATE_PT_ActionsAnimation(Panel):
     """Animation sub-panel under Actions"""
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = "Animation"
     bl_parent_id = "ULTIMATE_PT_ActionsPanel"
     bl_options = {'DEFAULT_CLOSED'}
@@ -1905,7 +1905,7 @@ class ULTIMATE_OT_bake_actions(bpy.types.Operator):
 
 class ULTIMATE_PT_retarget_spine(ui.VIEW3D_PT_expy_retarget_spine):
     """Core panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"
     
     @classmethod
@@ -1916,7 +1916,7 @@ class ULTIMATE_PT_retarget_spine(ui.VIEW3D_PT_expy_retarget_spine):
 
 class ULTIMATE_PT_retarget_arms(ui.VIEW3D_PT_expy_retarget_arms):
     """Arms panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"
     
     @classmethod
@@ -1927,7 +1927,7 @@ class ULTIMATE_PT_retarget_arms(ui.VIEW3D_PT_expy_retarget_arms):
 
 class ULTIMATE_PT_retarget_arms_IK(ui.VIEW3D_PT_expy_retarget_arms_IK):
     """Arms IK panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"
     
     @classmethod
@@ -1937,7 +1937,7 @@ class ULTIMATE_PT_retarget_arms_IK(ui.VIEW3D_PT_expy_retarget_arms_IK):
 
 class ULTIMATE_PT_retarget_legs(ui.VIEW3D_PT_expy_retarget_leg):
     """Legs panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"
     
     @classmethod
@@ -1947,7 +1947,7 @@ class ULTIMATE_PT_retarget_legs(ui.VIEW3D_PT_expy_retarget_leg):
 
 class ULTIMATE_PT_retarget_legs_IK(ui.VIEW3D_PT_expy_retarget_leg_IK):
     """Legs IK panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"
     
     @classmethod
@@ -1957,7 +1957,7 @@ class ULTIMATE_PT_retarget_legs_IK(ui.VIEW3D_PT_expy_retarget_leg_IK):
 
 class ULTIMATE_PT_retarget_fingers(ui.VIEW3D_PT_expy_retarget_fingers):
     """Fingers panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"
     
     @classmethod
@@ -1967,7 +1967,7 @@ class ULTIMATE_PT_retarget_fingers(ui.VIEW3D_PT_expy_retarget_fingers):
 
 class ULTIMATE_PT_retarget_face(ui.VIEW3D_PT_expy_retarget_face):
     """Face panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"
     
     @classmethod
@@ -1977,7 +1977,7 @@ class ULTIMATE_PT_retarget_face(ui.VIEW3D_PT_expy_retarget_face):
 
 class ULTIMATE_PT_retarget_root(ui.VIEW3D_PT_expy_retarget_root):
     """Root panel in Ultimate tab"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"
     
     @classmethod
@@ -1987,7 +1987,7 @@ class ULTIMATE_PT_retarget_root(ui.VIEW3D_PT_expy_retarget_root):
 
 class ULTIMATE_PT_retarget_custom(ui.VIEW3D_PT_expy_retarget_custom):
     """Custom Bones panel in Ultimate tab - first item under Expy Mapping"""
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_parent_id = "ULTIMATE_PT_expy_retarget"  # Under Expy Mapping, but first
     
     @classmethod

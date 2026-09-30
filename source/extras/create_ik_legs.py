@@ -135,27 +135,12 @@ class SUB_OP_create_foot_ik_operator(bpy.types.Operator):
         layout.prop(self, "match_position")
 
 
-class SUB_PT_foot_ik_panel(bpy.types.Panel):
-    """Creates a Panel in the 3D Viewport"""
-    bl_label = "Foot IK Bone Generator"
-    bl_idname = "SUB_PT_foot_ik_panel"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'IK Bones'
-
-    def draw(self, context):
-        layout = self.layout
-        layout.operator("sub.create_foot_ik", text="Generate Foot IK Bones")
-
-
 def register():
     bpy.utils.register_class(SUB_OP_create_foot_ik_operator)
-    bpy.utils.register_class(SUB_PT_foot_ik_panel)
 
 
 def unregister():
     bpy.utils.unregister_class(SUB_OP_create_foot_ik_operator)
-    bpy.utils.unregister_class(SUB_PT_foot_ik_panel)
 
 
 if __name__ == "__main__":

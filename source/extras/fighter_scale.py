@@ -553,7 +553,7 @@ class SUB_OP_fighter_scale_apply(Operator):
 class SUB_PT_fighter_scale(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Fighter Scale'
     bl_options = {'DEFAULT_CLOSED'}
 

@@ -163,27 +163,12 @@ class SUB_OP_apply_ik_animation_operator(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class SUB_PT_apply_ik_animation_panel(bpy.types.Panel):
-    """Creates a Panel in the 3D Viewport"""
-    bl_label = "Apply IK Animation"
-    bl_idname = "SUB_PT_apply_ik_animation_panel"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "IK Bones"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.operator("sub.apply_ik_animation", text="Bake & Remove IK")
-
-
 def register():
     bpy.utils.register_class(SUB_OP_apply_ik_animation_operator)
-    bpy.utils.register_class(SUB_PT_apply_ik_animation_panel)
 
 
 def unregister():
     bpy.utils.unregister_class(SUB_OP_apply_ik_animation_operator)
-    bpy.utils.unregister_class(SUB_PT_apply_ik_animation_panel)
 
 
 if __name__ == "__main__":

@@ -351,7 +351,7 @@ class SUB_OP_weapon_bake_chain_ik(bpy.types.Operator):
 class SUB_PT_weapon_rig(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Weapon Rig'
 
     def draw(self, context):

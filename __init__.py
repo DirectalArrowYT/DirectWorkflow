@@ -96,6 +96,13 @@ def register():
     from .source.extras import protect_datablocks
     protect_datablocks.register_handler()
 
+    # Sidebar tabs and panel order (source/ui_tabs.py). Last, so it sees every panel.
+    try:
+        from .source import ui_tabs
+        ui_tabs.organize(__name__)
+    except Exception as e:
+        print(f'Could not organize the sidebar tabs: {e}')
+
     print('Loaded Smash Ultimate Blender Tools!')
 
 def unregister():
