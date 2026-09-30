@@ -786,6 +786,10 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
         if context.mode != 'POSE':
             bpy.ops.object.mode_set(mode='POSE')
 
+        from . import smash_ik
+        if smash_ik.has_ik_v2(armature_object):
+            return self._execute_ik_v2(context, armature_object)
+
         _set_ik_driven_fcurves_muted(armature_object, False)
         _set_ik_control_fcurves_muted(armature_object, True)
 
@@ -860,6 +864,31 @@ class SUB_OP_fk_to_ik_transfer(bpy.types.Operator):
                 
             return {'FINISHED'}
     
+    def _execute_ik_v2(self, context, armature_object):
+        """Analytic IK rig (smash_ik): matching is exact and needs no per-limb solving here."""
+        from . import smash_ik
+        from .create_animation_rig import _set_ik_enabled
+        scene = context.scene
+        frames = range(scene.frame_start, scene.frame_end + 1) if self.entire_animation else None
+        count = smash_ik.match_ik_to_fk(
+            context, armature_object, frames, insert_keys=self._should_key()
+        )
+        if self.entire_animation:
+            keep_frame = scene.frame_start if self.reference_frame == 'FIRST' else scene.frame_end
+            if self._should_remove_knee_frames() and self.remove_knee_frames:
+                knee_leg_names = []
+                for chain in self._iter_legs(armature_object):
+                    knee_leg_names.extend((chain['knee'].name, chain['leg'].name))
+                self.remove_fk_keyframes(context, keep_frame, knee_leg_names, "knee/leg")
+            if self._should_remove_arm_frames() and self.remove_arm_frames:
+                arm_names = [chain['arm'].name for chain in iter_arm_fk_chains(armature_object)]
+                self.remove_fk_keyframes(context, keep_frame, arm_names or ["ArmL", "ArmR"], "arm")
+            if self.reset_foot_bones:
+                self.reset_foot_bone_transforms(context)
+        _set_ik_enabled(context, armature_object, True)
+        self.report({'INFO'}, f"Positioned the IK controls on {count} frame(s)")
+        return {'FINISHED'}
+
     def _should_remove_knee_frames(self):
         return self.cleanup_mode in {'LEGS', 'BOTH'}
 

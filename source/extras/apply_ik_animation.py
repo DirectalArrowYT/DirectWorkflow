@@ -85,6 +85,9 @@ def delete_ik_bones_from_armature(armature_object):
     if not ik_bone_names:
         return []
 
+    from .smash_ik import INFO_KEY
+    armature_object.data.pop(INFO_KEY, None)
+    remove_drivers_of_bones(armature_object, ik_bone_names)
     bpy.ops.object.mode_set(mode="EDIT")
     for bone_name in ik_bone_names:
         edit_bone = armature_object.data.edit_bones.get(bone_name)
@@ -92,6 +95,19 @@ def delete_ik_bones_from_armature(armature_object):
             armature_object.data.edit_bones.remove(edit_bone)
     bpy.ops.object.mode_set(mode="OBJECT")
     return ik_bone_names
+
+
+def remove_drivers_of_bones(armature_object, bone_names):
+    """Drop drivers left on deleted bones (e.g. the IK solver drivers), which would
+    otherwise be reported as invalid on every frame."""
+    anim = armature_object.animation_data
+    if anim is None:
+        return 0
+    prefixes = tuple(f'pose.bones["{name}"]' for name in bone_names)
+    stale = [fc for fc in anim.drivers if (fc.data_path or "").startswith(prefixes)]
+    for fcurve in stale:
+        anim.drivers.remove(fcurve)
+    return len(stale)
 
 
 def bake_and_clean_current_action(context, armature_object, leg_bone_map=None, remove_ik_rig=True):

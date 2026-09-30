@@ -221,6 +221,14 @@ class SubSceneProperties(PropertyGroup):
     bulk_ik_leg_r: StringProperty(name="Leg R", default="LegR")
     bulk_ik_knee_r: StringProperty(name="Knee R", default="KneeR")
     bulk_ik_foot_r: StringProperty(name="Foot R", default="FootR")
+    anim_export_bake_rig: BoolProperty(
+        name="Bake Rig on Export",
+        description=(
+            "Export what the animation rig shows (IK limbs, finger sliders) instead of the raw FK keys, "
+            "and leave the rig controls (HandIK, FootIK, ...) out of the file. The scene is not changed"
+        ),
+        default=True,
+    )
     anim_include_raw_animation: BoolProperty(
         name="Include Raw Animation",
         description="Also export a sparse .rawanim file alongside the .nuanmb export",

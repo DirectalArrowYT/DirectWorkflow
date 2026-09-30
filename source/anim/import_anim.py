@@ -826,6 +826,7 @@ class SUB_PT_raw_animations(Panel):
         export_box = layout.box()
         export_box.label(text="Export", icon='EXPORT')
         export_box.prop(ssp, "anim_include_raw_animation", text="Include Raw with .NUANMB Export")
+        export_box.prop(ssp, "anim_export_bake_rig")
         row = export_box.row()
         row.scale_y = 1.2
         row.operator('sub.raw_anim_export', icon='EXPORT', text='Export Raw Animation')

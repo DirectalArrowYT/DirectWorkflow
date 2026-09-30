@@ -17,6 +17,7 @@ from ..blender_compat import (
     assign_bone_to_collection,
     ensure_bone_collection,
     isolate_bone_in_collection,
+    set_pose_bone_select,
 )
 from .create_animation_rig import (
     _FINGER_BONE,
@@ -56,6 +57,9 @@ FINGERS = (
 ALL_SEGMENTS = (0, 1, 2, 3)
 SEGMENTS = (1, 2, 3)
 SEGMENT_WEIGHTS = {0: 0.35, 1: 0.8, 2: 1.0, 3: 1.0}
+THUMB_SEGMENT_WEIGHTS = {1: 0.35, 2: 0.8, 3: 1.0}
+MAX_THUMB_CURL_DEGREES = 60.0
+THUMB_SIDE_WEIGHTS = {1: 0.75, 2: 0.3, 3: 0.0}
 THUMB_DIGIT = 5
 SPREAD_FACTORS = {1: 1.0, 2: 0.35, 3: -0.35, 4: -1.0, THUMB_DIGIT: 0.8}
 
@@ -265,11 +269,22 @@ def _finger_bend_axis(armature, side, digit, across, suffix, up=None, digits="")
         else:
             along = along.normalized()
 
-    # Thumb does not share the other fingers' hinge. Fold it toward the palm
-    # (down the dorsal axis of the hand box) instead of auto-detecting a
-    # sideways opposition axis from the rest pose.
+    # Thumb does not share the other fingers' hinge: it folds across the palm,
+    # toward the little finger, and down into the palm (away from the dorsal
+    # axis of the hand box) - not straight down like the other fingers.
     if digit == THUMB_DIGIT and along is not None and up is not None:
-        hinge = along.cross(-up)
+        bend = -up.normalized()
+        bases = [
+            _finger_head(armature, side, other, suffix, digits=digits)
+            for other in (1, 2, 3, 4)
+        ]
+        bases = [head for head in bases if head is not None]
+        if bases and root is not None:
+            toward_palm = sum(bases, Vector()) / len(bases) - root.head_local
+            toward_palm -= along * toward_palm.dot(along)
+            if toward_palm.length > 1e-6:
+                bend = (toward_palm.normalized() + bend).normalized()
+        hinge = along.cross(bend)
         if hinge.length > 1e-6:
             return hinge.normalized()
 
@@ -673,7 +688,12 @@ def _drive_fingers(armature_obj, side, suffix, half_travel, digits=""):
                 continue
             curl_axis, curl_sign = _curl_axis_for_finger(bone, digit, bend_vector)
 
-            weight = SEGMENT_WEIGHTS.get(segment, 1.0) * max_curl * curl_sign
+            if digit == THUMB_DIGIT:
+                # All three thumb joints at the finger maximum add up to ~250 degrees, which
+                # wraps the thumb past the palm and back over the hand.
+                weight = THUMB_SEGMENT_WEIGHTS.get(segment, 1.0) * math.radians(MAX_THUMB_CURL_DEGREES) * curl_sign
+            else:
+                weight = SEGMENT_WEIGHTS.get(segment, 1.0) * max_curl * curl_sign
             pose_bone["sub_finger_curl_axis"] = curl_axis
             pose_bone["sub_finger_curl_weight"] = weight
             if digit == THUMB_DIGIT:
@@ -723,7 +743,8 @@ def _drive_fingers(armature_obj, side, suffix, half_travel, digits=""):
                 side_axis, side_sign = _axis_from_vector(
                     bone, side_vector.normalized(), exclude=curl_axis
                 )
-                side_weight = SEGMENT_WEIGHTS.get(segment, 1.0) * max_side * side_sign
+                # Sideways (opposition) motion comes from the base of the thumb, not the tip.
+                side_weight = THUMB_SIDE_WEIGHTS.get(segment, 0.0) * max_side * side_sign
                 pose_bone["sub_finger_side_axis"] = side_axis
                 pose_bone["sub_finger_side_weight"] = side_weight
                 if offset_name in armature_obj.pose.bones:
@@ -975,13 +996,13 @@ def set_finger_slider_mode(armature_obj, use_sliders, context=None):
             if not use_sliders:
                 pose_bone = armature_obj.pose.bones.get(bone.name)
                 if pose_bone is not None:
-                    pose_bone.select = False
+                    set_pose_bone_select(pose_bone, False)
         elif is_finger_circle_bone(bone.name):
             bone.hide = use_sliders
             if use_sliders:
                 pose_bone = armature_obj.pose.bones.get(bone.name)
                 if pose_bone is not None:
-                    pose_bone.select = False
+                    set_pose_bone_select(pose_bone, False)
 
     _set_collection_visible(armature_obj.data, SLIDER_COLLECTION, use_sliders)
     _set_collection_visible(armature_obj.data, CIRCLE_COLLECTION, not use_sliders)

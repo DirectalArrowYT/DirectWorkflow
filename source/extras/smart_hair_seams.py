@@ -1115,3 +1115,275 @@ class SUB_OP_smart_hair_seams(Operator):
             view_layer.objects.active = previous_active
         self._fell_back = fell_back
         return done
+
+
+# ---------------------------------------------------------------------------
+# Bake UVs: unwrap into a second UV map, keep the cel-shade UVs for sampling
+# ---------------------------------------------------------------------------
+#
+# Smart Seams unwraps the active UV map in place, which throws away the very
+# UVs the existing (cel-shade) hair texture is mapped with - after that there
+# is nothing left to bake the texture from. MHA hair shares texture strips
+# between cards on purpose, so the original map has to stay while baking.
+#
+# Blender bakes INTO the active UV map, while Image Texture nodes without an
+# explicit vector read the active RENDER UV map. So:
+#
+#   map1   (active render)  - the original UVs, the materials keep sampling them
+#   BakeUV (active)         - a copy, re-unwrapped without overlaps; bakes land here
+#
+# and a Cycles bake transfers the cel texture onto the new layout. "Use Bake
+# UVs" then swaps BakeUV in as map1 for export (the Smash exporter only
+# accepts map1/bake1/uvSet* names), keeping the old UVs in a corner attribute
+# the exporter ignores, so "Restore Cel UVs" can bring them back.
+
+BAKE_UV_NAME = 'BakeUV'
+CEL_BACKUP_ATTRIBUTE = '_sub_cel_uv'
+CEL_BACKUP_NAME_KEY = 'sub_cel_uv_name'
+
+
+def _render_uv_layer(mesh):
+    for layer in mesh.uv_layers:
+        if layer.active_render and layer.name != BAKE_UV_NAME:
+            return layer
+    return mesh.uv_layers.get('map1') or next(
+        (layer for layer in mesh.uv_layers if layer.name != BAKE_UV_NAME), None)
+
+
+def prepare_bake_uv(mesh):
+    """Create (or reset) BakeUV as a copy of the render UV map and make it the active one,
+    leaving the render UV map as it is. Returns (source, bake) layers."""
+    source = _render_uv_layer(mesh)
+    if source is None:
+        source = mesh.uv_layers.new(name='map1')
+    existing = mesh.uv_layers.get(BAKE_UV_NAME)
+    if existing is not None:
+        mesh.uv_layers.remove(existing)
+        source = _render_uv_layer(mesh)
+    source_name = source.name
+    mesh.uv_layers.active = source
+    bake = mesh.uv_layers.new(name=BAKE_UV_NAME, do_init=True)
+    # Layer references can move when the collection grows; look both up again.
+    source = mesh.uv_layers[source_name]
+    bake = mesh.uv_layers[BAKE_UV_NAME]
+    source.active_render = True
+    mesh.uv_layers.active = bake
+    return source, bake
+
+
+def has_bake_uv(mesh):
+    return mesh.uv_layers.get(BAKE_UV_NAME) is not None
+
+
+def finalize_bake_uv(mesh):
+    """Swap BakeUV in as the render UV map (named like the original, e.g. map1). The original
+    UVs are kept in a corner attribute. Returns False when there is no BakeUV."""
+    bake = mesh.uv_layers.get(BAKE_UV_NAME)
+    if bake is None:
+        return False
+    source = _render_uv_layer(mesh)
+    source_name = source.name if source is not None else 'map1'
+    if source is not None:
+        values = [0.0] * (len(mesh.loops) * 2)
+        source.data.foreach_get('uv', values)
+        backup = mesh.attributes.get(CEL_BACKUP_ATTRIBUTE)
+        if backup is not None:
+            mesh.attributes.remove(backup)
+        backup = mesh.attributes.new(CEL_BACKUP_ATTRIBUTE, 'FLOAT_VECTOR', 'CORNER')
+        vectors = []
+        for i in range(0, len(values), 2):
+            vectors += (values[i], values[i + 1], 0.0)
+        backup.data.foreach_set('vector', vectors)
+        mesh[CEL_BACKUP_NAME_KEY] = source_name
+        mesh.uv_layers.remove(mesh.uv_layers[source_name])
+    bake = mesh.uv_layers[BAKE_UV_NAME]
+    bake.name = source_name
+    layer = mesh.uv_layers[source_name]
+    mesh.uv_layers.active = layer
+    layer.active_render = True
+    return True
+
+
+def restore_cel_uv(mesh):
+    """Undo finalize_bake_uv: the backed up UVs become the render UV map again and the
+    unwrapped UVs go back to being BakeUV. Returns False when there is no backup."""
+    backup = mesh.attributes.get(CEL_BACKUP_ATTRIBUTE)
+    if backup is None:
+        return False
+    name = mesh.get(CEL_BACKUP_NAME_KEY, 'map1')
+    vectors = [0.0] * (len(mesh.loops) * 3)
+    backup.data.foreach_get('vector', vectors)
+    current = mesh.uv_layers.get(name)
+    if current is not None:
+        if mesh.uv_layers.get(BAKE_UV_NAME) is not None:
+            mesh.uv_layers.remove(mesh.uv_layers[BAKE_UV_NAME])
+            current = mesh.uv_layers[name]
+        current.name = BAKE_UV_NAME
+    restored = mesh.uv_layers.new(name=name, do_init=False)
+    uvs = []
+    for i in range(0, len(vectors), 3):
+        uvs += (vectors[i], vectors[i + 1])
+    restored.data.foreach_set('uv', uvs)
+    mesh.attributes.remove(mesh.attributes[CEL_BACKUP_ATTRIBUTE])
+    if CEL_BACKUP_NAME_KEY in mesh:
+        del mesh[CEL_BACKUP_NAME_KEY]
+    mesh.uv_layers[name].active_render = True
+    bake = mesh.uv_layers.get(BAKE_UV_NAME)
+    mesh.uv_layers.active = bake if bake is not None else mesh.uv_layers[name]
+    return True
+
+
+class SUB_OP_hair_bake_uv(Operator):
+    """Unwrap hair into a separate, overlap-free UV map for baking, keeping the cel-shade UVs"""
+    bl_idname = 'sub.hair_bake_uv'
+    bl_label = 'Make Bake UVs (Hair)'
+    bl_description = (
+        'Copy the render UV map (map1) to "BakeUV" and unwrap only the copy with Smart Seams, '
+        'so nothing overlaps. map1 stays the render UV map, so a Cycles bake reads the existing '
+        'hair texture through it and writes into the new layout. Run "Use Bake UVs" after baking'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    angle: FloatProperty(
+        name='Crease Angle', default=radians(40.0), min=radians(1.0), max=radians(180.0),
+        subtype='ANGLE',
+        description='Mark an edge when its two faces meet at more than this angle',
+    )
+    unwrap_method: EnumProperty(
+        name='Unwrap Method',
+        items=(
+            ('MINIMUM_STRETCH', 'Minimum Stretch', 'Best for baking'),
+            ('ANGLE_BASED', 'Angle Based', 'Faster, but squashes many faces on dense hair'),
+            ('CONFORMAL', 'Conformal', 'Preserves angles at the cost of area'),
+        ),
+        default='MINIMUM_STRETCH',
+    )
+    pack_margin: FloatProperty(
+        name='Pack Margin', default=0.003, min=0.0, max=0.1,
+        description='Gap between packed islands. Keep it small on hair with many cards',
+    )
+    only_overlapping: BoolProperty(
+        name='Only Overlapping Meshes',
+        description=(
+            'Leave meshes whose UVs already neither overlap nor leave the 0-1 tile alone: '
+            'they bake fine through map1 as they are'
+        ),
+        default=True,
+    )
+    clean_threshold: FloatProperty(
+        name='Clean Below', default=0.05, min=0.0, max=1.0, subtype='FACTOR',
+        description='Overlap fraction under which a mesh counts as already clean',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode in {'OBJECT', 'EDIT_MESH'} and bool(context.selected_objects)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=360)
+
+    def execute(self, context):
+        if context.mode == 'EDIT_MESH':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        candidates = list(_iter_target_meshes(context))
+        if not candidates:
+            self.report({'WARNING'}, 'No mesh objects selected.')
+            return {'CANCELLED'}
+        meshes, clean = [], []
+        for obj in candidates:
+            source = _render_uv_layer(obj.data)
+            if source is not None:
+                obj.data.uv_layers.active = source
+            _coverage, overlap, outside = uv_overlap(obj) if source is not None else (0.0, 1.0, 1.0)
+            if self.only_overlapping and max(overlap, outside) < self.clean_threshold:
+                clean.append(obj.name)
+                stale = obj.data.uv_layers.get(BAKE_UV_NAME)
+                if stale is not None:
+                    obj.data.uv_layers.remove(stale)
+                continue
+            meshes.append(obj)
+        if not meshes:
+            self.report({'INFO'}, 'Nothing overlaps - these meshes bake as they are: ' + ', '.join(clean))
+            return {'CANCELLED'}
+
+        for obj in meshes:
+            prepare_bake_uv(obj.data)
+
+        view_layer = context.view_layer
+        previous_active = view_layer.objects.active
+        previous_selection = list(context.selected_objects)
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in meshes:
+            obj.select_set(True)
+        view_layer.objects.active = meshes[0]
+        try:
+            result = bpy.ops.sub.smart_hair_seams(
+                'EXEC_DEFAULT', angle=self.angle, then='UNWRAP_PACK',
+                unwrap_method=self.unwrap_method, pack_margin=self.pack_margin,
+                resolve_overlaps=True, skip_if_clean=False,
+            )
+        finally:
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in previous_selection:
+                if obj.name in view_layer.objects:
+                    obj.select_set(True)
+            view_layer.objects.active = previous_active
+
+        # The unwrap and packing run on the active UV map, i.e. only on BakeUV. Report both maps.
+        lines = []
+        for obj in meshes:
+            mesh = obj.data
+            mesh.uv_layers.active = mesh.uv_layers[BAKE_UV_NAME]
+            _c, bake_overlap, bake_outside = uv_overlap(obj)
+            lines.append(f'{obj.name}: BakeUV {bake_overlap:.1%} overlap, {bake_outside:.1%} outside')
+        message = f'Bake UVs on {len(meshes)} mesh(es) - ' + '; '.join(lines)
+        if clean:
+            message += f'. Already clean (bake through map1): {", ".join(clean)}'
+        self.report({'INFO'} if 'FINISHED' in result else {'WARNING'}, message)
+        return {'FINISHED'}
+
+
+class SUB_OP_hair_bake_uv_finalize(Operator):
+    """Make the baked layout the mesh's UV map for export"""
+    bl_idname = 'sub.hair_bake_uv_finalize'
+    bl_label = 'Use Bake UVs'
+    bl_description = (
+        'After baking: BakeUV replaces map1, so the model exports with the new, overlap-free '
+        'UVs that the baked textures are laid out for. The old UVs are kept inside the mesh '
+        '(not exported); "Restore Cel UVs" brings them back'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(has_bake_uv(obj.data) for obj in _iter_target_meshes(context))
+
+    def execute(self, context):
+        if context.mode == 'EDIT_MESH':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        done = [obj.name for obj in _iter_target_meshes(context) if finalize_bake_uv(obj.data)]
+        self.report({'INFO'}, f'Using the bake UVs on {len(done)} mesh(es): {", ".join(done)}')
+        return {'FINISHED'}
+
+
+class SUB_OP_hair_bake_uv_restore(Operator):
+    """Bring back the original (cel-shade) UVs kept by "Use Bake UVs\""""
+    bl_idname = 'sub.hair_bake_uv_restore'
+    bl_label = 'Restore Cel UVs'
+    bl_description = (
+        'Undo "Use Bake UVs": the original UVs become map1 again and the unwrapped ones go back '
+        'to BakeUV, e.g. to re-bake after changing the hair texture'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(obj.data.attributes.get(CEL_BACKUP_ATTRIBUTE) is not None
+                   for obj in _iter_target_meshes(context))
+
+    def execute(self, context):
+        if context.mode == 'EDIT_MESH':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        done = [obj.name for obj in _iter_target_meshes(context) if restore_cel_uv(obj.data)]
+        self.report({'INFO'}, f'Restored the cel UVs on {len(done)} mesh(es): {", ".join(done)}')
+        return {'FINISHED'}

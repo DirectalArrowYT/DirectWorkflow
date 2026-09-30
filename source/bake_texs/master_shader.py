@@ -37,7 +37,7 @@ from bpy.props import BoolProperty, EnumProperty
 from mathutils import Vector
 
 MASTER_NAME = "HB Master Shader"
-MASTER_VERSION = 1
+MASTER_VERSION = 2
 VERSION_KEY = "hb_master_version"
 
 # Names the baker keys off. BAKE_SHADER is core.OVERRIDE_NODE_SHADER.
@@ -94,13 +94,25 @@ INTERFACE = [
         _S("AO Color", C, (0.5, 0.35, 0.35, 1.0),
            desc="Multiplies the albedo where occluded. A saturated dark tint "
                 "reads as painted anime shading"),
+        _S("AO Map", F, 1.0, 0.0, 1.0, True,
+           "A painted / game occlusion texture (e.g. _AO). White = open, black = fully "
+           "occluded. Adds to the computed AO, and bakes into _col the same way"),
         _S("AO to PRM", B, False,
            desc="Also bake a real AO pass into PRM.b. Off: AO lives in _col "
                 "only and PRM.b stays white, so it is not applied twice"),
     ]),
     ("Toon Shading", False, [
+        _S("Toon Amount", F, 1.0, 0.0, 1.0, True,
+           "0 = unlit (flat COL, e.g. eyes, glowing parts), 1 = full cel shading. "
+           "Viewport only - never baked"),
         _S("Shadow Tint", C, (0.72, 0.62, 0.72, 1.0),
            desc="Multiplies COL on the shadow side. Viewport only"),
+        _S("Shadow Color Map", C, (1.0, 1.0, 1.0, 1.0),
+           desc="A painted shadow-side texture (many anime games ship one, e.g. _S / "
+                "shade textures). Used on the shadow side by Shadow Map Amount. "
+                "Viewport only"),
+        _S("Shadow Map Amount", F, 0.0, 0.0, 1.0, True,
+           "0 = shadow side is COL x Shadow Tint, 1 = Shadow Color Map x Shadow Tint"),
         _S("Shadow Threshold", F, 0.5, 0.0, 1.0, True,
            "Where the terminator sits. With scene lights it is in light units, "
            "so brighter lights widen the lit side"),
@@ -118,6 +130,14 @@ INTERFACE = [
     # A panel-toggle bool takes its panel's name (Blender renames it), so each
     # toggle panel is named after its toggle to keep every socket name unique -
     # the baker and the presets look sockets up by name.
+    ("Deep Shadow", True, [
+        _S("Deep Shadow", B, False, toggle=True,
+           desc="A second, darker shadow tone (two-tone anime cel shading). Viewport only"),
+        _S("Deep Shadow Tint", C, (0.55, 0.45, 0.6, 1.0),
+           desc="Multiplies the shadow color in the deepest shadow"),
+        _S("Deep Shadow Threshold", F, 0.25, 0.0, 1.0, True,
+           "Where the deep shadow starts. Keep it below Shadow Threshold"),
+    ]),
     ("Rim Light", True, [
         _S("Rim Light", B, True, toggle=True, desc="Viewport only"),
         _S("Rim Color", C, (1.0, 1.0, 1.0, 1.0),
@@ -405,6 +425,8 @@ def _build_nodes(ng):
     g.link(gc("AO Contrast"), _inp(open_, "From Min"))
     _inp(open_, "From Max").default_value = 1.0
     openness = _out(open_, "Result")
+    # A painted AO map multiplies the computed openness, so both darken the same way.
+    openness = g.math('MULTIPLY', -1780, -60, openness, gc("AO Map"), frame=f_col, label="x AO Map")
     occl = g.math('SUBTRACT', -1560, 100, 1.0, openness, frame=f_col)
     occl = g.math('MULTIPLY', -1380, 100, occl, gc("AO Strength"), frame=f_col, clamp=True,
                   label="AO amount")
@@ -445,9 +467,21 @@ def _build_nodes(ng):
     lit = g.band(-380, -650, diffuse, gt("Shadow Threshold"), gt("Shadow Softness"),
                  frame=f_toon, label="Lit")
 
-    shadow_col = g.mix('RGBA', 'MULTIPLY', -380, -300, 1.0, col, gt("Shadow Tint"),
+    shadow_base = g.mix('RGBA', 'MIX', -560, -300, gt("Shadow Map Amount"), col, gt("Shadow Color Map"),
+                        frame=f_toon, label="Shadow base")
+    shadow_col = g.mix('RGBA', 'MULTIPLY', -380, -300, 1.0, shadow_base, gt("Shadow Tint"),
                        frame=f_toon, label="Shadow color")
     toon = g.mix('RGBA', 'MIX', -120, -350, lit, shadow_col, col, frame=f_toon, label="Cel")
+
+    # Deep shadow: a second, darker tone below its own threshold.
+    deep_lit = g.band(-380, -150, diffuse, gt("Deep Shadow Threshold"), gt("Shadow Softness"),
+                      frame=f_toon, label="Deep lit")
+    deep_amount = g.math('SUBTRACT', -200, -150, 1.0, deep_lit, frame=f_toon)
+    deep_amount = g.math('MULTIPLY', -60, -150, deep_amount, gt("Deep Shadow"), frame=f_toon)
+    deep_col = g.mix('RGBA', 'MULTIPLY', -60, -250, 1.0, shadow_col, gt("Deep Shadow Tint"),
+                     frame=f_toon, label="Deep shadow color")
+    toon = g.mix('RGBA', 'MIX', 80, -350, deep_amount, toon, deep_col, frame=f_toon,
+                 label="+ Deep shadow")
 
     # --- TOON: highlight -----------------------------------------------------------
     H = g.vmath('ADD', -1700, -1150, L, Vv, frame=f_toon)
@@ -485,6 +519,10 @@ def _build_nodes(ng):
     rim = g.math('MULTIPLY', 520, -1850, rim, gt("Rim Light"), frame=f_toon)
     toon = g.mix('RGBA', 'MIX', 760, -450, rim, toon, gt("Rim Color"), frame=f_toon,
                  label="+ Rim")
+
+    # Toon Amount 0 = unlit: the flat COL, with no shadow, rim or highlight.
+    toon = g.mix('RGBA', 'MIX', 860, -300, gt("Toon Amount"), col, toon, frame=f_toon,
+                 label="Toon Amount")
 
     emission = g.vmath('SCALE', 760, -750, gt("Emission Color"), frame=f_toon)
     g.link(gt("Emission Strength"), emission.node.inputs["Scale"])
@@ -580,6 +618,7 @@ def master_nodes(material):
 # mesh size instead, so applying a preset never breaks it.
 PRESETS = {
     'SKIN': {
+        "Toon Amount": 1.0, "Shadow Map Amount": 0.0,
         "AO Strength": 0.7, "AO Contrast": 0.35, "AO Color": (0.78, 0.36, 0.30, 1.0),
         "Shadow Tint": (0.96, 0.68, 0.64, 1.0), "Shadow Softness": 0.04,
         "AO Shadowing": 0.3,
@@ -589,6 +628,7 @@ PRESETS = {
         "Metalness": 0.0, "Roughness": 0.7, "Specular": 0.2, "SSS Mask": 1.0,
     },
     'HAIR': {
+        "Toon Amount": 1.0, "Shadow Map Amount": 0.0,
         "AO Strength": 0.6, "AO Contrast": 0.3, "AO Color": (0.45, 0.38, 0.5, 1.0),
         "Shadow Tint": (0.62, 0.6, 0.78, 1.0), "Shadow Softness": 0.03,
         "AO Shadowing": 0.3,
@@ -599,6 +639,7 @@ PRESETS = {
         "Metalness": 0.0, "Roughness": 0.45, "Specular": 0.3, "SSS Mask": 0.0,
     },
     'CLOTH': {
+        "Toon Amount": 1.0, "Shadow Map Amount": 0.0,
         "AO Strength": 0.6, "AO Contrast": 0.3, "AO Color": (0.45, 0.42, 0.55, 1.0),
         "Shadow Tint": (0.68, 0.66, 0.8, 1.0), "Shadow Softness": 0.03,
         "AO Shadowing": 0.25,
@@ -608,6 +649,7 @@ PRESETS = {
         "Metalness": 0.0, "Roughness": 0.85, "Specular": 0.12, "SSS Mask": 0.0,
     },
     'SHINY': {
+        "Toon Amount": 1.0, "Shadow Map Amount": 0.0,
         "AO Strength": 0.6, "AO Contrast": 0.3, "AO Color": (0.45, 0.42, 0.55, 1.0),
         "Shadow Tint": (0.6, 0.58, 0.72, 1.0), "Shadow Softness": 0.02,
         "AO Shadowing": 0.25,
@@ -618,6 +660,7 @@ PRESETS = {
         "Metalness": 0.0, "Roughness": 0.3, "Specular": 0.4, "SSS Mask": 0.0,
     },
     'METAL': {
+        "Toon Amount": 1.0, "Shadow Map Amount": 0.0,
         "AO Strength": 0.5, "AO Contrast": 0.3, "AO Color": (0.4, 0.4, 0.45, 1.0),
         "Shadow Tint": (0.5, 0.5, 0.56, 1.0), "Shadow Softness": 0.02,
         "AO Shadowing": 0.2,
@@ -629,12 +672,27 @@ PRESETS = {
     },
 }
 
+PRESETS['EYE'] = {
+    "Toon Amount": 0.0, "Shadow Map Amount": 0.0, "Deep Shadow": False,
+    "AO Strength": 0.0,
+    "Rim Light": False, "Toon Highlight": False,
+    "Metalness": 0.0, "Roughness": 0.4, "Specular": 0.3, "SSS Mask": 0.0,
+}
+PRESETS['UNLIT'] = {
+    "Toon Amount": 0.0, "Shadow Map Amount": 0.0, "Deep Shadow": False,
+    "AO Strength": 0.0,
+    "Rim Light": False, "Toon Highlight": False,
+    "Metalness": 0.0, "Roughness": 0.8, "Specular": 0.16, "SSS Mask": 0.0,
+}
+
 PRESET_ITEMS = (
     ('SKIN', "Skin", "Warm shadow, SSS mask 1 for Smash skin shaders"),
     ('HAIR', "Hair", "Cool shadow, anisotropic ring highlight"),
     ('CLOTH', "Cloth", "Matte fabric"),
     ('SHINY', "Shiny", "Leather, plastic, rubber - glossy but not metal"),
     ('METAL', "Metal", "PRM metalness 1"),
+    ('EYE', "Eye", "Unlit (no cel shadow, rim or AO), like anime eyes"),
+    ('UNLIT', "Unlit", "Flat color for glowing parts, effects and decals"),
 )
 
 
@@ -642,6 +700,11 @@ def guess_preset(*names):
     """Pick a preset from material / object / old group names."""
     text = " ".join(n for n in names if n).lower()
     for keys, preset in (
+        (("brow", "lash"), 'HAIR'),
+        # Makeup painted on the face (MHA eyeshadow / eyeliner meshes), not the eye itself.
+        (("eyeshadow", "eye_shadow", "eyeline"), 'SKIN'),
+        (("eye", "pupil", "iris"), 'EYE'),
+        (("glow", "emissive", "emit", "effect"), 'UNLIT'),
         (("shiny", "leather", "latex", "rubber", "boot", "belt", "glossy"), 'SHINY'),
         (("metal", "zip", "buckle", "chain", "armor", "armour", "ring", "pin"), 'METAL'),
         (("hair", "alp", "brow", "lash"), 'HAIR'),
@@ -786,7 +849,18 @@ def convert_material(material, preset=None, ao_distance=None, include_principled
         outputs = old.outputs
         was = f"'{old.node_tree.name}'"
     else:
-        _move_input(nt, principled.inputs.get("Base Color"), node.inputs["Base Color"])
+        base = principled.inputs.get("Base Color")
+        ao_mix = base.links[0].from_node if base is not None and base.is_linked else None
+        if (ao_mix is not None and ao_mix.bl_idname == 'ShaderNodeMix'
+                and ao_mix.name.startswith("PSK Ambient Occlusion")):
+            # The PSK/PSA importer multiplies the game's AO texture into Base Color. Split it
+            # back up: the texture goes to Base Color and the AO texture to AO Map, so the
+            # occlusion is tinted like the rest of the AO and never applied twice.
+            _move_input(nt, ao_mix.inputs[6], node.inputs["Base Color"])
+            _move_input(nt, ao_mix.inputs[7], node.inputs["AO Map"])
+            nt.nodes.remove(ao_mix)
+        else:
+            _move_input(nt, base, node.inputs["Base Color"])
         _move_input(nt, principled.inputs.get("Alpha"), node.inputs["Alpha"])
         _move_input(nt, principled.inputs.get("Normal"), node.inputs["Normal"])
         _move_input(nt, principled.inputs.get("Roughness"), node.inputs["Roughness"])

@@ -167,44 +167,57 @@ def get_all_action_fcurves(action: bpy.types.Action, id_type: str = 'OBJECT'):
     return fcurves
 
 
-def _key_lies_on_neighbors(prev, curr, nxt, threshold):
-    interp = getattr(curr, "interpolation", "BEZIER") or "BEZIER"
+def _value_on_segment(prev, nxt, frame, value, interp, threshold):
     prev_val = prev.co[1]
-    curr_val = curr.co[1]
     next_val = nxt.co[1]
     if interp == "CONSTANT":
-        return (
-            abs(curr_val - prev_val) <= threshold
-            and abs(curr_val - next_val) <= threshold
-        )
+        return abs(value - prev_val) <= threshold and abs(value - next_val) <= threshold
     span = nxt.co[0] - prev.co[0]
     if abs(span) < 1e-12:
-        return abs(curr_val - prev_val) <= threshold
-    t = (curr.co[0] - prev.co[0]) / span
+        return abs(value - prev_val) <= threshold
+    t = (frame - prev.co[0]) / span
     expected = prev_val + (next_val - prev_val) * t
-    return abs(curr_val - expected) <= threshold
+    return abs(value - expected) <= threshold
+
+
+def _key_lies_on_neighbors(prev, curr, nxt, threshold):
+    interp = getattr(curr, "interpolation", "BEZIER") or "BEZIER"
+    return _value_on_segment(prev, nxt, curr.co[0], curr.co[1], interp, threshold)
 
 
 def clean_fcurve_redundant_keys(fcurve, threshold=1e-4):
-    """Remove interior keys that sit on the interpolation between their neighbors."""
+    """Remove interior keys that sit on the interpolation between their neighbors.
+
+    Every key removed since the last kept key must still sit on the new, longer
+    segment; checking only the immediate neighbors lets a slow drift (e.g. a head
+    turning 1e-4 per frame) be flattened away one key at a time.
+    """
     if fcurve is None or getattr(fcurve, "lock", False):
         return 0
     points = getattr(fcurve, "keyframe_points", None)
     if points is None or len(points) < 3:
         return 0
     removed = 0
+    removed_since_prev = []
     index = 1
     while index < len(points) - 1:
         prev = points[index - 1]
         curr = points[index]
         nxt = points[index + 1]
-        if _key_lies_on_neighbors(prev, curr, nxt, threshold):
+        if _key_lies_on_neighbors(prev, curr, nxt, threshold) and all(
+            _value_on_segment(prev, nxt, frame, value, interp, threshold)
+            for frame, value, interp in removed_since_prev
+        ):
+            removed_since_prev.append(
+                (curr.co[0], curr.co[1], getattr(curr, "interpolation", "BEZIER") or "BEZIER")
+            )
             try:
                 points.remove(curr, fast=True)
             except TypeError:
                 points.remove(curr)
             removed += 1
             continue
+        removed_since_prev = []
         index += 1
     if removed:
         try:

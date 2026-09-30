@@ -84,6 +84,8 @@ classes = [
     source.extras.create_animation_rig.SUB_OP_remove_animation_rig,
     source.extras.create_animation_rig.SUB_OP_bake_and_remove_rig,
     source.extras.create_animation_rig.SUB_OP_anim_rig_toggle_ik_fk,
+    source.extras.create_animation_rig.SUB_OP_anim_rig_snap_ik_fk,
+    source.extras.create_animation_rig.SUB_OP_anim_rig_upgrade_ik,
     source.extras.finger_sliders.SUB_OP_bake_finger_sliders,
     source.extras.finger_sliders.SUB_OP_toggle_finger_sliders,
     source.extras.viewport_capture.SUB_OP_gif_or_photo,
@@ -143,6 +145,10 @@ classes = [
     source.extras.limit_weights.SUB_OP_limit_weights,
     source.extras.unstack_uvs.SUB_OP_unstack_uv_islands,
     source.extras.smart_hair_seams.SUB_OP_smart_hair_seams,
+    source.extras.smart_normals.SUB_OP_smart_normals,
+    source.extras.smart_hair_seams.SUB_OP_hair_bake_uv,
+    source.extras.smart_hair_seams.SUB_OP_hair_bake_uv_finalize,
+    source.extras.smart_hair_seams.SUB_OP_hair_bake_uv_restore,
     source.extras.protect_datablocks.SUB_OP_protect_datablocks,
     source.extras.smart_hair_seams.SUB_OP_uv_resolve_overlaps,
     source.extras.smart_hair_seams.SUB_OP_uv_align_upright,
@@ -391,6 +397,9 @@ classes = [
 
 def register():
     for cls in classes:
+        # Some modules (extras, bake_texs) register their own classes first.
+        if getattr(cls, 'is_registered', False):
+            continue
         try:
             bpy.utils.register_class(cls)
         except ValueError:
@@ -398,6 +407,8 @@ def register():
 
 def unregister():
     for cls in reversed(classes):
+        if not getattr(cls, 'is_registered', True):
+            continue
         try:
             bpy.utils.unregister_class(cls)
         except ValueError:

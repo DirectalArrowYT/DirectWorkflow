@@ -25,6 +25,7 @@ from . import auto_swing_bones
 from . import swing_axis
 from . import fighter_scale
 from . import smart_hair_seams
+from . import smart_normals
 from . import protect_datablocks
 from . import rename_utils
 from . import fk_to_ik

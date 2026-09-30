@@ -1139,7 +1139,98 @@ def does_armature_data_have_fcurves(arma: bpy.types.Object) -> bool:
     
     return len(get_all_action_fcurves(arma.data.animation_data.action)) > 0
 
-def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.types.Object, filepath, include_transform_track, include_material_track, include_visibility_track, first_blender_frame, last_blender_frame, transform_compensate_scale: bool = False, transform_override_translation: bool = False, transform_override_rotation: bool = False, transform_override_scale: bool = False, transform_override_compensate_scale: bool = False, override_bone_names: list[str] | None = None, use_exclude_list: bool = True):
+def _rig_control_bone_names(arma):
+    """Animation-rig controls that are not Smash bones (HandIK, ArmIK, FootIK, KneeIK, ...)."""
+    try:
+        from ..extras.create_animation_rig import _ik_limb_kind
+    except ImportError:
+        return set()
+    return {bone.name for bone in arma.data.bones if _ik_limb_kind(bone.name) is not None}
+
+
+def _is_rig_constraint(constraint, controls):
+    if constraint.mute:
+        return False
+    if constraint.type == 'IK' or constraint.name.startswith('SUB_IK'):
+        return True
+    subtarget = getattr(constraint, 'subtarget', '') or ''
+    return subtarget.startswith('BL_') or subtarget in controls
+
+
+def rig_driven_bone_names(arma, controls=None):
+    """Smash bones whose pose comes from animation-rig constraints, so their keys alone do not
+    describe what is shown (IK limbs, finger sliders)."""
+    controls = _rig_control_bone_names(arma) if controls is None else controls
+    names = set()
+    for pose_bone in arma.pose.bones:
+        if pose_bone.name.startswith(('BL_', 'H_')) or pose_bone.name in controls:
+            continue
+        for constraint in pose_bone.constraints:
+            if not _is_rig_constraint(constraint, controls):
+                continue
+            names.add(pose_bone.name)
+            if constraint.type == 'IK':
+                parent = pose_bone.parent
+                for _ in range(max(int(constraint.chain_count) - 1, 0)):
+                    if parent is None:
+                        break
+                    names.add(parent.name)
+                    parent = parent.parent
+    return names
+
+
+def sample_rig_pose(context, arma, first_blender_frame, last_blender_frame, bone_names):
+    """{bone: [(location, quaternion, scale) per frame]}: the visual pose as matrix-basis values."""
+    if not bone_names:
+        return {}
+    scene = context.scene
+    saved_frame = scene.frame_current
+    pose_bones = [arma.pose.bones[name] for name in bone_names]
+    rel_rest = {}
+    for pose_bone in pose_bones:
+        bone = pose_bone.bone
+        rel_rest[pose_bone.name] = (
+            bone.parent.matrix_local.inverted() @ bone.matrix_local if bone.parent else bone.matrix_local.copy()
+        ).inverted()
+    result = {name: [] for name in bone_names}
+    try:
+        for frame in range(first_blender_frame, last_blender_frame + 1):
+            scene.frame_set(frame)
+            for pose_bone in pose_bones:
+                parent = pose_bone.parent
+                local = pose_bone.matrix if parent is None else parent.matrix.inverted() @ pose_bone.matrix
+                result[pose_bone.name].append((rel_rest[pose_bone.name] @ local).decompose())
+    finally:
+        scene.frame_set(saved_frame)
+    return result
+
+
+def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.types.Object, filepath, include_transform_track, include_material_track, include_visibility_track, first_blender_frame, last_blender_frame, transform_compensate_scale: bool = False, transform_override_translation: bool = False, transform_override_rotation: bool = False, transform_override_scale: bool = False, transform_override_compensate_scale: bool = False, override_bone_names: list[str] | None = None, use_exclude_list: bool = True, bake_rig: bool | None = None):
+    """Export the armature's action. With `bake_rig` (default: the scene's "Bake Rig on Export"),
+    bones posed by the animation rig are exported as displayed and the rig controls are left out."""
+    exclude_bone_names = set()
+    baked_pose = {}
+    if bake_rig is None:
+        ssp = getattr(context.scene, 'sub_scene_properties', None)
+        bake_rig = bool(getattr(ssp, 'anim_export_bake_rig', True))
+    if bake_rig and include_transform_track:
+        exclude_bone_names = _rig_control_bone_names(arma)
+        driven = rig_driven_bone_names(arma, exclude_bone_names)
+        if driven:
+            baked_pose = sample_rig_pose(context, arma, first_blender_frame, last_blender_frame, driven)
+            operator.report({'INFO'}, f"Baked the animation rig on {len(driven)} bones for export")
+    return _export_model_anim_fast(
+        context, operator, arma, filepath,
+        include_transform_track, include_material_track, include_visibility_track,
+        first_blender_frame, last_blender_frame,
+        transform_compensate_scale, transform_override_translation, transform_override_rotation,
+        transform_override_scale, transform_override_compensate_scale,
+        override_bone_names, use_exclude_list,
+        exclude_bone_names=exclude_bone_names, baked_pose=baked_pose,
+    )
+
+
+def _export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.types.Object, filepath, include_transform_track, include_material_track, include_visibility_track, first_blender_frame, last_blender_frame, transform_compensate_scale: bool = False, transform_override_translation: bool = False, transform_override_rotation: bool = False, transform_override_scale: bool = False, transform_override_compensate_scale: bool = False, override_bone_names: list[str] | None = None, use_exclude_list: bool = True, exclude_bone_names=frozenset(), baked_pose=None):
     # SSBH Anim Setup
     ssbh_anim_data =  ssbh_data_py.anim_data.AnimData()
     final_frame_index = last_blender_frame - first_blender_frame
@@ -1158,7 +1249,7 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
         bone_to_rel_matrix_local = {}
         reordered_pose_bones = [
             bone for bone in get_hierarchy_order(list(arma.pose.bones))
-            if not bone.name.startswith('BL_')
+            if not bone.name.startswith('BL_') and bone.name not in exclude_bone_names
         ]
 
         # Fill value dicts with default values. Not every bone will be animated, so for these the default values of a matrix basis will be needed
@@ -1202,7 +1293,7 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
                 operator.report(type={'WARNING'}, message=f"The fcurve with data path {fcurve.data_path} will not be exported, its format only partially matched the expected pattern of a bone fcurve.")
                 continue
             bone_name = matches.groups()[0]
-            if bone_name.startswith('BL_'):
+            if bone_name.startswith('BL_') or bone_name in exclude_bone_names or bone_name in (baked_pose or {}):
                 continue
             transform_subtype = matches.groups()[1]
             if transform_subtype == 'location':
@@ -1245,6 +1336,19 @@ def export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.type
                         bone_name_to_scale_values[bone_name][index].y = fcurve.evaluate(frame)
                     elif fcurve.array_index == 2:
                         bone_name_to_scale_values[bone_name][index].z = fcurve.evaluate(frame)
+            animated_pose_bone = arma.pose.bones.get(bone_name)
+            if animated_pose_bone is not None:
+                animated_pose_bones.add(animated_pose_bone)
+
+        # Bones posed by the animation rig: the sampled (visual) pose replaces their keys.
+        for bone_name, samples in (baked_pose or {}).items():
+            _ensure_export_bone(bone_name)
+            bones_with_quat.add(bone_name)
+            bones_with_euler.discard(bone_name)
+            for index, (loc, quat, scale) in enumerate(samples):
+                bone_name_to_location_values[bone_name][index] = Location(loc.x, loc.y, loc.z)
+                bone_name_to_rotation_values[bone_name][index] = Rotation(quat.w, quat.x, quat.y, quat.z)
+                bone_name_to_scale_values[bone_name][index] = Scale(scale.x, scale.y, scale.z)
             animated_pose_bone = arma.pose.bones.get(bone_name)
             if animated_pose_bone is not None:
                 animated_pose_bones.add(animated_pose_bone)

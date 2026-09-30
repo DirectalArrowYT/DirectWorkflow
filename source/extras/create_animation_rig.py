@@ -76,6 +76,13 @@ _IK_WIDGETS = {
     'Arm': ('arrow', 0.14, False),
 }
 
+# IK v2 extras (see smash_ik): twist rings around the limb, foot roll and toe controls.
+_IK_V2_WIDGETS = {
+    'Twist': ('circle', 'THEME01', 0.07, True),
+    'FootRoll': ('bone_arrow', 'THEME01', 0.03, False),
+    'Toe': ('circle', 'THEME01', 0.05, True),
+}
+
 _HIDE_COLLECTIONS = (
     "Helper Bones",
     '"Exo" Helper Bones',
@@ -627,6 +634,9 @@ def _should_hide_bone(base_name):
 def _classify_bone(base_name):
     if base_name == 'BL_EyeLook':
         return ('box', 'THEME03', 0.18, True)
+    v2_match = _IK_V2_CONTROL.match(base_name)
+    if v2_match:
+        return _IK_V2_WIDGETS[v2_match.group(1)]
     if base_name.startswith('BL_') or _should_hide_bone(base_name):
         return None
 
@@ -844,15 +854,36 @@ def apply_eye_option_shapes(context, armature_obj, ssp=None):
     return True
 
 
+_IK_V2_CONTROL = re.compile(r'^BL_IK(Twist|FootRoll|Toe)_(.+)$')
+
+
 def _ik_limb_kind(name):
     match = _IK_BONE.match(canonical_bone_name(name))
     if match is None:
-        return None
+        # IK v2 extras: twist rings (BL_IKTwist_ShoulderL), foot roll and toe controls.
+        extra = _IK_V2_CONTROL.match(name or '')
+        if extra is None:
+            return None
+        if extra.group(1) != 'Twist':
+            return 'LEGS'
+        return 'ARMS' if extra.group(2).startswith(('Shoulder', 'Arm')) else 'LEGS'
     if match.group(1) in {'Hand', 'Arm'}:
         return 'ARMS'
     if match.group(1) in {'Foot', 'Knee'}:
         return 'LEGS'
     return None
+
+
+def _constraint_limb_kind(constraint):
+    """ARMS/LEGS for a constraint that the IK/FK switch drives, else None."""
+    from .smash_ik import CONSTRAINT_PREFIX
+    if constraint.name.startswith(CONSTRAINT_PREFIX):
+        if constraint.type != 'COPY_ROTATION':
+            return None
+        return 'ARMS' if ' Arm' in constraint.name else 'LEGS'
+    if constraint.type not in {'IK', 'COPY_ROTATION'}:
+        return None
+    return _ik_limb_kind(constraint.subtarget or '')
 
 
 def armature_has_animation_rig(armature_obj):
@@ -892,9 +923,7 @@ def _iter_limb_ik_constraints(armature_obj, limbs='BOTH'):
         return
     for pose_bone in armature_obj.pose.bones:
         for constraint in pose_bone.constraints:
-            if constraint.type not in {'IK', 'COPY_ROTATION'}:
-                continue
-            kind = _ik_limb_kind(constraint.subtarget or '')
+            kind = _constraint_limb_kind(constraint)
             if kind is None:
                 continue
             if limbs != 'BOTH' and kind != limbs:
@@ -1352,7 +1381,7 @@ def _ik_fk_chain_bones(armature_obj):
         match = _SIDE_BONE.match(base)
         if not match:
             continue
-        if match.group(1) not in {'Shoulder', 'Arm', 'Hand', 'Leg', 'Knee', 'Foot'}:
+        if match.group(1) not in {'Shoulder', 'Arm', 'Hand', 'Leg', 'Knee', 'Foot', 'Toe'}:
             continue
         if pose_bone.name in seen:
             continue
@@ -1364,7 +1393,7 @@ def _ik_fk_chain_bones(armature_obj):
 def _ik_control_bone_names(armature_obj):
     return [
         bone.name for bone in armature_obj.pose.bones
-        if _IK_BONE.match(canonical_bone_name(bone.name))
+        if _ik_limb_kind(bone.name) is not None
     ]
 
 
@@ -1500,7 +1529,7 @@ def _ensure_ik_influence_drivers(armature_obj):
     if armature_obj is None or getattr(armature_obj, "type", None) != "ARMATURE":
         return
     for pose_bone, constraint in _iter_limb_ik_constraints(armature_obj):
-        kind = _ik_limb_kind(constraint.subtarget or "")
+        kind = _constraint_limb_kind(constraint)
         prop_name = _limb_switch_prop(kind)
         if not prop_name:
             continue
@@ -1928,6 +1957,10 @@ def strip_animation_rig(context, armature_obj):
     if finger_sliders.has_finger_slider_constraints(armature_obj):
         finger_sliders.bake_finger_slider_keys(context, armature_obj)
     finger_sliders.remove_finger_sliders(context, armature_obj)
+    from . import mouth_rig
+    if mouth_rig.driven_bone_names(armature_obj):
+        mouth_rig.bake(context, armature_obj)
+    mouth_rig.remove(armature_obj)
     eye_rig.remove_eye_look_control_bone(armature_obj)
 
     cleared = 0
@@ -1982,6 +2015,14 @@ class SUB_OP_create_animation_rig(Operator):
     setup_finger_sliders: bpy.props.BoolProperty(
         name="Add Finger Sliders",
         description="Add finger sliders on each hand, including extra hands. The thumb is a 2D pad. Turn off to pose Smash finger bones only",
+        default=True,
+    )
+    setup_mouth: bpy.props.BoolProperty(
+        name="Add Mouth Controls",
+        description=(
+            "Add jaw, lip corner and upper/lower lip controls when the armature has mouth bones "
+            "(Jaw, Uplip*/Downlip*). They add on top of the keyed mouth animation"
+        ),
         default=True,
     )
     hide_helpers: bpy.props.BoolProperty(
@@ -2092,6 +2133,7 @@ class SUB_OP_create_animation_rig(Operator):
             "setup_ik": self.setup_ik,
             "setup_eye_look": self.setup_eye_look,
             "setup_finger_sliders": self.setup_finger_sliders,
+            "setup_mouth": self.setup_mouth,
             "hide_helpers": self.hide_helpers,
             "match_position": self.match_position,
             "ik_entire_animation": self.ik_entire_animation,
@@ -2137,6 +2179,7 @@ class SUB_OP_create_animation_rig(Operator):
             layout.prop(self, "setup_ik")
             layout.prop(self, "setup_eye_look")
             layout.prop(self, "setup_finger_sliders")
+            layout.prop(self, "setup_mouth")
             layout.prop(self, "hide_helpers")
             return
         if self.stage == 'IK':
@@ -2182,14 +2225,10 @@ class SUB_OP_create_animation_rig(Operator):
             progress.update(0.05)
             ik_created = False
             if self.setup_ik:
-                if armature_has_ik(armature_obj):
-                    ik_created = True
-                else:
-                    result = bpy.ops.sub.create_ik_bones('EXEC_DEFAULT', match_position=False)
-                    ik_created = result == {'FINISHED'} or armature_has_ik(armature_obj)
-                if context.mode != 'POSE':
-                    bpy.ops.object.mode_set(mode='POSE')
-                ik_created = _ensure_extra_arm_ik(armature_obj) or ik_created
+                from . import smash_ik
+                # Analytic IK (smash_ik): the pole always decides the bend and the result never
+                # depends on the FK keys underneath. Rebuilding also upgrades an old IK setup.
+                ik_created = smash_ik.build(context, armature_obj) > 0
 
             if context.mode != 'POSE':
                 bpy.ops.object.mode_set(mode='POSE')
@@ -2234,6 +2273,11 @@ class SUB_OP_create_animation_rig(Operator):
                 slider_count = finger_sliders.build_finger_sliders(context, armature_obj)
                 progress.update(0.7)
 
+            mouth_count = 0
+            if self.setup_mouth:
+                from . import mouth_rig
+                mouth_count = mouth_rig.build(context, armature_obj)
+
             if self.hide_helpers:
                 _hide_clutter(armature_obj)
 
@@ -2261,8 +2305,9 @@ class SUB_OP_create_animation_rig(Operator):
                 from .finger_sliders import is_finger_match_fcurve_path
                 # Official metacarpals (Finger*10/20/...) look "redundant" to the
                 # cleaner but they hold the fist pose. Never strip Finger* keys.
+                # 1e-5: rotation errors add up along the chain (1e-4 moved the head ~0.01).
                 cleaned += clean_redundant_keys_on_id(
-                    armature_obj, skip_data_path=is_finger_match_fcurve_path
+                    armature_obj, threshold=1e-5, skip_data_path=is_finger_match_fcurve_path
                 )
                 cleaned += clean_redundant_keys_on_id(armature_obj.data)
             progress.update(1.0)
@@ -2272,6 +2317,8 @@ class SUB_OP_create_animation_rig(Operator):
             extra += f" {slider_count} finger sliders on the hand boxes."
         if eye_added:
             extra += " Eye look control added."
+        if mouth_count:
+            extra += " Mouth controls added."
         if cleaned:
             extra += f" Cleaned {cleaned} redundant keys."
         self.report({'INFO'}, f"Animation rig created on {armature_obj.name} ({shaped} control shapes).{extra}")
@@ -2465,6 +2512,97 @@ class SUB_OP_anim_rig_toggle_ik_fk(Operator):
         label = {'ARMS': 'arms', 'LEGS': 'legs', 'BOTH': 'arms and legs'}[self.limbs]
         mode = "IK" if enable_ik else "FK"
         self.report({'INFO'}, f"Blending {label} to {mode} by frame {context.scene.frame_current}.")
+        return {'FINISHED'}
+
+
+class SUB_OP_anim_rig_snap_ik_fk(Operator):
+    bl_idname = "sub.anim_rig_snap_ik_fk"
+    bl_label = "Snap IK/FK"
+    bl_description = (
+        "Match one side of the rig to the other on this frame, so switching IK/FK does not pop. "
+        "IK to FK poses the IK controls like the FK limbs; FK to IK poses the FK limbs like the IK"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    direction: bpy.props.EnumProperty(
+        name="Direction",
+        items=(
+            ('IK_TO_FK', "IK to FK", "Pose the IK controls (hand, foot, pole, twist) like the FK limbs"),
+            ('FK_TO_IK', "FK to IK", "Pose the FK limb bones like the current IK result"),
+        ),
+        default='IK_TO_FK',
+    )
+    limbs: bpy.props.EnumProperty(
+        name="Limbs",
+        items=(('ARMS', "Arms", ""), ('LEGS', "Legs", ""), ('BOTH', "Both", "")),
+        default='BOTH',
+    )
+    insert_keys: bpy.props.BoolProperty(
+        name="Insert Keys",
+        description="Key the snapped bones on this frame",
+        default=True,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        from .smash_ik import has_ik_v2
+        return has_ik_v2(find_target_armature(context))
+
+    def execute(self, context):
+        from . import smash_ik
+        armature_obj = find_target_armature(context)
+        _activate_armature(context, armature_obj)
+        if context.mode != 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+        if self.direction == 'IK_TO_FK':
+            smash_ik.match_ik_to_fk(context, armature_obj, limbs_kind=self.limbs, insert_keys=self.insert_keys)
+        else:
+            smash_ik.snap_fk_to_ik(context, armature_obj, limbs_kind=self.limbs, insert_keys=self.insert_keys)
+        context.view_layer.update()
+        self.report({'INFO'}, "Snapped " + ("IK to FK" if self.direction == 'IK_TO_FK' else "FK to IK"))
+        return {'FINISHED'}
+
+
+class SUB_OP_anim_rig_upgrade_ik(Operator):
+    bl_idname = "sub.anim_rig_upgrade_ik"
+    bl_label = "Upgrade IK"
+    bl_description = (
+        "Replace the Blender IK constraints with the analytic IK (the pole always decides the bend, "
+        "twist rings, foot roll and toe controls) and match it to the FK animation"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    entire_animation: bpy.props.BoolProperty(
+        name="Entire Animation",
+        description="Match and key the IK controls on every frame of the scene range",
+        default=True,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        armature = find_target_armature(context)
+        return armature is not None and armature.type == 'ARMATURE' and _looks_like_smash_armature(armature)
+
+    def execute(self, context):
+        from . import smash_ik
+        armature_obj = find_target_armature(context)
+        _activate_armature(context, armature_obj)
+        props = _ik_fk_props(armature_obj)
+        arms, legs = float(props.sub_use_ik_arms or 0.0), float(props.sub_use_ik_legs or 0.0)
+        count = smash_ik.build(context, armature_obj)
+        if not count:
+            self.report({'ERROR'}, "No Shoulder/Arm/Hand or Leg/Knee/Foot chains found.")
+            return {'CANCELLED'}
+        scene = context.scene
+        frames = range(scene.frame_start, scene.frame_end + 1) if self.entire_animation else None
+        smash_ik.match_ik_to_fk(context, armature_obj, frames, insert_keys=True)
+        _ensure_ik_influence_drivers(armature_obj)
+        if armature_has_animation_rig(armature_obj):
+            _apply_shapes(context, armature_obj)
+        _set_ik_bone_visibility(armature_obj, arms > 0.5, 'ARMS')
+        _set_ik_bone_visibility(armature_obj, legs > 0.5, 'LEGS')
+        armature_obj.update_tag()
+        self.report({'INFO'}, f"Analytic IK on {count} limbs")
         return {'FINISHED'}
 
 
