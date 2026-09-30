@@ -1393,8 +1393,47 @@ def _extra_fingerprint(scene):
             for obj in extra.iter_bound_meshes(scene, arm, _skip_extra_mesh)
         )
         if meshes:
-            parts.append(("build", int(arm.as_pointer()), arm.name, meshes))
+            from . import smash_vp_hb
+            hb_sig = smash_vp_hb.meshes_signature(
+                list(extra.iter_bound_meshes(scene, arm, _skip_extra_mesh)), scene
+            )
+            parts.append(("build", int(arm.as_pointer()), arm.name, meshes, hb_sig))
     return tuple(parts)
+
+
+# HB Master Shader edits rebuild the preview materials once the edit settles, so
+# dragging a slider does not rewrite the textures on every step.
+_HB_DEBOUNCE = 0.3
+_hb_dirty_since = None
+
+
+def mark_hb_preview_dirty(immediate=False):
+    global _hb_dirty_since
+    now = time.monotonic()
+    _hb_dirty_since = now - _HB_DEBOUNCE if immediate else now
+    _schedule_hb_redraw(0.0 if immediate else _HB_DEBOUNCE)
+
+
+def _schedule_hb_redraw(delay):
+    def fire():
+        _tag_preview_redraw()
+        return None
+    try:
+        bpy.app.timers.register(fire, first_interval=max(0.01, delay + 0.02))
+    except Exception:
+        pass
+
+
+def _hb_rebuild_due():
+    global _hb_dirty_since
+    if _hb_dirty_since is None:
+        return False
+    wait = _HB_DEBOUNCE - (time.monotonic() - _hb_dirty_since)
+    if wait > 0.0:
+        _schedule_hb_redraw(wait)
+        return False
+    _hb_dirty_since = None
+    return True
 
 
 def _ensure_extra_models(context):
@@ -1467,8 +1506,8 @@ def _ensure_extra_models(context):
             gpu_order.append(int(arm.as_pointer()))
             if smash_space:
                 blender_smash.add(int(arm.as_pointer()))
-            for ptr, name, sub in items:
-                uploaded[ptr] = (name, sub)
+            for ptr, name, sub, *count in items:
+                uploaded[ptr] = (name, sub, count[0] if count else 1)
         except BaseException as exc:
             notes.append(f"{arm.name}: {exc}")
             continue
@@ -2256,12 +2295,19 @@ def _sync_mesh_transforms(preview, context, depsgraph):
         eval_obj = _evaluated_armature(obj, depsgraph)
         delta = _Z_UP_TO_Y_UP @ eval_obj.matrix_world @ arm_inverses[arm_key]
         extra = _extra_mesh_map.get(_id_key(obj))
-        name, sub = extra if extra is not None else _smash_gpu_id(obj)
-        key = (preview, model_index, name, sub)
+        if extra is not None:
+            # One Blender mesh can be several GPU meshes (one per material).
+            name, first = extra[0], extra[1]
+            subs = range(first, first + (extra[2] if len(extra) > 2 else 1))
+        else:
+            name, first = _smash_gpu_id(obj)
+            subs = (first,)
         matrix = tuple(_mat4_col_major(delta))
-        current[key] = matrix
-        if previous.get(key) != matrix:
-            entries.append((model_index, name, sub, matrix))
+        for sub in subs:
+            key = (preview, model_index, name, sub)
+            current[key] = matrix
+            if previous.get(key) != matrix:
+                entries.append((model_index, name, sub, matrix))
     if entries:
         count = len(entries)
         indices = (c_uint * count)(*(i for i, _, _, _ in entries))
@@ -3227,6 +3273,8 @@ def _prepare_preview(context=None, depsgraph=None):
     count_changed = _smash_arm_count is None or obj_count != _smash_arm_count
     # Loaded previews skip scene/folder walks until the object list or size changes.
     skip_scene_walk = loaded and not size_changed and not count_changed
+    if skip_scene_walk and _extra_ok and _hb_rebuild_due():
+        skip_scene_walk = False
     if not skip_scene_walk:
         _refresh_smash_arm_cache(scene)
         folder = _model_folder(scene)
@@ -3496,6 +3544,11 @@ def _on_scene_redraw(*args):
             pose_dirty = True
             channels_dirty = True
             continue
+        if isinstance(updated, (bpy.types.Material, bpy.types.ShaderNodeTree)):
+            global _hb_dirty_since
+            _hb_dirty_since = time.monotonic()
+            _schedule_hb_redraw(_HB_DEBOUNCE)
+            continue
         if isinstance(updated, bpy.types.Object):
             obj_type = getattr(updated, "type", "")
             if obj_type == "ARMATURE":
@@ -3740,6 +3793,7 @@ def draw_smash_viewport_ui(layout, context):
     )
     box.label(text="Turns on Rendered shading so Smash is visible.")
     box.label(text="Uses Standard view transform (AgX washes Smash).")
+    draw_hb_preview_ui(box, context)
     if _last_status:
         box.label(text=_last_status)
     if _last_error:
@@ -3754,6 +3808,8 @@ def _unregister_old_classes():
         "SUB_OP_smash_vp_relink_model",
         "SUB_OP_smash_vp_shade_setup",
         "SUB_OP_smash_vp_reset_lighting",
+        "SUB_OP_smash_vp_bake_hb",
+        "SUB_OP_smash_vp_clear_hb",
         "RENDER_PT_smash_viewport",
         "SUB_RenderEngine_smash_viewport",
     ):
@@ -5138,6 +5194,94 @@ class SUB_OP_smash_vp_reset_lighting(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _hb_preview_meshes(scene):
+    """Visible meshes Smash Viewport builds itself (no .numshb) that use the HB Master Shader."""
+    from . import smash_vp_extra as extra
+    from . import smash_vp_hb as hb
+    found = []
+    for arm in extra.iter_extra_armatures(scene, _skip_extra_armature):
+        if _smash_folder_extra(arm):
+            continue
+        for obj in extra.iter_bound_meshes(scene, arm, _skip_extra_mesh):
+            if any(hb.master_node(slot.material) is not None for slot in obj.material_slots):
+                found.append(obj)
+    return found
+
+
+class SUB_OP_smash_vp_bake_hb(bpy.types.Operator):
+    """Bake every wired HB Master Shader input and its ambient occlusion with Cycles,
+    so procedural inputs and AO show exactly as Bake Textures will write them.
+    The sliders stay live afterwards"""
+    bl_idname = "sub.smash_vp_bake_hb"
+    bl_label = "Bake HB Preview"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        from . import smash_vp_hb as hb
+        meshes = _hb_preview_meshes(context.scene)
+        if not meshes:
+            self.report({"WARNING"}, "No visible HB Master Shader meshes in Smash Viewport")
+            return {"CANCELLED"}
+        size = hb.preview_size(context.scene)
+        start = time.monotonic()
+        try:
+            count = hb.bake_sources(context, meshes, size, report=self.report)
+        except Exception as exc:
+            self.report({"ERROR"}, f"HB preview bake failed: {exc}")
+            return {"CANCELLED"}
+        mark_hb_preview_dirty(immediate=True)
+        self.report({"INFO"}, "Baked %d HB material(s) in %.1fs" % (count, time.monotonic() - start))
+        return {"FINISHED"}
+
+
+class SUB_OP_smash_vp_clear_hb(bpy.types.Operator):
+    """Drop the baked HB preview inputs and go back to reading the images directly"""
+    bl_idname = "sub.smash_vp_clear_hb"
+    bl_label = "Clear HB Bake"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        from . import smash_vp_hb as hb
+        hb.clear_baked()
+        mark_hb_preview_dirty(immediate=True)
+        return {"FINISHED"}
+
+
+def draw_hb_preview_ui(layout, context):
+    ssp = getattr(context.scene, "sub_scene_properties", None)
+    if ssp is None or not hasattr(ssp, "smash_vp_hb_preview"):
+        return
+    from . import smash_vp_extra as extra
+    box = layout.box()
+    row = box.row()
+    row.prop(ssp, "smash_vp_hb_preview", text="HB Master Shader Preview")
+    if not ssp.smash_vp_hb_preview:
+        return
+    box.prop(ssp, "smash_vp_hb_size", text="Size")
+    status = extra.last_hb_status
+    if status:
+        counts = {}
+        for value in status.values():
+            counts[value] = counts.get(value, 0) + 1
+        box.label(text="%d material(s): %d baked, %d quick" % (
+            len(status), counts.get("baked", 0), counts.get("quick", 0) + counts.get("approx", 0)))
+        if counts.get("approx"):
+            box.label(text="%d use procedural inputs: bake for the exact look" % counts["approx"],
+                      icon="INFO")
+        elif counts.get("quick"):
+            box.label(text="Quick: no ray-traced AO until baked", icon="INFO")
+        if extra.last_hb_metal_skin:
+            names = ", ".join(extra.last_hb_metal_skin[:3])
+            if len(extra.last_hb_metal_skin) > 3:
+                names += ", ..."
+            box.label(text="Metallic skin: " + names, icon="ERROR")
+            box.label(text="SSS Mask ships as metalness on the standard shader.")
+            box.label(text="Give them a side-loaded twin with the Skin (Subsurface) preset.")
+    row = box.row(align=True)
+    row.operator(SUB_OP_smash_vp_bake_hb.bl_idname, icon="RENDER_STILL")
+    row.operator(SUB_OP_smash_vp_clear_hb.bl_idname, text="", icon="X")
+
+
 class RENDER_PT_smash_viewport(bpy.types.Panel):
     bl_label = "Smash Viewport"
     bl_idname = "RENDER_PT_smash_viewport"
@@ -5195,6 +5339,7 @@ class RENDER_PT_smash_viewport(bpy.types.Panel):
         mat_anim = _material_anim_path(context)
         if mat_anim:
             layout.label(text="Mat anim: " + os.path.basename(mat_anim))
+        draw_hb_preview_ui(layout, context)
         layout.operator(
             SUB_OP_smash_vp_shade_setup.bl_idname,
             text="Reload Smash Model",
@@ -5324,6 +5469,8 @@ _SMASH_VP_CLASSES = (
     SUB_OP_smash_vp_relink_model,
     SUB_OP_smash_vp_shade_setup,
     SUB_OP_smash_vp_reset_lighting,
+    SUB_OP_smash_vp_bake_hb,
+    SUB_OP_smash_vp_clear_hb,
     RENDER_PT_smash_viewport,
     SUB_RenderEngine_smash_viewport,
 )

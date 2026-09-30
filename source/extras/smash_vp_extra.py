@@ -260,11 +260,7 @@ def _loose_skel(entries):
     return skel
 
 
-def _albedo_image(obj):
-    materials = getattr(obj.data, "materials", None) if obj is not None else None
-    if not materials:
-        return None
-    mat = materials[0]
+def _albedo_image(mat):
     if mat is None:
         return None
     try:
@@ -288,9 +284,27 @@ def _albedo_image(obj):
     return None
 
 
+# (image identity, folder) -> stem of the .nutexb already written for it.
+_col_written = {}
+
+
 def _write_col_nutexb(image, folder, stem):
     if image is None:
         return None
+    try:
+        key = (int(image.as_pointer()), image.name, image.filepath, tuple(image.size), str(folder))
+    except Exception:
+        key = None
+    done = _col_written.get(key) if key is not None else None
+    if done and (Path(folder) / f"{done}.nutexb").is_file():
+        return done
+    result = _write_col_nutexb_uncached(image, folder, stem)
+    if key is not None and result:
+        _col_written[key] = result
+    return result
+
+
+def _write_col_nutexb_uncached(image, folder, stem):
     try:
         from ..model.material.texture.convert_nutexb_to_png import get_ultimate_tex_path
         from subprocess import run
@@ -434,7 +448,115 @@ def _slice_influences(influences, old_ids):
     return sliced
 
 
+def _loop_normals(mesh, nloop):
+    normals = np.zeros(nloop * 3, dtype=np.float32)
+    corner = getattr(mesh, "corner_normals", None)
+    if corner is not None:
+        corner.foreach_get("vector", normals)
+    else:
+        try:
+            mesh.calc_normals_split()
+        except Exception:
+            pass
+        mesh.loops.foreach_get("normal", normals)
+    return normals.reshape(-1, 3)
+
+
+def _loop_tangents(mesh, uv_layer, nloop):
+    """MikkTSpace tangents (w = the exporter's flipped bitangent sign), or None."""
+    if uv_layer is None:
+        return None
+    try:
+        mesh.calc_tangents(uvmap=uv_layer.name)
+    except Exception:
+        return None
+    try:
+        tangents = np.zeros(nloop * 3, dtype=np.float32)
+        mesh.loops.foreach_get("tangent", tangents)
+        signs = np.zeros(nloop, dtype=np.float32)
+        mesh.loops.foreach_get("bitangent_sign", signs)
+    finally:
+        try:
+            mesh.free_tangents()
+        except Exception:
+            pass
+    return tangents.reshape(-1, 3), signs * -1.0
+
+
+def _mesh_uv_layer(mesh):
+    layers = getattr(mesh, "uv_layers", None)
+    if not layers:
+        return None
+    layer = layers.get("map1") or layers.get("UVMap") or layers.active
+    if layer is None and len(layers) > 0:
+        layer = layers[0]
+    return layer
+
+
+# Packed meshes keyed on everything that shapes them, so a rebuild for a
+# material change (HB Master slider) does not re-pack every mesh.
+_pack_cache = {}
+
+
+def _geometry_key(obj, mesh):
+    parts = [len(mesh.vertices), len(mesh.loops), len(mesh.polygons)]
+    try:
+        co = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+        mesh.vertices.foreach_get("co", co)
+        parts.append(hash(co.tobytes()))
+        mats = np.empty(len(mesh.polygons), dtype=np.int32)
+        mesh.polygons.foreach_get("material_index", mats)
+        parts.append(hash(mats.tobytes()))
+        layer = _mesh_uv_layer(mesh)
+        if layer is not None:
+            uv = np.empty(len(mesh.loops) * 2, dtype=np.float32)
+            layer.data.foreach_get("uv", uv)
+            parts.append((layer.name, hash(uv.tobytes())))
+        attr = mesh.attributes.get("custom_normal") or mesh.attributes.get("_smush_blender_custom_normals")
+        if attr is not None:
+            data = np.empty(len(attr.data) * 3, dtype=np.float32)
+            try:
+                attr.data.foreach_get("vector", data)
+                parts.append(hash(data.tobytes()))
+            except Exception:
+                pass
+        parts.append(bool(getattr(mesh, "has_custom_normals", False)))
+    except Exception:
+        return None
+    parts.append(tuple(vg.name for vg in obj.vertex_groups))
+    return tuple(parts)
+
+
+def forget_packed_meshes():
+    _pack_cache.clear()
+
+
 def _mesh_to_objects(obj, name, start_sub, smash_xf, name_map, fallback_bone):
+    mesh = obj.data
+    if mesh is None:
+        return []
+    geo = _geometry_key(obj, mesh)
+    key = None
+    if geo is not None:
+        key = (int(obj.as_pointer()), int(mesh.as_pointer()), name, start_sub, fallback_bone,
+               tuple(round(v, 6) for row in smash_xf for v in row),
+               tuple(sorted(name_map.items())) if name_map else (), geo)
+        cached = _pack_cache.get(int(obj.as_pointer()))
+        if cached is not None and cached[0] == key:
+            return cached[1]
+    packed = _mesh_to_objects_uncached(obj, name, start_sub, smash_xf, name_map, fallback_bone)
+    if key is not None:
+        _pack_cache[int(obj.as_pointer())] = (key, packed)
+    return packed
+
+
+def _mesh_to_objects_uncached(obj, name, start_sub, smash_xf, name_map, fallback_bone):
+    """Pack a mesh as Smash mesh objects, one run of subindices per material slot.
+
+    Vertices are split where their UVs or normals differ between faces, like the
+    exporter does, so texture seams and custom (e.g. Smart) normals come out as
+    they will in game. Returns [(MeshObjectData, material_index), ...].
+    """
     mesh = obj.data
     if mesh is None or len(mesh.vertices) == 0:
         return []
@@ -443,90 +565,93 @@ def _mesh_to_objects(obj, name, start_sub, smash_xf, name_map, fallback_bone):
     except Exception:
         return []
     ntri = len(mesh.loop_triangles)
-    if ntri < 1:
+    nloop = len(mesh.loops)
+    if ntri < 1 or nloop < 1:
         return []
     nvert = len(mesh.vertices)
     positions = np.zeros(nvert * 3, dtype=np.float32)
     mesh.vertices.foreach_get("co", positions)
     positions = _apply_matrix_points(positions.reshape((-1, 3)), smash_xf)
 
-    normals = np.zeros(nvert * 3, dtype=np.float32)
-    mesh.vertices.foreach_get("normal", normals)
-    normals = _apply_matrix_vectors(normals.reshape((-1, 3)), smash_xf)
-    normals4 = np.append(normals, np.zeros((nvert, 1), dtype=np.float32), axis=1)
+    loop_vert = np.zeros(nloop, dtype=np.int32)
+    mesh.loops.foreach_get("vertex_index", loop_vert)
+    normals = _loop_normals(mesh, nloop)
+    uv_layer = _mesh_uv_layer(mesh)
+    uvs = np.zeros((nloop, 2), dtype=np.float32)
+    if uv_layer is not None:
+        flat = np.zeros(nloop * 2, dtype=np.float32)
+        uv_layer.data.foreach_get("uv", flat)
+        uvs = flat.reshape(-1, 2)
+    tangent_data = _loop_tangents(mesh, uv_layer, nloop)
 
-    indices = np.zeros(ntri * 3, dtype=np.uint32)
-    mesh.loop_triangles.foreach_get("vertices", indices)
+    # One output vertex per distinct (vertex, uv, normal, tangent sign).
+    keys = [loop_vert[:, None].astype(np.float64),
+            np.round(uvs * 1e5).astype(np.float64),
+            np.round(normals * 1e4).astype(np.float64)]
+    if tangent_data is not None:
+        keys.append(tangent_data[1][:, None].astype(np.float64))
+    _unique, first_loop, loop_to_new = np.unique(
+        np.concatenate(keys, axis=1), axis=0, return_index=True, return_inverse=True)
+    loop_to_new = loop_to_new.reshape(-1)
+    new_vert = loop_vert[first_loop]
+    new_pos = positions[new_vert]
+    new_nrm = _apply_matrix_vectors(normals[first_loop], smash_xf)
+    new_nrm4 = np.append(new_nrm, np.zeros((len(first_loop), 1), dtype=np.float32), axis=1)
+    new_uv = uvs[first_loop].copy()
+    new_uv[:, 1] = 1.0 - new_uv[:, 1]
+    new_tan = np.zeros((len(first_loop), 4), dtype=np.float32)
+    if tangent_data is not None:
+        new_tan[:, :3] = _apply_matrix_vectors(tangent_data[0][first_loop], smash_xf)
+        new_tan[:, 3] = tangent_data[1][first_loop]
+    else:
+        new_tan[:, 0] = 1.0
+        new_tan[:, 3] = 1.0
 
-    uvs = np.zeros((nvert, 2), dtype=np.float32)
-    uv_layer = None
-    layers = getattr(mesh, "uv_layers", None)
-    if layers:
-        uv_layer = layers.get("map1") or layers.get("UVMap") or (layers.active if layers else None)
-        if uv_layer is None and len(layers) > 0:
-            uv_layer = layers[0]
-    if uv_layer is not None and len(mesh.loops) > 0:
-        loop_uvs = np.zeros(len(mesh.loops) * 2, dtype=np.float32)
-        uv_layer.data.foreach_get("uv", loop_uvs)
-        loop_index = np.zeros(len(mesh.loops), dtype=np.uint32)
-        mesh.loops.foreach_get("vertex_index", loop_index)
-        uvs = per_loop_to_per_vertex(loop_uvs, loop_index, (nvert, 2))
-        uvs[:, 1] = 1.0 - uvs[:, 1]
+    tri_loops = np.zeros(ntri * 3, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("loops", tri_loops)
+    tri_mat = np.zeros(ntri, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("material_index", tri_mat)
+    tris = loop_to_new[tri_loops].reshape(-1, 3)
+    weights = _collect_weights(obj, name_map, nvert)
 
-    # Dummy tangents: calculate_tangents_vec4 panics on some imported meshes
-    # and would crash the viewport draw callback.
-    tangents = np.zeros((nvert, 4), dtype=np.float32)
-    tangents[:, 0] = 1.0
-    tangents[:, 3] = 1.0
-
-    influences = _collect_influences(obj, name_map, nvert)
-    if not influences or nvert <= _MAX_SKIN_VERTS:
-        packed = _pack_mesh_object(
-            name,
-            start_sub,
-            positions,
-            normals4,
-            uvs,
-            tangents,
-            indices,
-            influences,
-            fallback_bone,
-        )
-        return [packed] if packed is not None else []
-
-    objects = []
-    for offset, (old_ids, local) in enumerate(_chunk_triangles(indices)):
-        old_ids = np.asarray(old_ids, dtype=np.int64)
-        objects.append(
-            _pack_mesh_object(
-                name,
-                start_sub + offset,
-                positions[old_ids],
-                normals4[old_ids],
-                uvs[old_ids],
-                tangents[old_ids],
-                local,
-                _slice_influences(influences, old_ids.tolist()),
+    out = []
+    sub = start_sub
+    for mat_index in np.unique(tri_mat):
+        part = tris[tri_mat == mat_index].reshape(-1)
+        used, local = np.unique(part, return_inverse=True)
+        local = local.astype(np.uint32).reshape(-1)
+        influences = _influences_for(weights, new_vert[used])
+        pieces = [(np.arange(len(used)), local)]
+        if influences and len(used) > _MAX_SKIN_VERTS:
+            pieces = [(np.asarray(ids, dtype=np.int64), np.asarray(idx, dtype=np.uint32))
+                      for ids, idx in _chunk_triangles(local)]
+        for ids, idx in pieces:
+            src = used[ids]
+            packed = _pack_mesh_object(
+                name, sub, new_pos[src], new_nrm4[src], new_uv[src], new_tan[src], idx,
+                _slice_influences(influences, ids.tolist()) if len(pieces) > 1 else influences,
                 fallback_bone,
             )
-        )
-    return objects
+            if packed is not None:
+                out.append((packed, int(mat_index)))
+                sub += 1
+    return out
 
 
-def _collect_influences(obj, name_map, nvert):
+def _collect_weights(obj, name_map, nvert):
+    """Per original vertex: [(export bone, normalised weight), ...] (max 4)."""
     groups = obj.vertex_groups
     if not groups or not name_map:
-        return []
+        return None
     group_index_to_export = {}
     for vg in groups:
         export = name_map.get(vg.name)
         if export:
             group_index_to_export[vg.index] = export
     if not group_index_to_export:
-        return []
-    weights_by_bone = {name: [] for name in group_index_to_export.values()}
-    mesh = obj.data
-    for vertex in mesh.vertices:
+        return None
+    weights = [None] * nvert
+    for vertex in obj.data.vertices:
         pairs = []
         for grp in vertex.groups:
             export = group_index_to_export.get(grp.group)
@@ -540,15 +665,23 @@ def _collect_influences(obj, name_map, nvert):
         total = sum(weight for _name, weight in pairs)
         if total <= 1e-8:
             continue
+        weights[vertex.index] = [(export, weight / total) for export, weight in pairs]
+    return weights
+
+
+def _influences_for(weights, original_ids):
+    if weights is None:
+        return []
+    by_bone = {}
+    for new_id, old_id in enumerate(original_ids.tolist()):
+        pairs = weights[old_id]
+        if not pairs:
+            continue
         for export, weight in pairs:
-            weights_by_bone[export].append(
-                ssbh_data_py.mesh_data.VertexWeight(vertex.index, weight / total)
-            )
-    influences = []
-    for export, weights in weights_by_bone.items():
-        if weights:
-            influences.append(ssbh_data_py.mesh_data.BoneInfluence(export, weights))
-    return influences
+            by_bone.setdefault(export, []).append(
+                ssbh_data_py.mesh_data.VertexWeight(new_id, weight))
+    return [ssbh_data_py.mesh_data.BoneInfluence(export, items)
+            for export, items in by_bone.items()]
 
 
 def _clear_folder(folder):
@@ -587,6 +720,95 @@ def _new_modl():
     return modl
 
 
+class _Materials:
+    """One Smash material per Blender material, shared by every mesh using it.
+
+    HB Master Shader materials get the maps and shader export would ship
+    (smash_vp_hb). Anything else keeps the plain preview: its colour texture on
+    the default fighter material.
+    """
+
+    def __init__(self, folder):
+        self.folder = folder
+        self.matl = ssbh_data_py.matl_data.MatlData()
+        self.labels = {}
+        self.col_cache = {}
+        self.keep = set()
+        self.hb = {}
+        self.metal_skin = []
+
+    def label(self, mat):
+        key = mat.name if mat is not None else ""
+        label = self.labels.get(key)
+        if label is not None:
+            return label
+        label = f"{_MAT_LABEL}_{safe_token(key or 'none', 32)}"
+        self.labels[key] = label
+        entry = None
+        if mat is not None:
+            try:
+                entry = self._hb_entry(mat, label)
+            except Exception:
+                entry = None
+        if entry is None:
+            entry = _opaque_material(label, self._col(mat))
+        self.matl.entries.append(entry)
+        return label
+
+    def _hb_entry(self, mat, label):
+        from . import smash_vp_hb as hb
+        enabled, size = hb.preview_settings()
+        if not enabled or hb.master_node(mat) is None:
+            return None
+        textures, result = hb.build_textures(mat, self.folder, size)
+        if textures is None:
+            return None
+        self.keep.update(textures.values())
+        self.hb[mat.name] = result["status"]
+        entry = hb.matl_entry(label, mat, textures)
+        if result.get("subsurface") and not hb.shader_is_subsurface(entry.shader_label):
+            self.metal_skin.append(mat.name)
+        return entry
+
+    def _col(self, mat):
+        image = _albedo_image(mat)
+        if image is None:
+            return None
+        key = int(image.as_pointer())
+        if key not in self.col_cache:
+            self.col_cache[key] = _write_col_nutexb(
+                image, self.folder, f"vpcol_{safe_token(image.name, 28)}"
+            )
+        if self.col_cache[key]:
+            self.keep.add(self.col_cache[key])
+        return self.col_cache[key]
+
+    def finish(self):
+        from . import smash_vp_hb as hb
+        hb.prune_textures(self.folder, self.keep)
+        global last_hb_status, last_hb_metal_skin
+        last_hb_status = dict(self.hb)
+        last_hb_metal_skin = list(self.metal_skin)
+
+
+# Material name -> 'baked' / 'quick' / 'approx' for the last folder built.
+last_hb_status = {}
+# HB materials marked as skin (SSS Mask) that export would put on a plain shader,
+# where PRM.r - the SSS Mask - reads as metalness.
+last_hb_metal_skin = []
+
+
+def _add_packed(obj, packed, group, materials, mesh_data, modl):
+    slots = obj.material_slots
+    for mesh_obj, mat_index in packed:
+        mat = slots[mat_index].material if 0 <= mat_index < len(slots) else None
+        label = materials.label(mat)
+        mesh_data.objects.append(mesh_obj)
+        modl.entries.append(
+            ssbh_data_py.modl_data.ModlEntryData(group, mesh_obj.subindex, label)
+        )
+
+
 def build_armature_folder(arm, meshes, smash_bones=False):
     """Write one ModelFolder for a GPU extra armature. Returns (path, uploaded)."""
     if arm is None or not meshes:
@@ -603,11 +825,10 @@ def build_armature_folder(arm, meshes, smash_bones=False):
         fallback = skel.bones[0].name
 
     mesh_data = ssbh_data_py.mesh_data.MeshData()
-    matl = ssbh_data_py.matl_data.MatlData()
+    materials = _Materials(folder)
     modl = _new_modl()
     used_names = {}
     uploaded = []
-    col_cache = {}
     arm_world = getattr(arm, "matrix_world", None) or Matrix.Identity(4)
 
     for obj in meshes:
@@ -627,27 +848,13 @@ def build_armature_folder(arm, meshes, smash_bones=False):
         if not packed:
             continue
         used_names[group] = sub + len(packed)
-        label = f"{_MAT_LABEL}_{safe_token(obj.name, 20)}"
-        image = _albedo_image(obj)
-        col_name = None
-        if image is not None:
-            key = int(image.as_pointer())
-            if key not in col_cache:
-                col_cache[key] = _write_col_nutexb(
-                    image, folder, f"vpcol_{safe_token(image.name, 28)}"
-                )
-            col_name = col_cache[key]
-        for mesh_obj in packed:
-            matl.entries.append(_opaque_material(label, col_name))
-            mesh_data.objects.append(mesh_obj)
-            modl.entries.append(
-                ssbh_data_py.modl_data.ModlEntryData(group, mesh_obj.subindex, label)
-            )
-        uploaded.append((int(obj.as_pointer()), group, packed[0].subindex))
+        _add_packed(obj, packed, group, materials, mesh_data, modl)
+        uploaded.append((int(obj.as_pointer()), group, packed[0][0].subindex, len(packed)))
 
     if not mesh_data.objects:
         return None, []
-    return _write_folder(folder, mesh_data, skel, matl, modl), uploaded
+    materials.finish()
+    return _write_folder(folder, mesh_data, skel, materials.matl, modl), uploaded
 
 
 def build_loose_folder(meshes):
@@ -659,11 +866,10 @@ def build_loose_folder(meshes):
     skel = _loose_skel(entries)
     name_map = {}
     mesh_data = ssbh_data_py.mesh_data.MeshData()
-    matl = ssbh_data_py.matl_data.MatlData()
+    materials = _Materials(folder)
     modl = _new_modl()
     used_names = {}
     uploaded = []
-    col_cache = {}
     for obj, bone_name in entries:
         group = extra_mesh_name(LOOSE_ARM, obj.name)
         sub = used_names.get(group, 0)
@@ -672,27 +878,13 @@ def build_loose_folder(meshes):
         if not packed:
             continue
         used_names[group] = sub + len(packed)
-        label = f"{_MAT_LABEL}_{safe_token(obj.name, 20)}"
-        image = _albedo_image(obj)
-        col_name = None
-        if image is not None:
-            key = int(image.as_pointer())
-            if key not in col_cache:
-                col_cache[key] = _write_col_nutexb(
-                    image, folder, f"vpcol_{safe_token(image.name, 28)}"
-                )
-            col_name = col_cache[key]
-        for mesh_obj in packed:
-            matl.entries.append(_opaque_material(label, col_name))
-            mesh_data.objects.append(mesh_obj)
-            modl.entries.append(
-                ssbh_data_py.modl_data.ModlEntryData(group, mesh_obj.subindex, label)
-            )
-        uploaded.append((int(obj.as_pointer()), group, packed[0].subindex))
+        _add_packed(obj, packed, group, materials, mesh_data, modl)
+        uploaded.append((int(obj.as_pointer()), group, packed[0][0].subindex, len(packed)))
 
     if not mesh_data.objects:
         return None, []
-    return _write_folder(folder, mesh_data, skel, matl, modl), uploaded
+    materials.finish()
+    return _write_folder(folder, mesh_data, skel, materials.matl, modl), uploaded
 
 
 def iter_bound_meshes(scene, arm, skip_mesh):
