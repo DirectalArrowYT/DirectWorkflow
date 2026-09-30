@@ -39,6 +39,14 @@ def _update_smash_vp_lighting(self, context):
         pass
 
 
+def _update_smash_vp_hb(self, context):
+    try:
+        from .extras.smash_viewport import mark_hb_preview_dirty
+        mark_hb_preview_dirty(immediate=True)
+    except Exception:
+        pass
+
+
 def poll_armature_object(_self, obj):
     return obj is not None and getattr(obj, 'type', None) == 'ARMATURE'
 
@@ -273,6 +281,27 @@ class SubSceneProperties(PropertyGroup):
         default="",
         subtype="FILE_PATH",
         update=_update_smash_vp_lighting,
+    )
+    smash_vp_hb_preview: BoolProperty(
+        name="HB Master Shader Preview",
+        description=(
+            "Show HB Master Shader materials in Smash Viewport as they will look in game: "
+            "the _col, _prm, _nor and _emi Bake Textures would write, on the Smash shader "
+            "export would use. Off: the plain colour texture on the default material"
+        ),
+        default=True,
+        update=_update_smash_vp_hb,
+    )
+    smash_vp_hb_size: EnumProperty(
+        name="Preview Size",
+        description="Resolution of the HB Master preview textures",
+        items=(
+            ("512", "512", "Fastest updates"),
+            ("1024", "1024", "Default"),
+            ("2048", "2048", "Sharper, slower to update"),
+        ),
+        default="1024",
+        update=_update_smash_vp_hb,
     )
     stage_light_drive_smash_viewport: BoolProperty(
         name="Drive Smash Viewport",

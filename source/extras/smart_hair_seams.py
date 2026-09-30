@@ -585,6 +585,140 @@ def align_islands_upright(obj, flat_below=0.02):
     return turned, upright, flat
 
 
+def layout_by_height(obj, margin=0.003, fill=True, flat_below=0.02):
+    """Lay the UV islands out like one vertical hair texture (Mario's c00 layout).
+
+    Packing puts islands wherever they fit, so a tip can land above the crown.
+    Smash hair reads the UV as a single top-to-bottom map, so here every island
+    sits at the height of the UV that matches its height on the model: the top
+    of the hair at the top of the tile, the tips and the nape at the bottom.
+
+    Islands keep their unwrapped shape at a common texel density (scaled to
+    their real surface area). Across U they run around the head in order,
+    front in the middle, and an island only moves right past islands that share
+    its height band, so neighbours on the model stay neighbours in the UV.
+    `fill` stretches the finished layout to the whole tile, and each island's
+    V range to its real height range, so V is the height on the model. Card
+    hair has many times more surface around the head than it is tall, so with
+    square texels the layout would be a thin strip; stretched, detail across
+    the strands is squeezed but anything running root to tip (a gradient, the
+    anisotropic highlight) maps exactly.
+
+    Returns the number of islands placed.
+    """
+    import math
+    import numpy as np
+
+    mesh = obj.data
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    uv_layer = bm.loops.layers.uv.active
+    if uv_layer is None:
+        bm.free()
+        return 0
+
+    matrix = obj.matrix_world
+    world = {v.index: matrix @ v.co for v in bm.verts}
+    island_of = uv_islands(bm, uv_layer)
+    groups = {}
+    for face in bm.faces:
+        groups.setdefault(island_of[face.index], []).append(face)
+    if not groups:
+        bm.free()
+        return 0
+
+    all_pos = np.array([world[i][:] for i in world], dtype=np.float64)
+    centre = (all_pos.min(axis=0) + all_pos.max(axis=0)) / 2.0
+
+    def area2(points):
+        # Twice the area of a polygon (fan) in 2D or 3D.
+        total = 0.0
+        for i in range(1, len(points) - 1):
+            a = points[i] - points[0]
+            b = points[i + 1] - points[0]
+            if len(a) == 2:
+                total += abs(a[0] * b[1] - a[1] * b[0])
+            else:
+                total += float(np.linalg.norm(np.cross(a, b)))
+        return total
+
+    islands = []
+    for faces in groups.values():
+        loops = [loop for face in faces for loop in face.loops]
+        uv = np.array([loop[uv_layer].uv[:] for loop in loops], dtype=np.float64)
+        pos = np.array([world[loop.vert.index][:] for loop in loops], dtype=np.float64)
+        uv_area = world_area = 0.0
+        for face in faces:
+            uv_area += area2(np.array([l[uv_layer].uv[:] for l in face.loops]))
+            world_area += area2(np.array([world[v.index][:] for v in face.verts]))
+        scale = math.sqrt(world_area / uv_area) if uv_area > 1e-12 and world_area > 0 else 1.0
+        local = (uv - uv.min(axis=0)) * scale
+        mid = pos.mean(axis=0) - centre
+        z_low, z_high = float(pos[:, 2].min()), float(pos[:, 2].max())
+        extent = float(np.ptp(pos, axis=0).max())
+        span = float(local[:, 1].max())
+        if fill and span > 1e-12 and z_high - z_low > flat_below * extent:
+            # Stretch the island so its V range is exactly its height range:
+            # a root-to-tip gradient then lands on the right strands.
+            local[:, 1] *= (z_high - z_low) / span
+            height = (z_low + z_high) / 2.0
+        else:
+            height = float(pos[:, 2].mean())
+        islands.append({
+            'loops': loops,
+            'local': local,
+            'size': local.max(axis=0),
+            # Where the island's centre should sit vertically.
+            'height': height,
+            # Around the head, front (-Y) = 0, so the face-framing hair lands in the middle.
+            'angle': math.atan2(mid[0], -mid[1]),
+        })
+
+    def place(gap):
+        # Leftmost free spot in the island's own height band. Taking islands in
+        # order around the head keeps neighbours together; filling gaps keeps
+        # the layout from growing one island wider per island.
+        boxes = np.zeros((0, 4))
+        for isl in sorted(islands, key=lambda i: i['angle']):
+            w, h = isl['size']
+            v0 = isl['height'] - h / 2.0
+            v1 = v0 + h
+            band = boxes[(boxes[:, 2] < v1 + gap) & (v0 < boxes[:, 3] + gap)]
+            x = 0.0
+            if len(band):
+                for cand in np.concatenate([[0.0], np.sort(band[:, 1] + gap)]):
+                    if not np.any((band[:, 0] < cand + w + gap) & (cand < band[:, 1] + gap)):
+                        x = float(cand)
+                        break
+            boxes = np.vstack([boxes, [x, x + w, v0, v1]])
+            isl['origin'] = (x, v0)
+        return float(boxes[:, 1].max()), float(boxes[:, 2].min()), float(boxes[:, 3].max())
+
+    width, v_min, v_max = place(0.0)
+    gap = margin * max(width, v_max - v_min)
+    width, v_min, v_max = place(gap)
+    height = max(v_max - v_min, 1e-9)
+    width = max(width, 1e-9)
+    usable = max(1.0 - 2.0 * margin, 1e-3)
+    if fill:
+        su, sv = usable / width, usable / height
+        off_u = off_v = margin
+    else:
+        su = sv = usable / max(width, height)
+        off_u = margin + (usable - width * su) / 2.0
+        off_v = margin + (usable - height * sv) / 2.0
+
+    for isl in islands:
+        ox, oy = isl['origin']
+        for loop, (u, v) in zip(isl['loops'], isl['local']):
+            loop[uv_layer].uv = (off_u + (ox + u) * su, off_v + (oy + v - v_min) * sv)
+
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+    return len(islands)
+
+
 def pack_upright(context, obj, margin):
     """Pack into 0-1 without rotating anything. Assumes the object is active."""
     bpy.ops.object.mode_set(mode='EDIT')
@@ -603,16 +737,32 @@ class SUB_OP_uv_align_upright(Operator):
     bl_description = (
         'Rotate each UV island so the part of the mesh that is higher up sits higher in UV '
         'space - roots at the top, tips at the bottom. Smash\'s anisotropic hair material '
-        'reads its highlight direction from the UVs and needs this. Re-packs without '
-        'rotation afterwards so nothing overlaps'
+        'reads its highlight direction from the UVs and needs this. Then lays the islands '
+        'out by height like Mario\'s hair: the top of the hair at the top of the tile, the '
+        'tips at the bottom, nothing overlapping'
     )
     bl_options = {'REGISTER', 'UNDO'}
 
-    pack_after: BoolProperty(
-        name='Re-pack (No Rotation)',
+    layout: EnumProperty(
+        name='Layout',
+        description='How to place the islands after turning them upright',
+        items=(
+            ('HEIGHT', 'By Height (Mario)',
+             'One vertical hair map like vanilla fighters: every island sits at the V that '
+             'matches its height on the model, top of the hair at the top of the tile and the '
+             'tips at the bottom, running around the head across U'),
+            ('PACK', 'Pack',
+             'Pack tightly without rotation. Islands stay upright but land anywhere in the tile'),
+            ('NONE', 'Leave in Place', 'Only turn the islands. They may overlap or leave the tile'),
+        ),
+        default='HEIGHT',
+    )
+    fill_tile: BoolProperty(
+        name='Fill Tile',
         description=(
-            'Turning islands in place makes them overlap and leave the 0-1 tile. Pack them '
-            'again with rotation disabled, which keeps them upright'
+            'By Height: stretch the layout over the whole 0-1 tile so V is the height on the '
+            'model (top of the tile = top of the hair). Off keeps texels square, which for '
+            'card hair leaves a thin strip across the middle'
         ),
         default=True,
     )
@@ -653,7 +803,10 @@ class SUB_OP_uv_align_upright(Operator):
             for obj in meshes:
                 counts = align_islands_upright(obj, self.flat_below)
                 totals = [t + c for t, c in zip(totals, counts)]
-                if self.pack_after:
+                if self.layout == 'HEIGHT':
+                    layout_by_height(obj, self.pack_margin, self.fill_tile, self.flat_below)
+                    overlaps.append(uv_overlap(obj, 512)[1])
+                elif self.layout == 'PACK':
                     bpy.ops.object.select_all(action='DESELECT')
                     obj.select_set(True)
                     view_layer.objects.active = obj
@@ -678,7 +831,7 @@ class SUB_OP_uv_align_upright(Operator):
         if flat:
             message += f', {flat} flat left as-is'
         if overlaps:
-            message += f'; overlap after re-pack {max(overlaps):.2%}'
+            message += f'; overlap after layout {max(overlaps):.2%}'
         self.report({'INFO'}, message)
         return {'FINISHED'}
 

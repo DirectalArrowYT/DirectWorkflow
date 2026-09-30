@@ -193,3 +193,52 @@ Blender disables add-ons while it frees the open file. The eye preview shutdown 
 scene's armatures at that point, which crashed Blender on exit. Unregistering no longer
 touches scene data. The retargeting "Auto Detect Rigs" operator is now unregistered too,
 so re-enabling the add-on no longer warns.
+
+## HB Master Shader in Smash Viewport
+Smash Viewport renders models that have no exported `.numshb` yet (a model you are still
+building in Blender) with the game's own shaders. Before, these meshes got a white default
+material, and any material built on the HB Master Shader showed up plain white. Now every
+HB Master material shows what Bake Textures + export would ship:
+
+- **_col:** Base Color × Tint → Hue/Saturation/Brightness → AO tint (the group's COL stage).
+- **_prm:** Metalness (or the SSS Mask on a subsurface shader), Roughness, AO (with AO to
+  PRM), Specular. Same rules as the baker.
+- **_nor** from the Normal input, **_emi** when the shader reads Texture5.
+- The Smash shader export will use: the material's own (or its side-loaded twin's), otherwise
+  the standard fighter shader.
+
+The toon part of the group (cel shadow, rim, highlight) never reaches the game, so it is not
+shown. The game lights the model itself.
+
+The settings are in the Smash Viewport panel (sidebar and Render properties):
+- **HB Master Shader Preview** (on by default) and **Size** (512 / 1024 / 2048).
+- **Quick** (automatic): inputs wired straight to an image are read from the image. The group's
+  ray-traced AO is left out until you bake.
+- **Bake HB Preview:** a small Cycles bake of every wired input and the group's AO. Procedural
+  inputs (color ramps, mixes) and the AO then show exactly. **X** drops the bake.
+- The sliders stay live either way. An edit rebuilds only that material's textures once you
+  stop dragging (about 0.1 s for a 120-mesh character).
+- **Metallic skin warning:** a skin material (SSS Mask) with no Smash shader ships on the
+  standard shader, where the game reads the SSS Mask as metalness. The panel lists these; give
+  them a side-loaded twin with the Skin (Subsurface) preset.
+
+Also in the viewport's model builder:
+- Each material slot gets its own Smash material. Before, a mesh with several materials was
+  drawn with the first one everywhere.
+- Vertices are split along UV and normal seams, the way export does it. Texture seams and
+  custom normals (Smart Normals) now look as they will in game.
+- Real tangents, so normal maps render correctly.
+
+## Align UVs Upright (Hair): lay out by height
+Standing each island upright was not enough. The re-pack placed islands wherever they fit,
+so a tip could land above the crown. Smash hair reads the UV as one top-to-bottom map, like
+Mario's (c00) hair. The new default layout, **By Height (Mario)**:
+- places every island at the V that matches its height on the model: the top of the hair at
+  the top of the tile, the tips and the nape at the bottom;
+- runs the islands around the head across U, with the front in the middle and no overlaps;
+- with **Fill Tile** (on), stretches each island's V range to exactly its height range. A
+  root-to-tip gradient or the anisotropic highlight then lines up. Card hair has far more
+  surface around the head than it is tall, so detail across the strands is squeezed.
+
+On a test character's hair (≈500 islands), V now follows height with a 0.995 correlation, with
+0% overlap. The old tight packing is still available as **Pack**.
