@@ -122,6 +122,6 @@ def load_native(module_name: str, package_globals: dict | None = None) -> None:
     raise ImportError(
         f'No {module_name} binary for {sys.platform} / Python '
         f'{sys.version_info.major}.{sys.version_info.minor} ({abi}). '
-        f'This addon ships cp310 (Blender 4.0–4.1), cp311 (Blender 4.2–4.5), '
-        f'and cp313 (Blender 5.x) builds. Looked for: {tried}.{detail}'
+        f'This addon ships cp310 (Blender 4.0–4.1), cp311 (Blender 4.2–5.0), '
+        f'and cp313 (Python 3.13 Blender) builds. Looked for: {tried}.{detail}'
     )
