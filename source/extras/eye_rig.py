@@ -2074,7 +2074,12 @@ def _register_live_handler():
 
 def _unregister_live_handler():
     global _uv_warps_cleaned, _solid_preview_engaged, _shader_preview_engaged
-    stop_eye_preview()
+    global _eye_preview_running, _last_idle_preview_key
+    # Don't touch scene data here: when Blender quits, add-ons are disabled while
+    # the file is being freed, and reading objects/properties then crashes it.
+    _eye_preview_running = False
+    _last_preview_values.clear()
+    _last_idle_preview_key = None
     _unregister_eye_driver_namespace()
     _uv_warps_cleaned = False
     _solid_preview_engaged = False

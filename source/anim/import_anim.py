@@ -1468,7 +1468,8 @@ def setup_material_drivers(arma: bpy.types.Object):
     from ..model.export_model import trim_name
     sub_anim_data: SUB_PG_sub_anim_data = arma.data.sub_anim_properties
     mesh_children = [child for child in arma.children if child.type == 'MESH']
-    materials: set[Material] = {material_slot.material for mesh in mesh_children for material_slot in mesh.material_slots}
+    materials: set[Material] = {material_slot.material for mesh in mesh_children for material_slot in mesh.material_slots
+                                if material_slot.material is not None and material_slot.material.node_tree is not None}
     trimmed_material_name_to_material: dict[str, Material] = {trim_name(material.name) : material for material in materials}
     
     for track_index, mat_track in enumerate(sub_anim_data.mat_tracks):

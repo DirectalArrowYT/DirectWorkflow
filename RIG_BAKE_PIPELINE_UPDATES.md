@@ -179,3 +179,17 @@ Textures are written to `//eye_textures` next to the .blend:
 **Scroll Scale: Match Vanilla** (the default) makes the eye span as much of `uvSet` as
 Mario's (0.29–0.84 on Aizawa, against Mario's 0.30–0.85). The same `CustomVector31` offset
 then moves the iris as far across the eye as on a vanilla fighter.
+
+### Baked expression eyes
+Models with baked VIS expressions have one eye mesh per expression. Select all of them
+(any order) and run **Convert Eyes** once. They share one set of `EyeL`/`EyeR` materials
+and textures (read from the first mesh), each keeps its visibility, and meshes without an
+iris (for example an eyeshadow strip with the eye material) are skipped. Painting out the
+pupil also clears the dark rim and black gaps around it, filling from the surrounding eye
+white. **Setup CustomVector31** no longer fails on empty material slots.
+
+## Crash when closing Blender
+Blender disables add-ons while it frees the open file. The eye preview shutdown read the
+scene's armatures at that point, which crashed Blender on exit. Unregistering no longer
+touches scene data. The retargeting "Auto Detect Rigs" operator is now unregistered too,
+so re-enabling the add-on no longer warns.
