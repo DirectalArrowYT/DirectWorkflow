@@ -134,6 +134,42 @@ def sync_anim_importer_to_active(context=None):
     _last_anim_sync_ptr = ptr
 
 
+def match_rig_to_imported_animation(context, operator, obj):
+    """Pose and key the IK controls to follow a just-imported (FK) animation.
+
+    A .nuanmb only has keys for the Smash bones. With the animation rig on, the IK controls
+    would keep whatever pose they had and pull the arms and legs there instead. Returns the
+    number of frames matched (0 when the armature has no IK)."""
+    from ..extras import smash_ik
+    from ..extras.create_animation_rig import armature_has_ik
+
+    anim = obj.animation_data
+    action = anim.action if anim else None
+    if action is None or not armature_has_ik(obj):
+        return 0
+    start, end = (int(round(v)) for v in action.frame_range)
+    context.view_layer.objects.active = obj
+    try:
+        if smash_ik.has_ik_v2(obj):
+            count = smash_ik.match_ik_to_fk(context, obj, range(start, end + 1), insert_keys=True)
+        else:
+            scene = context.scene
+            saved = scene.frame_start, scene.frame_end
+            scene.frame_start, scene.frame_end = start, end
+            try:
+                bpy.ops.sub.fk_to_ik_transfer(
+                    'EXEC_DEFAULT', entire_animation=True, auto_keyframe=True, cleanup_mode='BOTH',
+                    remove_knee_frames=False, remove_arm_frames=False, show_progress=False)
+            finally:
+                scene.frame_start, scene.frame_end = saved
+            count = end - start + 1
+    except Exception as e:
+        operator.report({'WARNING'}, f"Imported, but matching the IK controls failed: {e}")
+        return 0
+    operator.report({'INFO'}, f"Matched the IK controls to the animation ({count} frames)")
+    return count
+
+
 def import_animation_file(
     context: bpy.types.Context,
     operator: bpy.types.Operator,
@@ -181,6 +217,8 @@ def import_animation_file(
             first_frame,
             armature_object=obj,
         )
+        if include_transform:
+            match_rig_to_imported_animation(context, operator, obj)
         if context.mode != old_mode:
             bpy.ops.object.mode_set(mode=old_mode, toggle=False)
     else:
