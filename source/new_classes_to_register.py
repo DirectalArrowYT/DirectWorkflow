@@ -86,6 +86,7 @@ classes = [
     source.extras.create_animation_rig.SUB_OP_anim_rig_toggle_ik_fk,
     source.extras.create_animation_rig.SUB_OP_anim_rig_snap_ik_fk,
     source.extras.create_animation_rig.SUB_OP_anim_rig_upgrade_ik,
+    source.extras.rotate_animation.SUB_OP_rotate_animation,
     source.extras.finger_sliders.SUB_OP_bake_finger_sliders,
     source.extras.finger_sliders.SUB_OP_toggle_finger_sliders,
     source.extras.viewport_capture.SUB_OP_gif_or_photo,

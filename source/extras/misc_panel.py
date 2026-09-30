@@ -84,6 +84,11 @@ class SUB_PT_animation_tools(Panel):
             else:
                 layout.operator("sub.anim_rig_upgrade_ik", text="Upgrade IK (pole-driven)", icon="CON_KINEMATIC")
 
+        if arm is not None:
+            row = layout.row(align=True)
+            row.operator_context = 'INVOKE_DEFAULT'
+            row.operator("sub.rotate_animation", text="Rotate Animation", icon="DRIVER_ROTATIONAL_DIFFERENCE")
+
         from .finger_sliders import has_finger_sliders, finger_sliders_are_enabled
         if arm is not None and has_finger_sliders(arm):
             row = layout.row(align=True)

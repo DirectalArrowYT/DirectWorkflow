@@ -44,6 +44,19 @@ toward the little finger, and the base joint moves least.
   removed key is now checked against the final segment, and the rig uses a 1e-5
   tolerance.
 
+### Rotate Animation (Animation panel)
+Turns a whole animation around the vertical axis. For example, turn a ported idle
+35 degrees so it reads like the 2D pose it came from.
+
+- Trans / Rot / Hip keep their keys (the list is editable), so they get no rotation
+  keys. The rotation goes onto the bones directly below them (Waist, LegC, ...) and
+  onto the rig controls that hang off them (HandIK, FootIK, poles), so IK limbs turn
+  with the body.
+- The axis goes through the hips on every frame: the character turns in place,
+  keeps its path, and its feet stay on the floor.
+- Throw is left alone, since it's gameplay.
+- Works for a whole action, the scene range, or the current frame.
+
 ## Animation export: Bake Rig on Export (on by default)
 You no longer have to Bake & Remove IK before exporting. On export, bones posed by
 the rig (IK limbs, finger sliders, mouth controls) are written as they are
