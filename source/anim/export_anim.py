@@ -206,7 +206,7 @@ class SUB_UL_action_export_list(UIList):
 class SUB_PT_export_anim(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Animation Exporter'
     bl_options = {'DEFAULT_CLOSED'}
 

@@ -1,9 +1,10 @@
 from bpy.types import Panel
+from .version_check import UPDATE_REMOTE_BRANCH, UPDATE_REMOTE_URLS
 
 class SUB_PT_update_plugin(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Update Available!'
 
     @classmethod
@@ -19,7 +20,7 @@ class SUB_PT_update_plugin(Panel):
         layout.use_property_split = False
         
         # Commit information
-        layout.row().label(text="A new update is available on animation-workflow branch!")
+        layout.row().label(text=f"A new update is available on the {UPDATE_REMOTE_BRANCH} branch!")
         
         # Current and latest commit info
         current_version = bl_info['version']
@@ -82,7 +83,7 @@ class SUB_PT_update_plugin(Panel):
 class SUB_PT_updater_settings(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Plugin Updater'
     bl_parent_id = "SUB_PT_update_plugin"
     bl_options = {'DEFAULT_CLOSED'}
@@ -107,6 +108,6 @@ class SUB_PT_updater_settings(Panel):
         
         # Information
         layout.separator()
-        layout.row().label(text="Repository: CrusherD2/smash-ultimate-blender")
-        layout.row().label(text="Branch: animation-workflow")
+        layout.row().label(text="Repository: " + UPDATE_REMOTE_URLS[0][1].removeprefix("https://github.com/").removesuffix(".git"))
+        layout.row().label(text=f"Branch: {UPDATE_REMOTE_BRANCH}")
         layout.row().label(text="Updates monitor commits on this branch")

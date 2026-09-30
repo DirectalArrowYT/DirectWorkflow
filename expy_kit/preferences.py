@@ -64,6 +64,14 @@ def register_classes():
     bpy.utils.register_class(ExpyToClipboard)
 
 
+def _safe_unregister(cls):
+    """Unregister a class if it is registered. The Smash retargeting module unregisters some of
+    these (Expy Kit's own panels, ConstrainToArmature) and replaces them, and one failure here
+    used to abort the rest, which left classes behind and broke re-enabling the add-on."""
+    if getattr(cls, 'is_registered', False):
+        bpy.utils.unregister_class(cls)
+
+
 def unregister_classes():
-    bpy.utils.unregister_class(ExpyPrefs)
-    bpy.utils.unregister_class(ExpyToClipboard)
+    _safe_unregister(ExpyPrefs)
+    _safe_unregister(ExpyToClipboard)

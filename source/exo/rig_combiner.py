@@ -738,7 +738,7 @@ class SUB_UL_rig_meshes(UIList):
 class SUB_PT_rig_combiner(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Rig Combiner'
     bl_options = {'DEFAULT_CLOSED'}
 

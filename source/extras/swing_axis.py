@@ -571,7 +571,7 @@ class SUB_OP_swing_axis_apply(Operator):
 class SUB_PT_swing_axis(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Swing Bone Axis'
     bl_options = {'DEFAULT_CLOSED'}
 

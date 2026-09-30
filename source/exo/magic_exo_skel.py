@@ -331,7 +331,7 @@ class SUB_UL_BoneList(UIList):
 class SUB_PT_ultimate_exo_skel(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Magic Exo Skel Maker'
     bl_options = {'DEFAULT_CLOSED'}
     

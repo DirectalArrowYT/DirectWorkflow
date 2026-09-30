@@ -8,7 +8,7 @@ from .shpcanim import find_shpc_mesh, find_shpc_root
 class SUB_PT_stage_tools(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "Ultimate"
+    bl_category = 'Smash'
     bl_label = "Stage Tools"
     bl_options = {"DEFAULT_CLOSED"}
     bl_order = 90

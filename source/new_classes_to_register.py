@@ -79,7 +79,6 @@ classes = [
     source.anim.export_anim.SUB_OP_apply_override_preset_thrown,
     source.anim.export_anim.SUB_OP_batch_export_anim,
     source.anim.export_anim.SUB_OP_raw_anim_export,
-    source.extras.misc_panel.SUB_PT_animation_tools,
     source.extras.create_animation_rig.SUB_OP_create_animation_rig,
     source.extras.create_animation_rig.SUB_OP_remove_animation_rig,
     source.extras.create_animation_rig.SUB_OP_bake_and_remove_rig,
@@ -90,7 +89,6 @@ classes = [
     source.extras.finger_sliders.SUB_OP_bake_finger_sliders,
     source.extras.finger_sliders.SUB_OP_toggle_finger_sliders,
     source.extras.viewport_capture.SUB_OP_gif_or_photo,
-    source.extras.misc_panel.SUB_PT_model_tools,
     source.extras.face_picker.SUB_PG_face_picker_track,
     source.extras.face_picker.SUB_PG_face_picker_track_choice,
     source.extras.face_picker.SUB_PG_face_picker_bone_choice,
@@ -122,7 +120,6 @@ classes = [
     source.extras.face_picker.SUB_OP_face_picker_load,
     source.extras.face_picker.SUB_PT_face_picker,
     source.extras.face_picker.SUB_PT_face_picker_window,
-    source.extras.misc_panel.SUB_PT_misc_utilities,
     source.extras.stage_tools.panel.SUB_PT_stage_tools,
     source.extras.stage_tools.light_nuanmb.SUB_OP_import_stage_light,
     source.extras.stage_tools.light_nuanmb.SUB_OP_export_stage_light,
@@ -396,21 +393,31 @@ classes = [
     source.bake_texs.master_shader.SUB_PT_hb_master_shader,
 ]
 
+# Classes registered by this list, as opposed to by their own module's register().
+# Unregistering only these leaves the rest to their modules, which would otherwise
+# fail on a class that is already gone and abort disabling the add-on half-way.
+_registered_here = []
+
+
 def register():
+    _registered_here.clear()
     for cls in classes:
         # Some modules (extras, bake_texs) register their own classes first.
-        if getattr(cls, 'is_registered', False):
+        if getattr(cls, 'is_registered', False) or cls in _registered_here:
             continue
         try:
             bpy.utils.register_class(cls)
+            _registered_here.append(cls)
         except ValueError:
             print(f"Class {cls.__name__} is already registered")
 
+
 def unregister():
-    for cls in reversed(classes):
-        if not getattr(cls, 'is_registered', True):
+    for cls in reversed(_registered_here):
+        if not getattr(cls, 'is_registered', False):
             continue
         try:
             bpy.utils.unregister_class(cls)
-        except ValueError:
+        except (ValueError, RuntimeError):
             print(f"Class {cls.__name__} is not registered")
+    _registered_here.clear()

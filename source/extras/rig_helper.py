@@ -466,8 +466,8 @@ class SUB_OP_remove_hand_control_rig(Operator):
 class SUB_PT_rig_helper(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
-    bl_label = 'Rig Helper'
+    bl_category = 'Smash'
+    bl_label = 'Hand Control Rig'
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):

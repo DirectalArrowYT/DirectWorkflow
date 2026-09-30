@@ -1114,6 +1114,14 @@ def register_classes():
     bpy.types.DOPESHEET_HT_header.append(action_header_buttons)
 
 
+def _safe_unregister(cls):
+    """Unregister a class if it is registered. The Smash retargeting module unregisters some of
+    these (Expy Kit's own panels, ConstrainToArmature) and replaces them, and one failure here
+    used to abort the rest, which left classes behind and broke re-enabling the add-on."""
+    if getattr(cls, 'is_registered', False):
+        bpy.utils.unregister_class(cls)
+
+
 def unregister_classes():
     # Remove from Dope Sheet header
     bpy.types.DOPESHEET_HT_header.remove(action_header_buttons)
@@ -1128,40 +1136,40 @@ def unregister_classes():
     bpy.types.VIEW3D_MT_pose_context_menu.remove(pose_context_options)
     bpy.types.VIEW3D_MT_object_context_menu.remove(object_context_options)
 
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_root)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_leg)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_leg_IK)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_spine)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_arms)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_arms_IK)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_fingers)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_custom)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget_face)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_retarget)
+    _safe_unregister(VIEW3D_PT_expy_retarget_root)
+    _safe_unregister(VIEW3D_PT_expy_retarget_leg)
+    _safe_unregister(VIEW3D_PT_expy_retarget_leg_IK)
+    _safe_unregister(VIEW3D_PT_expy_retarget_spine)
+    _safe_unregister(VIEW3D_PT_expy_retarget_arms)
+    _safe_unregister(VIEW3D_PT_expy_retarget_arms_IK)
+    _safe_unregister(VIEW3D_PT_expy_retarget_fingers)
+    _safe_unregister(VIEW3D_PT_expy_retarget_custom)
+    _safe_unregister(VIEW3D_PT_expy_retarget_face)
+    _safe_unregister(VIEW3D_PT_expy_retarget)
 
-    bpy.utils.unregister_class(BindFromPanelSelection)
-    bpy.utils.unregister_class(VIEW3D_PT_BindPanel)
+    _safe_unregister(BindFromPanelSelection)
+    _safe_unregister(VIEW3D_PT_BindPanel)
 
-    bpy.utils.unregister_class(AnimMenu)
-    bpy.utils.unregister_class(ConvertMenu)
-    bpy.utils.unregister_class(BindingsMenu)
+    _safe_unregister(AnimMenu)
+    _safe_unregister(ConvertMenu)
+    _safe_unregister(BindingsMenu)
 
-    bpy.utils.unregister_class(VIEW3D_PT_expy_rename_advanced)
-    bpy.utils.unregister_class(VIEW3D_PT_expy_rename_candidates)
-    bpy.utils.unregister_class(ActionRemoveRenameData)
-    bpy.utils.unregister_class(ActionMakeActive)
-    bpy.utils.unregister_class(ActionRenameSimple)
+    _safe_unregister(VIEW3D_PT_expy_rename_advanced)
+    _safe_unregister(VIEW3D_PT_expy_rename_candidates)
+    _safe_unregister(ActionRemoveRenameData)
+    _safe_unregister(ActionMakeActive)
+    _safe_unregister(ActionRenameSimple)
 
-    bpy.utils.unregister_class(RemoveCustomBone)
-    bpy.utils.unregister_class(AddCustomBone)
+    _safe_unregister(RemoveCustomBone)
+    _safe_unregister(AddCustomBone)
 
-    bpy.utils.unregister_class(MirrorSettings)
-    bpy.utils.unregister_class(SetToActiveBone)
-    bpy.utils.unregister_class(SetToActiveBoneHelpText)
-    bpy.utils.unregister_class(ClearArmatureRetarget)
-    bpy.utils.unregister_class(ExecutePresetArmatureRetarget)
-    bpy.utils.unregister_class(AddPresetArmatureRetarget)
-    bpy.utils.unregister_class(VIEW3D_MT_retarget_presets)
+    _safe_unregister(MirrorSettings)
+    _safe_unregister(SetToActiveBone)
+    _safe_unregister(SetToActiveBoneHelpText)
+    _safe_unregister(ClearArmatureRetarget)
+    _safe_unregister(ExecutePresetArmatureRetarget)
+    _safe_unregister(AddPresetArmatureRetarget)
+    _safe_unregister(VIEW3D_MT_retarget_presets)
 
     del bpy.types.Scene.expykit_bind_to
 

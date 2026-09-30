@@ -30,7 +30,7 @@ class SUB_PT_export_model(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_context = "objectmode"
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Model Exporter'
     bl_options = {'DEFAULT_CLOSED'}
 

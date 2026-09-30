@@ -5,7 +5,7 @@ This module provides a comprehensive auto-updater for the Smash Ultimate Blender
 It directly monitors this fork's own private repository for new commits and updates
 automatically.
 
-1. Branch Monitoring: Checks the private repo for new commits on the main branch
+1. Branch Monitoring: Checks the repo for new commits on the DirectWorkflow branch
 2. One-Click Update: Single button fetches, applies, and restarts automatically
 3. Safe Installation: Refuses to run over local edits instead of silently discarding them
 4. Auto-Restart: Restarts Blender automatically to complete the update process
@@ -22,7 +22,7 @@ The system operates through a state machine with the following states:
 Usage:
 The updater automatically checks for new commits when the plugin loads.
 If new code is available, a panel will appear in the 3D viewport sidebar
-under the "Ultimate" category with a single "Download & Install Update" button
+under the "Smash" tab with a single "Download & Install Update" button
 that handles the entire update process automatically.
 """
 

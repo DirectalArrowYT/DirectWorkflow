@@ -21,7 +21,7 @@ The Blender IK constraints on ArmL/KneeL are replaced by an analytic two-bone IK
 - Matching IK to an FK animation is exact (0.001 over a 200-frame test animation).
 - **Create Animation Rig** builds it. **Create IK Bones** uses it too (the old
   solver is still there under "Legacy IK Solver"). An existing rig gets an
-  **Upgrade IK (pole-driven)** button in the Animation panel.
+  **Upgrade IK (pole-driven)** button in Smash Anim → Animation Rig.
 - **Snap IK → FK / FK → IK** buttons (current frame, keyed) to switch without a pop.
 - Bake & Remove IK deletes every `BL_*IK*` bone and its drivers.
 
@@ -44,7 +44,7 @@ toward the little finger, and the base joint moves least.
   removed key is now checked against the final segment, and the rig uses a 1e-5
   tolerance.
 
-### Rotate Animation (Animation panel)
+### Rotate Animation (Smash Anim → Animation Rig)
 Turns a whole animation around the vertical axis. For example, turn a ported idle
 35 degrees so it reads like the 2D pose it came from.
 
@@ -67,7 +67,7 @@ retarget.
 On a test character: the baked export re-imports exactly (0.0 error). The raw keys were up to
 2.8 units off when animating in IK.
 
-## Hair Bake UVs (Model Tools panel)
+## Hair Bake UVs (Smash Model → UVs & Normals)
 Smart Seams unwraps the UV map in place, which throws away the cel-shade UVs the
 hair texture is mapped with. MHA hair stacks every card on one texture strip:
 Aizawa's hair has 99.8% overlap.
@@ -82,7 +82,7 @@ Aizawa's hair has 99.8% overlap.
 Results: Aizawa (Pl13) goes from 99.8% to 0% overlap, and Ch013 from 100% to 0%.
 The transferred texture matches the source exactly.
 
-## Smart Normals (Model Tools panel)
+## Smart Normals (Smash Model → UVs & Normals)
 Replaces anime or flat-looking normals, choosing the mode by material name:
 - **Hair:** combines the overall rounded form, local clump volume and a little of
   the mesh's own normal, welded so card splits don't show.
@@ -109,3 +109,44 @@ The result is written as custom normals, which the model exporter exports.
 ## Misc
 - Classes registered both by their module and by `new_classes_to_register` no
   longer print "already registered" at startup.
+
+## Sidebar layout
+The single "Ultimate" tab (about 25 panels) and the separate "IK Bones" tab are replaced by
+five tabs. Which tab each panel sits in, and in what order, is set in one table:
+`source/ui_tabs.py`.
+
+- **Smash:** Model Importer, Animation Importer, Model Exporter, Animation Exporter,
+  Raw Animations, Material Re-Importer, updater.
+- **Smash Anim:**
+  - Animation Rig (create, IK/FK, snap, fingers, Rotate Animation, bake and remove)
+  - Poses (Idle Pose Library, User Poses)
+  - Easy Facial Animation
+  - Eyes
+  - Hand Control Rig
+  - Weapon Rig
+  - Animation Utilities (root motion, reset, ground, Mirror Animation)
+  - Retargeting
+  - Legacy IK (old generators, Bulk IK)
+- **Smash Model:**
+  - Viewport & Materials
+  - Mesh
+  - UVs & Normals
+  - Bones (Roll Copier, Bone Symmetry, Vanilla Roll Preset)
+  - Bake Textures (with HB Master Shader)
+  - VIS Mesh Bake
+  - Attribute Renamer
+  - Rig Combiner
+  - Fighter Scale
+- **Smash Swing:** Swing, Auto Swing Bones, Swing Bone Axis.
+- **Smash Stage:** Stage Tools.
+
+The old "Animation Tools", "Model Tools" and "Misc." panels are split into the sections
+above. Their hand-made collapsible boxes are now real sub-panels, so Blender remembers
+which ones are open.
+
+Also fixed:
+- Disabling the add-on raised an error part-way. Classes registered twice were
+  unregistered twice, and Expy Kit stopped at the first panel the retargeting module
+  had already removed. Disable and re-enable now work.
+- The updater panel said "CrusherD2 / animation-workflow". It now shows the repo and
+  branch it actually checks.

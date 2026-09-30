@@ -2698,7 +2698,7 @@ def draw_face_picker_layout(layout, context, show_grid=True):
 class SUB_PT_face_picker(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "Ultimate"
+    bl_category = 'Smash'
     bl_label = "Easy Facial Animation"
     bl_options = {"DEFAULT_CLOSED"}
 

@@ -666,7 +666,7 @@ class SUB_OP_import_all_raw_anims(Operator):
 class SUB_PT_import_anim(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Animation Importer'
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -743,7 +743,7 @@ class SUB_PT_import_anim(Panel):
 class SUB_PT_raw_animations(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Ultimate'
+    bl_category = 'Smash'
     bl_label = 'Raw Animations'
     bl_options = {'DEFAULT_CLOSED'}
 
