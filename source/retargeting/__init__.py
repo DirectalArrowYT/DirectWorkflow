@@ -2452,6 +2452,7 @@ def unregister():
         bpy.utils.unregister_class(ULTIMATE_OT_retargeting_help)
         bpy.utils.unregister_class(ULTIMATE_OT_bind_armatures)
         bpy.utils.unregister_class(ULTIMATE_MT_retarget_presets)
+        bpy.utils.unregister_class(ULTIMATE_OT_auto_detect_rigs)
         bpy.utils.unregister_class(ULTIMATE_OT_map_bones_by_proximity)
         bpy.utils.unregister_class(ULTIMATE_OT_add_preset_retarget)
         bpy.utils.unregister_class(ULTIMATE_OT_execute_preset_retarget)

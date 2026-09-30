@@ -2345,7 +2345,9 @@ def remove_anim_material_drivers(arma:bpy.types.Object):
     from ..model.material.sub_matl_data import SUB_PG_sub_matl_data
     from ..model.material.create_blender_materials_from_matl import setup_sub_matl_data_node_drivers
     mesh_children = [child for child in arma.children if child.type == 'MESH']
-    materials = {material_slot.material for mesh in mesh_children for material_slot in mesh.material_slots}
+    # Empty material slots (common after editing a model) have no material to clean up.
+    materials = {material_slot.material for mesh in mesh_children for material_slot in mesh.material_slots
+                 if material_slot.material is not None and material_slot.material.node_tree is not None}
     for material in materials:
         for node in material.node_tree.nodes:
             for output in node.outputs:

@@ -174,7 +174,32 @@ def find_eyes(obj, bm, eye_index, iris_share=0.9):
             eye['iris'] += part
         else:
             eye['sclera'] += part
+    for eye in eyes.values():
+        if not eye['iris']:
+            _iris_by_shape(eye, world)
     return eyes
+
+
+def _iris_by_shape(eye, world, min_roundness=0.75):
+    """For eyes whose iris is no longer on an eye bone (e.g. baked by VIS Mesh Bake, where
+    everything ends up on Head): the iris is the round, flat disc. The eye white is wide."""
+    parts = _loose_parts(eye['sclera'])
+    if len(parts) < 2:
+        return
+    best, best_score = None, 0.0
+    for part in parts:
+        points = np.array([(world @ v.co)[:] for v in {v for f in part for v in f.verts}])
+        if len(points) < 12:
+            continue
+        spread = np.linalg.svd(points - points.mean(axis=0), compute_uv=False)
+        roundness = spread[1] / max(spread[0], 1e-12)
+        if roundness > best_score:
+            best, best_score = part, roundness
+    if best is None or best_score < min_roundness:
+        return
+    ids = {id(f) for f in best}
+    eye['iris'] = list(best)
+    eye['sclera'] = [f for f in eye['sclera'] if id(f) not in ids]
 
 
 # ---------------------------------------------------------------------------
@@ -438,9 +463,48 @@ def paint_out_iris(texture, sclera_tris_pos, sclera_tris_uv, frame, extent, marg
     _raster(tris_px, w, h, mark)
     if extra_mask is not None:
         mask |= extra_mask
-    if mask.any():
-        _bleed(texture, known=~mask)
-    return int(mask.sum())
+    if not mask.any():
+        return 0
+    return _clean_under_iris(texture, mask)
+
+
+def _clean_under_iris(texture, mask, tolerance=0.12, grow=64):
+    """Repaint the masked texels (and anything iris-like around them) as eye white.
+
+    The mask comes from geometry, but textures paint the iris a little past the iris
+    mesh - an outline, a shadow ring, a transparent fringe. Those texels are added when
+    they touch the mask, differ from the eye-white colour (or are transparent), and lie
+    near the iris. The fill then only draws from opaque eye-white texels, so it never
+    pulls in black from the empty parts of the texture. Works on a window around the
+    iris. Returns the number of texels repainted."""
+    h, w = mask.shape
+    ys, xs = np.nonzero(mask)
+    pad_y = int((ys.max() - ys.min() + 1) * 0.6) + 2
+    pad_x = int((xs.max() - xs.min() + 1) * 0.6) + 2
+    y0, y1 = max(ys.min() - pad_y, 0), min(ys.max() + pad_y + 1, h)
+    x0, x1 = max(xs.min() - pad_x, 0), min(xs.max() + pad_x + 1, w)
+    window = texture[y0:y1, x0:x1]
+    region = mask[y0:y1, x0:x1].copy()
+    opaque = window[..., 3] > 0.5
+    around = opaque & ~region
+    if around.any():
+        white = np.median(window[around][:, :3], axis=0)
+        not_white = (~opaque) | (np.abs(window[..., :3] - white).max(axis=-1) > tolerance)
+        for _ in range(grow):
+            neighbours = region.copy()
+            neighbours[1:] |= region[:-1]
+            neighbours[:-1] |= region[1:]
+            neighbours[:, 1:] |= region[:, :-1]
+            neighbours[:, :-1] |= region[:, 1:]
+            added = neighbours & not_white & ~region
+            if not added.any():
+                break
+            region |= added
+    known = opaque & ~region
+    _bleed(window, known=known)
+    window[region, 3] = 1.0
+    texture[y0:y1, x0:x1] = window
+    return int(region.sum())
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +570,14 @@ def _save_png(array, name, folder):
 
 
 def _source_image(material):
-    if material is None or not material.use_nodes:
+    if material is None:
+        return None
+    smd = getattr(material, 'sub_matl_data', None)
+    if smd is not None:
+        for texture in smd.textures:
+            if texture.name == 'Texture0' and texture.image is not None:
+                return texture.image
+    if not material.use_nodes:
         return None
     images = [n.image for n in material.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image is not None]
     for node in material.node_tree.nodes:
@@ -576,8 +647,14 @@ VANILLA_EYE_UV_WIDTH = 0.55
 
 def convert_eyes(context, obj, operator=None, eye_index=None, prefix='chara', decal_size=512,
                  margin=1.3, paint_margin=1.25, variants=True, reweight=True, folder=None,
-                 uv_scale='VANILLA'):
-    """Convert the MHA eyes on `obj`. Returns (eye objects, report lines)."""
+                 uv_scale='VANILLA', shared=None):
+    """Convert the MHA eyes on `obj`. Returns (eye objects, report lines).
+
+    `shared` (a dict, filled on the first call) lets several objects with the same eyes -
+    e.g. one per baked expression - use one set of textures and EyeL/EyeR materials, with
+    the iris the same size in every one of them."""
+    if shared is None:
+        shared = {}
     report = []
     if eye_index is None:
         eye_index = guess_eye_material_index(obj)
@@ -601,12 +678,16 @@ def convert_eyes(context, obj, operator=None, eye_index=None, prefix='chara', de
         raise RuntimeError(f"{obj.name}: no eye faces found in '{eye_material.name}'.")
 
     world = obj.matrix_world
-    source = _image_array(source_image).copy()
-    sclera_texture = source.copy()
+    if 'materials' in shared:
+        source = sclera_texture = None  # textures come from the first object
+    else:
+        source = _image_array(source_image).copy()
+        sclera_texture = source.copy()
     decals, uvsets, keep = {}, {}, {}
     for side, parts in sorted(eyes.items()):
         if not parts['iris']:
-            report.append(f"{side}: no iris found - skipped (is the iris weighted to an eye bone?)")
+            report.append(f"{side}: no iris found - skipped (no part weighted to an eye bone, and no "
+                          f"round iris disc - not an eye mesh?)")
             continue
         if not parts['sclera']:
             report.append(f"{side}: only an iris, no eye mesh - skipped")
@@ -615,6 +696,14 @@ def convert_eyes(context, obj, operator=None, eye_index=None, prefix='chara', de
         iris_pos, iris_uv = _triangles(parts['iris'], uv_layer, world)
         iris_plane = _plane(iris_pos.reshape(-1, 3), frame).reshape(-1, 3, 2)
         extent = np.abs(iris_plane.reshape(-1, 2)).max(axis=0)
+        if side in shared.get('half', {}):
+            half = shared['half'][side]
+            sclera_pos, sclera_uv = _triangles(parts['sclera'], uv_layer, world)
+            surface = EyeSurface(sclera_pos, frame, float(extent.max()) * 3.0)
+            affine = fit_plane_to_uv(sclera_pos, sclera_uv, frame, float(extent.max()) * 3.0)
+            uvsets[side] = (frame, half, affine, surface)
+            keep[side] = {f.index for f in parts['sclera']} | {f.index for f in parts['iris']}
+            continue
         half = float(extent.max() * margin)
         if uv_scale == 'VANILLA':
             sclera_q = _plane(np.array([(world @ v.co)[:] for v in {v for f in parts['sclera'] for v in f.verts}]),
@@ -632,6 +721,7 @@ def convert_eyes(context, obj, operator=None, eye_index=None, prefix='chara', de
         iris_depth = float(np.max((iris_points - np.array(frame[0][:])) @ np.array(frame[3][:])
                                   - surface.depth(iris_plane.reshape(-1, 2))))
         uvsets[side] = (frame, half, affine, surface)
+        shared.setdefault('half', {})[side] = half
         # The iris disc stays as eye surface (it covers the gap in the eye mesh), showing eye white.
         keep[side] = {f.index for f in parts['sclera']} | {f.index for f in parts['iris']}
         report.append(f"{side}: iris {len(parts['iris'])} faces (radius {extent.max():.3f}, "
@@ -644,39 +734,44 @@ def convert_eyes(context, obj, operator=None, eye_index=None, prefix='chara', de
     if not keep:
         raise RuntimeError("; ".join(report) or "Nothing to convert.")
 
-    # Textures.
-    if folder is None:
-        folder = bpy.path.abspath('//eye_textures') if bpy.data.filepath else tempfile.mkdtemp(prefix='sub_eyes_')
-    os.makedirs(folder, exist_ok=True)
-    sclera_name = f'eye_{prefix}_w_col'
-    _save_png(sclera_texture, sclera_name, folder)
-    names = {}
-    for side, decal in decals.items():
-        iris_name = f'eye_{prefix}_b{side.lower()}_col'
-        _save_png(decal, iris_name, folder)
-        names[side] = {'sclera': sclera_name, 'iris': iris_name}
+    if 'materials' in shared:
+        materials = shared['materials']
+    else:
+        # Textures.
+        if folder is None:
+            folder = bpy.path.abspath('//eye_textures') if bpy.data.filepath else tempfile.mkdtemp(prefix='sub_eyes_')
+        os.makedirs(folder, exist_ok=True)
+        sclera_name = f'eye_{prefix}_w_col'
+        _save_png(sclera_texture, sclera_name, folder)
+        names = {}
+        for side, decal in decals.items():
+            iris_name = f'eye_{prefix}_b{side.lower()}_col'
+            _save_png(decal, iris_name, folder)
+            names[side] = {'sclera': sclera_name, 'iris': iris_name}
 
-    # Materials (built the way the model importer builds them, so they export as Smash eyes).
-    from ..model.material.create_blender_materials_from_matl import create_blender_materials_from_matl
-    labels = [f'Eye{side}{suffix}' for side in names for suffix in (EYE_MATERIALS if variants else {'': 0})]
-    _free_material_names(labels)
-    matl = _eye_matl(names)
-    if not variants:
-        matl.entries = [e for e in matl.entries if e.material_label in {f'Eye{s}' for s in names}]
+        # Materials (built the way the model importer builds them, so they export as Smash eyes).
+        from ..model.material.create_blender_materials_from_matl import create_blender_materials_from_matl
+        labels = [f'Eye{side}{suffix}' for side in names for suffix in (EYE_MATERIALS if variants else {'': 0})]
+        _free_material_names(labels)
+        matl = _eye_matl(names)
+        if not variants:
+            matl.entries = [e for e in matl.entries if e.material_label in {f'Eye{s}' for s in names}]
 
-    class _Reporter:
-        def report(self, level, message):
-            if operator is not None and 'WARNING' in level:
-                operator.report(level, message)
+        class _Reporter:
+            def report(self, level, message):
+                if operator is not None and 'WARNING' in level:
+                    operator.report(level, message)
 
-    materials = create_blender_materials_from_matl(_Reporter(), matl, model_dir=folder)
-    if not bpy.data.filepath:
-        for image in {s.image for m in materials.values() for s in m.sub_matl_data.textures if s.image}:
-            if image.filepath and not image.packed_file:
-                try:
-                    image.pack()
-                except RuntimeError:
-                    pass
+        materials = create_blender_materials_from_matl(_Reporter(), matl, model_dir=folder)
+        if not bpy.data.filepath:
+            for image in {s.image for m in materials.values() for s in m.sub_matl_data.textures if s.image}:
+                if image.filepath and not image.packed_file:
+                    try:
+                        image.pack()
+                    except RuntimeError:
+                        pass
+        shared['materials'] = materials
+        shared['folder'] = folder
 
     # One object per eye (the exporter takes one material per mesh), named like the source
     # so it stays in the same mesh / visibility group.
@@ -687,6 +782,11 @@ def convert_eyes(context, obj, operator=None, eye_index=None, prefix='chara', de
         for collection in obj.users_collection:
             collection.objects.link(eye)
         eye.name = obj.name
+        eye.hide_render = obj.hide_render
+        try:
+            eye.hide_set(obj.hide_get())
+        except RuntimeError:
+            pass
         _keep_faces(eye.data, faces)
         mesh = eye.data
         render_uv = next((l for l in mesh.uv_layers if l.active_render), mesh.uv_layers[0])
@@ -758,7 +858,9 @@ def convert_eyes(context, obj, operator=None, eye_index=None, prefix='chara', de
         bpy.data.objects.remove(obj)
         if data.users == 0:
             bpy.data.meshes.remove(data)
-    report.append(f"textures in {folder}")
+    if 'folder' in shared and not shared.get('reported'):
+        report.append(f"textures in {shared['folder']}")
+        shared['reported'] = True
     return eye_objects, report
 
 
@@ -830,22 +932,41 @@ class SUB_OP_convert_mha_eyes(Operator):
         return context.window_manager.invoke_props_dialog(self, width=380)
 
     def execute(self, context):
-        obj = context.active_object
+        active = context.active_object
         index = None if self.eye_material == 'AUTO' else int(self.eye_material)
-        try:
-            eyes, lines = convert_eyes(
-                context, obj, operator=self, eye_index=index, prefix=self.prefix or 'chara',
-                decal_size=int(self.decal_size), margin=self.margin, paint_margin=self.paint_margin,
-                variants=self.variants, reweight=self.reweight, uv_scale=self.uv_scale)
-        except RuntimeError as error:
-            self.report({'ERROR'}, str(error))
+        # Every selected mesh with eyes; the active one first, so it decides the textures.
+        targets = [active] + [o for o in context.selected_objects if o is not active and o.type == 'MESH']
+        targets = [o for o in targets if o is not None and o.type == 'MESH'
+                   and (index is not None or guess_eye_material_index(o) is not None)]
+        if not targets:
+            self.report({'ERROR'}, "No selected mesh has an eye material.")
             return {'CANCELLED'}
-        for line in lines:
+        shared, eyes, lines, failed = {}, [], [], []
+        for obj in targets:
+            name = obj.name
+            try:
+                made, report = convert_eyes(
+                    context, obj, operator=self,
+                    eye_index=index if obj is active else None, prefix=self.prefix or 'chara',
+                    decal_size=int(self.decal_size), margin=self.margin, paint_margin=self.paint_margin,
+                    variants=self.variants, reweight=self.reweight, uv_scale=self.uv_scale, shared=shared)
+            except RuntimeError as error:
+                failed.append(f"{name}: {error}")
+                continue
+            eyes += made
+            lines += [f"{name}: {line}" for line in report]
+        for line in lines + failed:
             print('Eye Converter:', line)
+        if not eyes:
+            self.report({'ERROR'}, "; ".join(failed) or "Nothing converted.")
+            return {'CANCELLED'}
         bpy.ops.object.select_all(action='DESELECT')
         for eye in eyes:
             eye.select_set(True)
         if eyes:
             context.view_layer.objects.active = eyes[0]
-        self.report({'INFO'}, f"Converted {len(eyes)} eye(s): " + "; ".join(lines))
+        summary = f"Converted {len(eyes)} eye(s) on {len(targets) - len(failed)} object(s)"
+        if failed:
+            summary += f"; {len(failed)} skipped (see console)"
+        self.report({'WARNING'} if failed else {'INFO'}, summary + ". " + "; ".join(lines[:4]))
         return {'FINISHED'}
