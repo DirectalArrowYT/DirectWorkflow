@@ -17,6 +17,14 @@ class SUB_OP_create_ik_bones_operator(bpy.types.Operator):
         description="Match IK bones position to FK bones after creation",
         default=True
     )
+    use_legacy_solver: bpy.props.BoolProperty(
+        name="Legacy IK Solver",
+        description=(
+            "Use Blender IK constraints on ArmL/KneeL (old setup) instead of the analytic IK, "
+            "where the pole always decides the bend"
+        ),
+        default=False,
+    )
 
     def execute(self, context):
         armature_object = context.object
@@ -24,6 +32,16 @@ class SUB_OP_create_ik_bones_operator(bpy.types.Operator):
         if not armature_object or armature_object.type != 'ARMATURE':
             self.report({'ERROR'}, "No armature selected. Please select an armature in Object Mode.")
             return {'CANCELLED'}
+
+        from . import smash_ik
+        if not self.use_legacy_solver and smash_ik.find_limbs(armature_object):
+            count = smash_ik.build(context, armature_object)
+            if self.match_position:
+                smash_ik.match_ik_to_fk(context, armature_object, insert_keys=False)
+            from .create_animation_rig import _ensure_ik_influence_drivers
+            _ensure_ik_influence_drivers(armature_object)
+            self.report({'INFO'}, f"IK set up on {count} limbs")
+            return {'FINISHED'}
 
         armature = armature_object.data
         side = ("L", "R")

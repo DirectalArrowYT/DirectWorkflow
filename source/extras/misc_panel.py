@@ -73,6 +73,21 @@ class SUB_PT_animation_tools(Panel):
                 op.limbs = 'BOTH'
                 op.set_enabled = True
                 op.enable_ik = False
+            from .smash_ik import has_ik_v2
+            if has_ik_v2(arm):
+                row = layout.row(align=True)
+                row.label(text="Snap")
+                op = row.operator("sub.anim_rig_snap_ik_fk", text="IK → FK", icon="SNAP_ON")
+                op.direction = 'IK_TO_FK'
+                op = row.operator("sub.anim_rig_snap_ik_fk", text="FK → IK", icon="SNAP_ON")
+                op.direction = 'FK_TO_IK'
+            else:
+                layout.operator("sub.anim_rig_upgrade_ik", text="Upgrade IK (pole-driven)", icon="CON_KINEMATIC")
+
+        if arm is not None:
+            row = layout.row(align=True)
+            row.operator_context = 'INVOKE_DEFAULT'
+            row.operator("sub.rotate_animation", text="Rotate Animation", icon="DRIVER_ROTATIONAL_DIFFERENCE")
 
         from .finger_sliders import has_finger_sliders, finger_sliders_are_enabled
         if arm is not None and has_finger_sliders(arm):
@@ -406,6 +421,17 @@ class SUB_PT_model_tools(Panel):
         row.operator("sub.smart_hair_seams", text="Smart Seams (Hair)", icon='MOD_UVPROJECT')
         row = layout.row(align=True)
         row.operator("sub.uv_align_upright", text="Align UVs Upright (Hair)", icon='SORT_DESC')
+        row = layout.row(align=True)
+        row.operator_context = 'INVOKE_DEFAULT'
+        row.operator("sub.smart_normals", text="Smart Normals", icon='NORMALS_VERTEX_FACE')
+        box = layout.box()
+        box.label(text="Hair Bake UVs (keeps cel UVs for the bake)", icon='TEXTURE')
+        row = box.row(align=True)
+        row.operator_context = 'INVOKE_DEFAULT'
+        row.operator("sub.hair_bake_uv", text="Make Bake UVs", icon='UV')
+        row = box.row(align=True)
+        row.operator("sub.hair_bake_uv_finalize", text="Use Bake UVs", icon='CHECKMARK')
+        row.operator("sub.hair_bake_uv_restore", text="Restore Cel UVs", icon='LOOP_BACK')
 
         row = layout.row(align=True)
         row.operator_context = 'INVOKE_DEFAULT'

@@ -1670,7 +1670,13 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
         # The master shader tints its own AO into COL, so an AO pass here too
         # would darken the same creases twice. Its "AO to PRM" switch decides.
         ao_to_prm, _ = scalar_from_instance(ch['hb_master'], path[:-1], "AO to PRM", 0.0)
-        if ao_to_prm >= 0.5:
+        _ao_map, ao_map_driven = scalar_from_instance(ch['hb_master'], path[:-1], "AO Map", 1.0)
+        if ao_to_prm >= 0.5 and ao_map_driven:
+            # The game's own AO texture (e.g. from the PSK importer) beats a ray-traced pass:
+            # authored, noise-free, and it already knows where the model occludes itself.
+            ch['ao'] = channel_from_instance(ch['hb_master'], path[:-1], "AO Map",
+                                             "master shader AO Map (AO to PRM on)")
+        elif ao_to_prm >= 0.5:
             ch['ao'] = Channel('PASS', origin="baked AO pass (master shader: AO to PRM on)")
         else:
             ch['ao'] = scalar_channel(
@@ -2430,7 +2436,12 @@ def _bake_all():
                     ao_ch = channels['ao']
                     img_ao = create_or_get_image(f"{mat_key}__ao", BAKE_SIZE)
                     set_colorspace(img_ao, "Non-Color")
-                    if ao_ch.mode == 'PASS':
+                    if ao_ch.mode == 'SOCKET':
+                        # A painted/game AO texture (master shader AO Map).
+                        img_ao = resolve_channel_image(
+                            scene, objects, members_for('ao'), f"{mat_key}__ao",
+                            BAKE_SIZE, "Non-Color", scratch, default_rgba=(1.0, 1.0, 1.0, 1.0))
+                    elif ao_ch.mode == 'PASS':
                         bake_pass(scene, objects, materials, 'AO', img_ao,
                                   "Non-Color", scratch, samples=AO_SAMPLES)
                         px = img_to_np(img_ao)
