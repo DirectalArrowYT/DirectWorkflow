@@ -150,3 +150,32 @@ Also fixed:
   had already removed. Disable and re-enable now work.
 - The updater panel said "CrusherD2 / animation-workflow". It now shows the repo and
   branch it actually checks.
+
+## Eye Converter (MHA) (Smash Model tab)
+MHA eyes are an eye (sclera) mesh plus an extruded iris disc that a bone slides around.
+Smash eyes are one flat surface: the eye white on `map1`, and the iris as a decal on
+`uvSet` that the game scrolls through `CustomVector31` on the `EyeL`/`EyeR` materials.
+Mario (c00) is the reference. Select the mesh with the eyes and run **Convert Eyes**. Per
+eye, it:
+
+- **Finds the iris:** an iris/pupil material, or else the loose part of the eye material
+  weighted to `L_eye` / `R_eye`.
+- **Renders the iris head-on** into a decal with a transparent surround, and writes
+  `uvSet` so the decal lands exactly where the iris was at neutral `CustomVector31`.
+- **Paints out the pupil.** MHA eye textures often have a pupil painted into the eye white,
+  which would otherwise stay put while the real iris scrolls away.
+- **Flattens the iris disc** onto the eye surface (MHA eye meshes have a gap under the iris)
+  and gives it eye-white UVs, so the eye is one flat mesh.
+- **Moves the eye-bone weights** to the bone above them (Head/face), and replaces the MHA
+  vertex colours with `colorSet1` at Mario's neutral 0.502.
+- **Makes the materials:** its own object per eye with `EyeL`/`EyeR` (Mario's shader and
+  settings) plus the `D`/`G`/`L` special-state variants, built the way the model importer
+  builds them.
+
+Textures are written to `//eye_textures` next to the .blend:
+- `eye_<name>_w_col`: the eye white.
+- `eye_<name>_bl_col` / `eye_<name>_br_col`: the left and right iris decals.
+
+**Scroll Scale: Match Vanilla** (the default) makes the eye span as much of `uvSet` as
+Mario's (0.29–0.84 on Aizawa, against Mario's 0.30–0.85). The same `CustomVector31` offset
+then moves the iris as far across the eye as on a vanilla fighter.

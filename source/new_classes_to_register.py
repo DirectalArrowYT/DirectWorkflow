@@ -144,6 +144,7 @@ classes = [
     source.extras.unstack_uvs.SUB_OP_unstack_uv_islands,
     source.extras.smart_hair_seams.SUB_OP_smart_hair_seams,
     source.extras.smart_normals.SUB_OP_smart_normals,
+    source.extras.eye_converter.SUB_OP_convert_mha_eyes,
     source.extras.smart_hair_seams.SUB_OP_hair_bake_uv,
     source.extras.smart_hair_seams.SUB_OP_hair_bake_uv_finalize,
     source.extras.smart_hair_seams.SUB_OP_hair_bake_uv_restore,
