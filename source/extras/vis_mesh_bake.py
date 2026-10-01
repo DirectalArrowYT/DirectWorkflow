@@ -38,6 +38,8 @@ from bpy.props import (
 )
 from bpy.types import Operator, Panel, PropertyGroup, UIList
 
+from ..anim.fcurve_compat import get_all_action_fcurves
+
 # `<fighter>_<VisName>_VIS_O_OBJShape` — how the importer names Smash's switchable face meshes.
 VIS_MESH_RE = re.compile(r"^(?P<fighter>.+?)_(?P<vis>.+)_VIS_O_OBJShape(?:\.\d+)?$")
 
@@ -244,7 +246,7 @@ def _keyed_bone_names(action) -> set[str]:
     names: set[str] = set()
     if action is None:
         return names
-    for fcurve in action.fcurves:
+    for fcurve in get_all_action_fcurves(action):
         match = re.match(r'pose\.bones\["([^"]+)"\]', fcurve.data_path)
         if match:
             names.add(match.group(1))
