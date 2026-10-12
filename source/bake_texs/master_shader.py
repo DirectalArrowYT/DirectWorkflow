@@ -1017,3 +1017,4 @@ class SUB_PT_hb_master_shader(Panel):
         row.operator('sub.hb_master_shader_convert', icon='MATERIAL')
         layout.operator_menu_enum('sub.hb_master_shader_preset', 'preset',
                                   text='Apply Preset to Active Material', icon='PRESET')
+        layout.operator('sub.hb_hair_strands_add', icon='STRANDS')

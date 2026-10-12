@@ -392,6 +392,7 @@ classes = [
     source.bake_texs.master_shader.SUB_OP_hb_master_shader_convert,
     source.bake_texs.master_shader.SUB_OP_hb_master_shader_preset,
     source.bake_texs.master_shader.SUB_PT_hb_master_shader,
+    source.bake_texs.hair_strands.SUB_OP_hb_hair_strands_add,
 ]
 
 # Classes registered by this list, as opposed to by their own module's register().

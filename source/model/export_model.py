@@ -1152,6 +1152,13 @@ def process_mesh(operator: Operator, context: Context, mesh_object_copy: Object,
     mesh_object_copy.shape_key_clear()
     
     # Apply Modifiers
+    # The eye rig's UV warp is a viewport preview of CustomVector31, the iris scroll the game
+    # applies itself. Applying it would bake whatever the eyes are doing on the current frame
+    # into uvSet - an animation that scrolls the iris away exports a model with no iris.
+    for modifier in list(mesh_object_copy.modifiers):
+        if modifier.type == 'UV_WARP' and modifier.name.startswith('SUB_EyeSolidWarp'):
+            mesh_object_copy.modifiers.remove(modifier)
+
     if apply_modifiers == 'APPLY':
         override = context.copy()
         override['object'] = mesh_object_copy
