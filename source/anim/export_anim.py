@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ...dependencies import ssbh_data_py
 from .import_anim import get_hierarchy_order
+from .locked_bones import lock_bones
 from .fcurve_compat import get_all_action_fcurves, get_fcurves, get_fcurves_for_assigned_slot
 from .raw_anim import (
     ensure_fighter_raw_anim_directory,
@@ -1021,6 +1022,19 @@ def get_smash_transform(m) -> Matrix:
         raise ValueError("Cannot compute Smash transform: input matrix is singular")
 
 
+def smash_rest_pose(arma):
+    """({bone: parent}, {bone: rest transform relative to its parent}) in Smash's space, the same
+    conversion the transform export uses with matrix_basis at identity."""
+    parents, rest = {}, {}
+    for bone in arma.data.bones:
+        parents[bone.name] = bone.parent.name if bone.parent else None
+        if bone.parent:
+            rest[bone.name] = get_smash_transform(bone.parent.matrix_local.inverted() @ bone.matrix_local)
+        else:
+            rest[bone.name] = get_smash_root_matrix(bone.matrix_local)
+    return parents, rest
+
+
 def get_smash_root_matrix(blender_pose_matrix) -> Matrix:
     """Inverse of anim import: bone.matrix = RotX(90) @ smash @ RotZ(-90)."""
     return _Y_UP_TO_Z_UP.inverted() @ blender_pose_matrix @ _X_MAJOR_TO_Y_MAJOR.inverted()
@@ -1481,6 +1495,18 @@ def _export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.typ
                         parent_info = f" (parent: {bone.parent.name})" if bone.parent else ""
                         operator.report(type={'ERROR'}, message=f"Failed to export {bone.name}{parent_info}: Matrix is not invertible at frame {frame_number}. This usually happens when a bone or its parent has zero scale on all axes. Please fix the animation data.")
                         return
+        # Rot and LegC must stay at rest (Smash turns and mirrors through them); a retarget bake
+        # can leave a source rig's root turn on them. Their rotation goes to their children, the
+        # pose is unchanged, and Throw keeps its own keys (locked_bones.py).
+        changed = lock_bones(
+            ssbh_anim_data,
+            *smash_rest_pose(arma),
+            ssbh_data_py.anim_data.Transform,
+            create_missing=False,
+        )
+        for locked, takers in changed.items():
+            operator.report({'WARNING'}, f"{locked} had rotation keyed; it was moved onto {', '.join(takers) or 'its children'} and {locked} left at rest")
+
         # Pre-Saving Optimizations
         transform_group_fix_floating_point_inaccuracies(trans_group)
         # Vanilla anims sort the nodes alphabetically. 
