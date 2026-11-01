@@ -75,6 +75,11 @@ print("== send")
 sets = tc.collect_sets()
 print("  sets:", [(s["name"], len(s["groups"])) for s in sets])
 check(len(sets) >= 2, "several texture sets")
+sent_names = {o.name for s in sets for o in s["objects"]}
+print("  meshes:", sorted(sent_names))
+if any(tc.is_open_blink(bpy.data.objects[n]) for n in sent_names):
+    check(not [n for n in sent_names if "blink" in n.lower()
+               and not tc.is_open_blink(bpy.data.objects[n])], "only Openblink of the blinks")
 check(sum(1 for s in sets if tc.slot_image(s["groups"][0][0], tc.SLOT_COL)
           and tc.slot_image(s["groups"][0][0], tc.SLOT_COL).name == col_name) == 1,
       "one set per shared texture")

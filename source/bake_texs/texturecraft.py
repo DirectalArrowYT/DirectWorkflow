@@ -12,6 +12,7 @@ paint work, so nothing here replaces it without being asked to.
 """
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -24,6 +25,8 @@ from bpy.types import Operator, Panel
 
 from . import core
 from .operators import _find_texture_slot, _load_or_refresh_image, apply_target_materials
+from ..model.material.create_matl_from_blender_materials import (
+    get_side_loaded_twin, resolve_material_data_source)
 
 PROJECT_FOLDER = "texturecraft"
 PROJECT_NAME = "project.tcraft"
@@ -179,9 +182,59 @@ def launch(port):
 # TEXTURE SETS
 # =============================================================================
 
+def data_slot(material, param):
+    """The texture slot export reads: the side-loaded twin's when that is where the data is."""
+    scene_props = getattr(bpy.context.scene, 'sub_scene_properties', None)
+    prefer_side_loaded = bool(scene_props and scene_props.export_prefer_sideloaded_materials)
+    slot = _find_texture_slot(resolve_material_data_source(material, prefer_side_loaded), param)
+    if slot is None:
+        twin = get_side_loaded_twin(material)
+        if twin is not None:
+            slot = _find_texture_slot(twin, param)
+    return slot
+
+
 def slot_image(material, param):
-    slot = _find_texture_slot(material, param)
+    slot = data_slot(material, param)
     return slot.image if slot is not None else None
+
+
+def is_open_blink(obj):
+    return re.search(r"open_?blink", obj.name, re.IGNORECASE) is not None
+
+
+def rest_face_only(groups):
+    """Keep Openblink, the rest face, out of a model's stack of expression meshes.
+
+    Every expression is a copy of the face on the same UVs, so sending them all paints the
+    same texels through a pile of overlapping heads.
+    """
+    sent = [o for group in groups.values() for o in group["objects"]]
+    rest = [o for o in sent if is_open_blink(o)]
+    if not rest and any("blink" in o.name.lower() for o in sent):
+        rest = [o for o in bpy.context.view_layer.objects
+                if o.type == 'MESH' and is_open_blink(o)]
+    if not rest:
+        return
+
+    def materials_of(obj):
+        return sorted(s.material.name for s in obj.material_slots if s.material)
+
+    def is_expression(obj):
+        if obj in rest:
+            return False
+        return "blink" in obj.name.lower() or any(
+            len(obj.data.vertices) == len(r.data.vertices) and materials_of(obj) == materials_of(r)
+            for r in rest)
+
+    for key, group in list(groups.items()):
+        names = {m.name for m in group["materials"]}
+        kept = [o for o in group["objects"] if not is_expression(o)]
+        if len(kept) != len(group["objects"]):
+            kept.extend(r for r in rest if r not in kept and names & set(materials_of(r)))
+        group["objects"] = kept
+        if not kept:
+            del groups[key]
 
 
 def collect_sets():
@@ -192,6 +245,7 @@ def collect_sets():
     sets would mean painting that one texture twice and the second export undoing the first.
     """
     groups, _ = core.collect_targets()
+    rest_face_only(groups)
     merged = {}
     for key, group in groups.items():
         base = group["materials"][0]
@@ -379,6 +433,14 @@ def seed_steps(index, seeds, resolution):
     return steps
 
 
+def project_sets():
+    done = subprocess.run([find_program("texturecraft-cli"), "info", project_path()],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        raise RuntimeError(f"TextureCraft could not read its project: {done.stderr[-400:]}")
+    return [s["name"] for s in json.loads(done.stdout)["textureSets"]]
+
+
 def build_project(sets, resolution):
     """A new project: the mesh, then each set seeded from the current textures."""
     folder = project_dir()
@@ -391,10 +453,17 @@ def build_project(sets, resolution):
     steps = [{"id": "file.new", "params": {
         "mesh": mesh_path, "resolution": 2048, "uvTiles": False,
         "name": os.path.splitext(os.path.basename(bpy.data.filepath))[0]}}]
-    for index, entry in enumerate(sets):
-        seeds, size = write_seeds(entry, seed_dir)
-        steps.extend(seed_steps(index, seeds, resolution or power_of_two(size or 2048)))
     run_batch({"steps": steps, "save": project_path()})
+
+    # The project lists its sets in the order the OBJ first uses them, not the order of `sets`.
+    order = project_sets()
+    sets[:] = [entry for entry in sets if entry["name"] in order]
+    steps = []
+    for entry in sets:
+        seeds, size = write_seeds(entry, seed_dir)
+        steps.extend(seed_steps(order.index(entry["name"]), seeds,
+                                resolution or power_of_two(size or 2048)))
+    run_batch({"open": project_path(), "steps": steps, "save": project_path()})
 
 
 def update_project_mesh(sets, control):
@@ -486,7 +555,7 @@ def pack_set(entry, folder, out_dir):
     write("_nor", nor)
 
     emi = read_png(f"{source}_emi.png")
-    if _find_texture_slot(base, SLOT_EMI) is not None:
+    if data_slot(base, SLOT_EMI) is not None:
         write("_emi", merged_map(emi, covered, read_image(slot_image(base, SLOT_EMI)),
                                  core.EMI_DEFAULT))
     elif emi[..., :3].max() > 0.0:
@@ -598,12 +667,28 @@ def show_on_shader(material, images, notes):
     place("Normal", "_nor", -600, normal_wire)
 
 
+def free_image_name(name, path):
+    """Clear the way for a map: a packed image won't reload from disk, and may be the only copy.
+
+    The game texture of that name is kept as `<name>_original`.
+    """
+    image = bpy.data.images.get(name)
+    if image is None or image.packed_file is None:
+        return
+    if same_file(bpy.path.abspath(image.filepath), path):
+        image.unpack(method='REMOVE')
+    else:
+        image.name = name + "_original"
+        image.use_fake_user = True
+
+
 def apply_set(entry, paths, notes):
     """Assign a set's maps to every material the textures belong to. Returns how many landed."""
     images = {}
     for suffix, colorspace in (("_col", "sRGB"), ("_nor", "Non-Color"),
                                ("_prm", "Non-Color"), ("_emi", "sRGB")):
         if suffix in paths:
+            free_image_name(f"{entry['stem']}{suffix}", paths[suffix])
             image = _load_or_refresh_image(paths[suffix], f"{entry['stem']}{suffix}", colorspace)
             if colorspace == "Non-Color":
                 image.alpha_mode = 'CHANNEL_PACKED'
@@ -619,6 +704,8 @@ def apply_set(entry, paths, notes):
                     continue
                 slot.image = images[suffix]
                 applied += 1
+            show_on_shader(material, images, notes)
+        for material in materials[1:]:
             show_on_shader(material, images, notes)
     return applied
 
