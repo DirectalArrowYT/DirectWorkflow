@@ -118,6 +118,31 @@ def _load_or_refresh_image(filepath, name, colorspace):
     return img
 
 
+def apply_target_materials(base_material, target):
+    """Which materials this run should write the baked textures onto.
+
+    A side-loaded twin is never assigned to a mesh, so it never turns up in
+    the bake's own target list - which is why baking and applying could
+    leave the twin pointing at stale textures while export, reading from
+    the twin, quietly ignored everything that was just baked.
+    """
+    from ..model.material.create_matl_from_blender_materials import get_side_loaded_twin
+    from ..material_grouping import SIDE_LOAD_SUFFIX
+
+    # Already a twin: write to it and stop, rather than hunting for a twin
+    # of a twin.
+    if base_material.name.endswith(SIDE_LOAD_SUFFIX):
+        return [base_material]
+
+    twin = get_side_loaded_twin(base_material)
+
+    if target == 'LIVE':
+        return [base_material]
+    if target == 'SIDE_LOADED':
+        return [twin] if twin is not None else []
+    return [base_material] + ([twin] if twin is not None else [])
+
+
 class SUB_OP_bake_texs_apply_to_materials(Operator):
     """Point each baked group's base material at its freshly baked textures"""
     bl_idname = 'sub.bake_texs_apply_to_materials'
@@ -248,28 +273,7 @@ class SUB_OP_bake_texs_apply_to_materials(Operator):
         return {'FINISHED'}
 
     def _target_materials(self, base_material):
-        """Which materials this run should write the baked textures onto.
-
-        A side-loaded twin is never assigned to a mesh, so it never turns up in
-        the bake's own target list - which is why baking and applying could
-        leave the twin pointing at stale textures while export, reading from
-        the twin, quietly ignored everything that was just baked.
-        """
-        from ..model.material.create_matl_from_blender_materials import get_side_loaded_twin
-        from ..material_grouping import SIDE_LOAD_SUFFIX
-
-        # Already a twin: write to it and stop, rather than hunting for a twin
-        # of a twin.
-        if base_material.name.endswith(SIDE_LOAD_SUFFIX):
-            return [base_material]
-
-        twin = get_side_loaded_twin(base_material)
-
-        if self.target == 'LIVE':
-            return [base_material]
-        if self.target == 'SIDE_LOADED':
-            return [twin] if twin is not None else []
-        return [base_material] + ([twin] if twin is not None else [])
+        return apply_target_materials(base_material, self.target)
 
 
 class SUB_OP_bake_texs_pick_output(Operator):

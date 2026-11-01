@@ -47,6 +47,7 @@ LAYOUT = {
         "SUB_PT_model_eyes",
         "SUB_PT_model_bones",
         "SUB_PT_bake_texs",
+        "SUB_PT_texturecraft",
         "SUB_PT_vis_mesh_bake",
         "SUB_PT_attribute_renamer",
         "SUB_PT_rig_combiner",

@@ -30,6 +30,23 @@ class SUB_PG_bake_texs_settings(PropertyGroup):
         description="Report what would be baked, and from where, without baking. Fast, bakes nothing",
     )
 
+    tc_resolution: EnumProperty(
+        name='Resolution',
+        description='Texture size for a new TextureCraft project',
+        items=(
+            ('0', 'Match Textures', 'Each texture set takes the size of the texture it starts from'),
+            ('1024', '1024', ''),
+            ('2048', '2048', ''),
+            ('4096', '4096', ''),
+        ),
+        default='0',
+    )
+    tc_port: IntProperty(
+        name='Control Port',
+        description='Local port Blender and TextureCraft talk over',
+        default=47878, min=1024, max=65535,
+    )
+
     bake_size: EnumProperty(
         name='Bake Size',
         items=(
