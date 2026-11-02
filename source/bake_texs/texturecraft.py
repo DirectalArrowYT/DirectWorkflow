@@ -9,6 +9,18 @@ so Export Model and Compile Existing Bakes pick them up like any bake.
 
 Everything lives next to the .blend, in //texturecraft. The project there holds the user's
 paint work, so nothing here replaces it without being asked to.
+
+TextureCraft has no channels of its own for the rest of what Smash and the HB Master Shader read,
+so these stand in for them. They are the ones that leave its PBR viewport alone: a roughness or
+tint does nothing while its lobe has no weight, and Specular is only read by spec/gloss projects.
+
+    Scattering weight   SSS Mask / PRM.r, on skin shaders in place of Metallic
+    Specular            Cavity / NOR.a
+    Sheen color         Transition Blend / NOR.b
+    Sheen roughness     Rim Mask            (the rest are viewport only, in <stem>_toon.png)
+    Coat roughness      Highlight Mask
+    Anisotropy level    Hair Ring
+    Anisotropy angle    Shadow Mask
 """
 import json
 import os
@@ -23,7 +35,7 @@ import numpy as np
 from bpy.props import EnumProperty
 from bpy.types import Operator, Panel
 
-from . import core
+from . import core, master_shader
 from .operators import _find_texture_slot, _load_or_refresh_image, apply_target_materials
 from ..model.material.create_matl_from_blender_materials import (
     get_side_loaded_twin, resolve_material_data_source)
@@ -38,6 +50,14 @@ BASE_LAYER = "Smash Base"
 
 SLOT_COL, SLOT_NOR, SLOT_EMI, SLOT_PRM = 'Texture0', 'Texture4', 'Texture5', 'Texture6'
 EXTRA_CHANNELS = ('ambientOcclusion', 'specularLevel', 'opacity', 'emissive')
+MASK_LAYER = "Smash Masks"
+SSS_CHANNEL, CAVITY_CHANNEL, TRANSITION_CHANNEL = 'scatterWeight', 'specular', 'sheenColor'
+# (channel, HB socket, component of <stem>_toon.png)
+TOON_MASKS = (('sheenRoughness', "Rim Mask", 0), ('coatRoughness', "Highlight Mask", 1),
+              ('anisotropyLevel', "Hair Ring", 2), ('anisotropyAngle', "Shadow Mask", 3))
+MASK_CHANNELS = (SSS_CHANNEL, CAVITY_CHANNEL, TRANSITION_CHANNEL) + tuple(t[0] for t in TOON_MASKS)
+# The textures nothing has painted yet: a flat value this close to a socket leaves it unwired.
+FLAT_TOLERANCE = 1.5 / 255
 
 
 def _ch(channel, component=0):
@@ -68,6 +88,14 @@ SMASH_PRESET = {
         _map("emi", [["R", _ch("Emissive", 0)], ["G", _ch("Emissive", 1)],
                      ["B", _ch("Emissive", 2)]]),
         _map("cov", [["R", {"Constant": 1.0}], ["G", {"Constant": 1.0}], ["B", _ch("Metallic")]]),
+        # Projects from before these channels have none of them, so these maps are just absent.
+        # One color channel makes a map sRGB-encoded as a whole, so the SSS mask can't share `gam`.
+        _map("sss", [["R", _ch("ScatterWeight")], ["G", _ch("ScatterWeight")],
+                     ["B", _ch("ScatterWeight")]]),
+        _map("gam", [["R", _ch("Specular", 0)], ["G", _ch("Specular", 0)],
+                     ["B", _ch("SheenColor", 0)]]),
+        _map("toon", [["R", _ch("SheenRoughness")], ["G", _ch("CoatRoughness")],
+                      ["B", _ch("AnisotropyLevel")], ["A", _ch("AnisotropyAngle")]]),
     ],
 }
 
@@ -197,6 +225,12 @@ def data_slot(material, param):
 def slot_image(material, param):
     slot = data_slot(material, param)
     return slot.image if slot is not None else None
+
+
+def is_skin(entry):
+    """Whether PRM.r of this texture is the SSS mask rather than metalness."""
+    return any(core.MatlContext(m).is_subsurface for materials in entry["groups"]
+               for m in materials)
 
 
 def is_open_blink(obj):
@@ -370,10 +404,14 @@ def gray(values):
 
 
 def write_seeds(entry, folder):
-    """Split a set's textures into one PNG per channel. Returns {channel: path}, and the size."""
+    """Split a set's textures into one PNG per channel.
+
+    Returns {channel: path}, the flat {channel: value} of what has no texture, and the size.
+    """
     base = entry["groups"][0][0]
     prefix = os.path.join(folder, entry["name"])
     seeds = {}
+    flat = {}
 
     def seed(channel, px):
         path = f"{prefix}_{channel}.png"
@@ -390,6 +428,9 @@ def write_seeds(entry, folder):
         for channel, index in (("metallic", 0), ("roughness", 1),
                                ("ambientOcclusion", 2), ("specularLevel", 3)):
             seed(channel, gray(prm[..., index]))
+        if is_skin(entry):
+            seeds[SSS_CHANNEL] = seeds.pop("metallic")
+            flat["metallic"] = 0.0
 
     nor = read_image(slot_image(base, SLOT_NOR))
     if nor is not None:
@@ -398,30 +439,36 @@ def write_seeds(entry, folder):
         z = np.sqrt(np.clip(1.0 - x * x - y * y, 0.0, 1.0))
         seed("normal", np.dstack([nor[..., 0], nor[..., 1], z * 0.5 + 0.5,
                                   np.ones_like(z)]))
+        seed(CAVITY_CHANNEL, gray(nor[..., 3]))
+        seed(TRANSITION_CHANNEL, gray(nor[..., 2]))
 
     emi = read_image(slot_image(base, SLOT_EMI))
     if emi is not None:
         seed("emissive", np.dstack([emi[..., :3], np.ones(emi.shape[:2], np.float32)]))
 
+    shader = main_shader(base)
+    toon = _named_image(base, "TC_toon")
+    for channel, input_name, component in TOON_MASKS:
+        sock = shader.inputs.get(input_name) if shader else None
+        if toon is not None and sock is not None and sock.is_linked:
+            seed(channel, gray(toon[..., component]))
+        elif sock is not None:
+            flat[channel] = float(sock.default_value)
+        else:
+            flat[channel] = 0.0 if input_name == "Hair Ring" else 1.0
+
     sizes = [max(px.shape[:2]) for px in (col, prm, nor) if px is not None]
-    return seeds, max(sizes) if sizes else 0
+    return seeds, flat, max(sizes) if sizes else 0
 
 
 def power_of_two(size):
     return int(np.clip(2 ** round(np.log2(max(size, 1))), 128, 8192))
 
 
-def seed_steps(index, seeds, resolution):
-    """The steps that give texture set `index` its channels and its Smash Base layer."""
-    steps = [{"id": "textureSet.select", "params": {"ts": index}},
-             {"id": "textureSet.resolution", "params": {"ts": index, "resolution": resolution}}]
-    for channel in EXTRA_CHANNELS:
-        steps.append({"id": "textureSet.channel.add", "params": {"ts": index, "channel": channel}})
-    steps.append({"id": "layer.add.fill", "params": {"name": BASE_LAYER}})
-
-    metal, rough, ao, spec = core.PRM_DEFAULT
-    uniform = {"metallic": metal, "roughness": rough, "ambientOcclusion": ao,
-               "specularLevel": spec, "opacity": 1.0, "emissive": [0.0, 0.0, 0.0]}
+def seed_layer(name, channels, seeds, uniform):
+    """Add a channel's worth of fill layer: the seeds where there are some, else the values."""
+    steps = [{"id": "textureSet.channel.add", "params": {"channel": c}} for c in channels]
+    steps.append({"id": "layer.add.fill", "params": {"name": name}})
     for channel, path in seeds.items():
         steps.append({"id": "resource.import", "params": {"path": path}})
         steps.append({"id": "layer.fill.set",
@@ -429,16 +476,68 @@ def seed_steps(index, seeds, resolution):
     for channel, value in uniform.items():
         if channel not in seeds:
             steps.append({"id": "layer.fill.set", "params": {"channel": channel, "value": value}})
+    return steps
+
+
+def mask_values(flat):
+    white = [1.0, 1.0, 1.0]
+    values = {SSS_CHANNEL: 0.0, CAVITY_CHANNEL: white, TRANSITION_CHANNEL: white}
+    values.update({c: v for c, v in flat.items() if c in MASK_CHANNELS})
+    return values
+
+
+def seed_steps(index, seeds, flat, resolution):
+    """The steps that give texture set `index` its channels and its Smash Base layer."""
+    steps = [{"id": "textureSet.select", "params": {"ts": index}},
+             {"id": "textureSet.resolution", "params": {"ts": index, "resolution": resolution}}]
+    metal, rough, ao, spec = core.PRM_DEFAULT
+    uniform = {"metallic": flat.get("metallic", metal), "roughness": rough,
+               "ambientOcclusion": ao, "specularLevel": spec, "opacity": 1.0,
+               "emissive": [0.0, 0.0, 0.0]}
+    uniform.update(mask_values(flat))
+    steps += seed_layer(BASE_LAYER, EXTRA_CHANNELS + MASK_CHANNELS, seeds, uniform)
     steps.append({"id": "layer.move", "params": {"delta": -1}})
     return steps
 
 
-def project_sets():
+def add_mask_channels(sets, control):
+    """Give a project sent before the mask channels existed a bottom layer holding them."""
+    info = project_info()
+    order = [s["name"] for s in info["textureSets"]]
+    seed_dir = os.path.join(project_dir(), "seed")
+    os.makedirs(seed_dir, exist_ok=True)
+    steps = []
+    for entry in sets:
+        if entry["name"] not in order:
+            continue
+        record = info["textureSets"][order.index(entry["name"])]
+        if SSS_CHANNEL in str(record.get("channels")):
+            continue
+        seeds, flat, _ = write_seeds(entry, seed_dir)
+        seeds = {c: p for c, p in seeds.items() if c in MASK_CHANNELS}
+        steps.append({"id": "textureSet.select", "params": {"ts": order.index(entry["name"])}})
+        steps += seed_layer(MASK_LAYER, MASK_CHANNELS, seeds, mask_values(flat))
+        steps.append({"id": "layer.move", "params": {"index": 0}})
+    if not steps:
+        return
+    if control is not None:
+        for step in steps:
+            control.run(step["id"], step["params"])
+        control.run("file.save")
+    else:
+        run_batch({"open": project_path(), "steps": steps, "save": project_path()})
+
+
+def project_info():
     done = subprocess.run([find_program("texturecraft-cli"), "info", project_path()],
                           capture_output=True, text=True)
     if done.returncode != 0:
         raise RuntimeError(f"TextureCraft could not read its project: {done.stderr[-400:]}")
-    return [s["name"] for s in json.loads(done.stdout)["textureSets"]]
+    return json.loads(done.stdout)
+
+
+def project_sets():
+    return [s["name"] for s in project_info()["textureSets"]]
 
 
 def build_project(sets, resolution):
@@ -460,8 +559,8 @@ def build_project(sets, resolution):
     sets[:] = [entry for entry in sets if entry["name"] in order]
     steps = []
     for entry in sets:
-        seeds, size = write_seeds(entry, seed_dir)
-        steps.extend(seed_steps(order.index(entry["name"]), seeds,
+        seeds, flat, size = write_seeds(entry, seed_dir)
+        steps.extend(seed_steps(order.index(entry["name"]), seeds, flat,
                                 resolution or power_of_two(size or 2048)))
     run_batch({"open": project_path(), "steps": steps, "save": project_path()})
 
@@ -478,6 +577,7 @@ def update_project_mesh(sets, control):
         run_batch({"open": project_path(),
                    "steps": [{"id": "file.reimportMesh", "params": step}],
                    "save": project_path()})
+    add_mask_channels(sets, control)
 
 
 def export_textures(port, report):
@@ -524,6 +624,14 @@ def merged_map(tc, covered, current, default):
     return np.where(covered[..., None], tc, below)
 
 
+def flat_value(values, covered):
+    """The one value a channel has across the mesh, or None once it has been painted."""
+    values = values[covered]
+    if not values.size or values.max() - values.min() > FLAT_TOLERANCE:
+        return None
+    return float(values.mean())
+
+
 def pack_set(entry, folder, out_dir):
     """Write this set's Smash maps to out_dir. Returns {suffix: path}, and any notes."""
     base = entry["groups"][0][0]
@@ -539,20 +647,39 @@ def pack_set(entry, folder, out_dir):
         write_png(path, px)
         out[suffix] = path
 
+    game = read_png(f"{source}_gam.png") if os.path.isfile(f"{source}_gam.png") else None
     write("_col", merged_map(read_png(f"{source}_col.png"), covered,
                              read_image(slot_image(base, SLOT_COL)), core.COL_DEFAULT))
-    write("_prm", merged_map(read_png(f"{source}_prm.png"), covered,
-                             read_image(slot_image(base, SLOT_PRM)), core.PRM_DEFAULT))
+    prm = read_png(f"{source}_prm.png")
+    if os.path.isfile(f"{source}_sss.png") and is_skin(entry):
+        prm[..., 0] = read_png(f"{source}_sss.png")[..., 0]
+    write("_prm", merged_map(prm, covered, read_image(slot_image(base, SLOT_PRM)),
+                             core.PRM_DEFAULT))
 
     current_nor = read_image(slot_image(base, SLOT_NOR))
-    nor = merged_map(read_png(f"{source}_nor.png"), covered, current_nor, core.NOR_DEFAULT)
-    # Only RG is a normal. The texture's B and A aren't anything TextureCraft has.
-    if current_nor is not None:
-        nor[..., 2:] = resized(current_nor, width, height)[..., 2:]
+    tc_nor = read_png(f"{source}_nor.png")
+    below_nor = (resized(current_nor, width, height) if current_nor is not None
+                 else np.full((height, width, 4), (0.0, 0.0, core.NOR_BLUE_CONST,
+                                                   core.NOR_ALPHA_CONST), np.float32))
+    # Only RG is a normal. B and A are the transition blend and cavity channels.
+    if game is not None:
+        tc_nor[..., 2] = game[..., 2]
+        tc_nor[..., 3] = game[..., 1]
     else:
-        nor[..., 2] = core.NOR_BLUE_CONST
-        nor[..., 3] = core.NOR_ALPHA_CONST
+        tc_nor[..., 2:] = below_nor[..., 2:]
+    nor = merged_map(tc_nor, covered, current_nor, core.NOR_DEFAULT)
     write("_nor", nor)
+    entry["flat"] = {"Cavity": flat_value(nor[..., 3], covered),
+                     "Transition Blend": flat_value(nor[..., 2], covered),
+                     "PRM AO": flat_value(prm[..., 2], covered)}
+    if is_skin(entry):
+        entry["flat"]["SSS Mask"] = flat_value(prm[..., 0], covered)
+
+    if os.path.isfile(f"{source}_toon.png"):
+        toon = read_png(f"{source}_toon.png")
+        write("_toon", toon)
+        for _, input_name, component in TOON_MASKS:
+            entry["flat"][input_name] = flat_value(toon[..., component], covered)
 
     emi = read_png(f"{source}_emi.png")
     if data_slot(base, SLOT_EMI) is not None:
@@ -603,6 +730,11 @@ def shader_image(material, input_name):
     return nodes[0].image if len(nodes) == 1 else None
 
 
+def _named_image(material, name):
+    node = material.node_tree.nodes.get(name) if material.use_nodes else None
+    return read_image(node.image) if node is not None else None
+
+
 def _named_node(tree, idname, name, location):
     node = tree.nodes.get(name)
     if node is None:
@@ -612,13 +744,16 @@ def _named_node(tree, idname, name, location):
     return node
 
 
-def show_on_shader(material, images, notes):
+def show_on_shader(material, images, notes, flat=None):
     """Put the maps on the shader too, for materials rendering through HB Master or Principled.
 
     The Smash slots are what export reads; the shader is what the viewport shows and what the
     next bake reads, so a material whose shader kept the old images would look unchanged and
-    bake the paint away. Images already wired in are swapped, unwired inputs get wired.
+    bake the paint away. Images already wired in are swapped, unwired inputs get wired. A mask
+    only gets wired once it differs from the socket's own value (`flat`), so an unpainted one
+    keeps its slider.
     """
+    flat = flat or {}
     shader = main_shader(material)
     if shader is None:
         return
@@ -639,6 +774,9 @@ def show_on_shader(material, images, notes):
         if sock is None or suffix not in images:
             return
         wired = upstream_image_nodes(sock)
+        if not sock.is_linked and flat.get(input_name) is not None:
+            if abs(sock.default_value - flat[input_name]) <= FLAT_TOLERANCE:
+                return
         if len(wired) == 1:
             wired[0].image = images[suffix]
         elif sock.is_linked:
@@ -647,10 +785,11 @@ def show_on_shader(material, images, notes):
         else:
             wire(image_node(suffix, offset), sock)
 
-    def separate():
-        node = _named_node(tree, 'ShaderNodeSeparateColor', "TC_prm_split", (x + 300, y - 300))
+    def separate(suffix="_prm", offset=-300):
+        node = _named_node(tree, 'ShaderNodeSeparateColor', f"TC{suffix}_split",
+                           (x + 300, y + offset))
         if not node.inputs[0].is_linked:
-            tree.links.new(image_node("_prm", -300).outputs["Color"], node.inputs[0])
+            tree.links.new(image_node(suffix, offset).outputs["Color"], node.inputs[0])
         return node
 
     def normal_wire(node, sock):
@@ -660,11 +799,32 @@ def show_on_shader(material, images, notes):
         tree.links.new(normal_map.outputs["Normal"], sock)
 
     place("Base Color", "_col", 0, lambda n, s: tree.links.new(n.outputs["Color"], s))
-    for input_name, channel in (("Metalness", "Red"), ("Metallic", "Red"), ("Roughness", "Green")):
-        place(input_name, "_prm", -300,
-              lambda n, s, c=channel: tree.links.new(separate().outputs[c], s))
+    skin = core.MatlContext(material).is_subsurface
+    metal = shader.inputs.get("Metalness")
+    if skin and metal is not None and shader.inputs.get("SSS Mask") is not None:
+        # A skin shader reads PRM.r as the SSS mask. As Metalness it would turn the skin to chrome.
+        for link in list(metal.links):
+            if link.from_node.name == "TC_prm_split":
+                tree.links.remove(link)
+        place("SSS Mask", "_prm", -300,
+              lambda n, s: tree.links.new(separate().outputs["Red"], s))
+    else:
+        place("Metalness", "_prm", -300,
+              lambda n, s: tree.links.new(separate().outputs["Red"], s))
+    place("Metallic", "_prm", -300, lambda n, s: tree.links.new(separate().outputs["Red"], s))
+    place("Roughness", "_prm", -300, lambda n, s: tree.links.new(separate().outputs["Green"], s))
+    place("PRM AO", "_prm", -300, lambda n, s: tree.links.new(separate().outputs["Blue"], s))
     place("Specular", "_prm", -300, lambda n, s: tree.links.new(n.outputs["Alpha"], s))
     place("Normal", "_nor", -600, normal_wire)
+    place("Transition Blend", "_nor", -600,
+          lambda n, s: tree.links.new(separate("_nor", -600).outputs["Blue"], s))
+    place("Cavity", "_nor", -600, lambda n, s: tree.links.new(n.outputs["Alpha"], s))
+    for _, input_name, component in TOON_MASKS:
+        if component == 3:
+            place(input_name, "_toon", -900, lambda n, s: tree.links.new(n.outputs["Alpha"], s))
+        else:
+            place(input_name, "_toon", -900, lambda n, s, c=("Red", "Green", "Blue")[component]:
+                  tree.links.new(separate("_toon", -900).outputs[c], s))
 
 
 def free_image_name(name, path):
@@ -686,7 +846,7 @@ def apply_set(entry, paths, notes):
     """Assign a set's maps to every material the textures belong to. Returns how many landed."""
     images = {}
     for suffix, colorspace in (("_col", "sRGB"), ("_nor", "Non-Color"),
-                               ("_prm", "Non-Color"), ("_emi", "sRGB")):
+                               ("_prm", "Non-Color"), ("_emi", "sRGB"), ("_toon", "Non-Color")):
         if suffix in paths:
             free_image_name(f"{entry['stem']}{suffix}", paths[suffix])
             image = _load_or_refresh_image(paths[suffix], f"{entry['stem']}{suffix}", colorspace)
@@ -704,9 +864,9 @@ def apply_set(entry, paths, notes):
                     continue
                 slot.image = images[suffix]
                 applied += 1
-            show_on_shader(material, images, notes)
+            show_on_shader(material, images, notes, entry.get("flat"))
         for material in materials[1:]:
-            show_on_shader(material, images, notes)
+            show_on_shader(material, images, notes, entry.get("flat"))
     return applied
 
 
@@ -829,6 +989,10 @@ class SUB_OP_texturecraft_get(Operator):
             sets, missing = sets_from_manifest()
             if not sets:
                 raise RuntimeError("None of the sent materials are in this .blend")
+            if master_shader.MASTER_NAME in bpy.data.node_groups:
+                group = bpy.data.node_groups[master_shader.MASTER_NAME]
+                if group.get(master_shader.VERSION_KEY, 0) < master_shader.MASTER_VERSION:
+                    master_shader.build_master_group()
             folder = export_textures(props.tc_port, self.report)
             core.ensure_dir(core.BAKE_DIR)
             applied = 0

@@ -139,9 +139,13 @@ for label, a, b in (("COL", before[tc.SLOT_COL], col2), ("PRM", before[tc.SLOT_P
           f"worst {d.max() * 255:.0f}/255")
     check((d > 1.5 / 255).mean() < 0.001, f"{label} is exact on the islands")
 if before[tc.SLOT_NOR] is not None:
-    d = np.abs(tc.resized(before[tc.SLOT_NOR], *covered.shape[::-1])[..., 2:]
-               - nor2[..., 2:]).max()
-    check(d < 1.5 / 255, "NOR blue and alpha untouched")
+    # A NOR smaller than its set gets resampled by both sides, each their own way.
+    print("  NOR size", before[tc.SLOT_NOR].shape[:2], "set size", covered.shape)
+    for i, label in ((2, "b"), (3, "a")):
+        one = np.abs(tc.resized(before[tc.SLOT_NOR], *covered.shape[::-1])[..., i] - nor2[..., i])
+        off = (one[interior] > 8 / 255).mean()
+        print(f"  NOR.{label}: worst {one[interior].max() * 255:.0f}/255, {off:.3%} off")
+        check(off < 0.03, f"NOR.{label} survived the round trip")
     d = close(before[tc.SLOT_NOR][..., :2].repeat(2, axis=2),
               nor2[..., :2].repeat(2, axis=2), covered)
     print(f"  NOR rg: {(d > 4 / 255).mean():.3%} of covered texels moved")
@@ -151,6 +155,13 @@ print("== paint, then get with the app closed")
 steps = [{"id": "textureSet.select", "params": {"ts": project_sets.index(entry["name"])}},
          {"id": "layer.add.fill", "params": {"name": "paint", "color": [1.0, 0.0, 0.0],
                                              "roughness": 0.25, "metallic": 1.0}}]
+skin = tc.is_skin(entry)
+print("  skin shader:", skin)
+for channel, value in ((tc.SSS_CHANNEL, 1.0), (tc.CAVITY_CHANNEL, [0.0, 0.0, 0.0]),
+                       (tc.TRANSITION_CHANNEL, [1.0, 1.0, 1.0]), ("sheenRoughness", 0.5),
+                       ("coatRoughness", 0.25), ("anisotropyLevel", 1.0),
+                       ("anisotropyAngle", 0.0)):
+    steps.append({"id": "layer.fill.set", "params": {"channel": channel, "value": value}})
 tc.run_batch({"open": tc.project_path(), "steps": steps, "save": tc.project_path()})
 check(bpy.ops.sub.texturecraft_get('EXEC_DEFAULT') == {'FINISHED'}, "get ran")
 col3, prm3 = after(tc.SLOT_COL), after(tc.SLOT_PRM)
@@ -161,6 +172,14 @@ check(abs(np.median(prm3[covered][:, 1]) - 0.25) < 0.01
 outside = ~covered
 d = np.abs(col3[outside] - tc.resized(col2, *covered.shape[::-1])[outside]).max()
 check(d < 1.5 / 255, "texels the mesh doesn't reach kept their old pixels exactly")
+nor3 = after(tc.SLOT_NOR)
+check(nor3[covered][:, 3].max() < 0.02, "cavity paint reached NOR.a")
+check(nor3[covered][:, 2].min() > 0.98, "transition paint reached NOR.b")
+toon = tc.read_png(os.path.join(core.BAKE_DIR, entry["stem"] + "_toon.png"))
+m = np.median(toon[covered], axis=0)
+print("  toon map median:", m)
+check(abs(m[0] - 0.5) < 0.01 and abs(m[1] - 0.25) < 0.01 and m[2] > 0.98 and m[3] < 0.02,
+      "the toon masks came back in their channels, alpha included")
 
 print("== shader wiring")
 mat = bpy.data.materials.new("plain")
@@ -180,12 +199,56 @@ tc.show_on_shader(mat, {"_col": image, "_prm": tc.slot_image(base, tc.SLOT_PRM),
                         "_nor": tc.slot_image(base, tc.SLOT_NOR)}, notes)
 check(len(mat.node_tree.nodes) == twice, "running it again adds nothing")
 
+print("== hb master shader")
+ms = importlib.import_module(NAME + ".source.bake_texs.master_shader")
+ms.build_master_group()
+hb_mat = bpy.data.materials.new("hb")
+hb_mat.use_nodes = True
+nt = hb_mat.node_tree
+nt.nodes.clear()
+hb = nt.nodes.new("ShaderNodeGroup")
+hb.node_tree = bpy.data.node_groups[ms.MASTER_NAME]
+out = nt.nodes.new("ShaderNodeOutputMaterial")
+nt.links.new(hb.outputs[0], out.inputs["Surface"])
+images = {"_col": image, "_prm": tc.slot_image(base, tc.SLOT_PRM),
+          "_nor": tc.slot_image(base, tc.SLOT_NOR)}
+toon_image = bpy.data.images.load(os.path.join(core.BAKE_DIR, entry["stem"] + "_toon.png"))
+images["_toon"] = toon_image
+tc.show_on_shader(hb_mat, images, notes, {"Cavity": 1.0, "Rim Mask": None, "Hair Ring": 0.0})
+check(not hb.inputs["Cavity"].is_linked, "an unpainted mask keeps its slider")
+check(not hb.inputs["Hair Ring"].is_linked, "Hair Ring at its own value stays a slider")
+check(hb.inputs["Rim Mask"].links[0].from_socket.name == "Red", "Rim Mask is toon red")
+check(hb.inputs["Shadow Mask"].links[0].from_socket.name == "Alpha", "Shadow Mask is toon alpha")
+check(hb.inputs["Transition Blend"].links[0].from_socket.name == "Blue", "Transition is NOR.b")
+check(hb.inputs["PRM AO"].links[0].from_socket.name == "Blue", "PRM AO is PRM.b")
+
 print("== update mesh keeps the paint")
 op = bpy.ops.sub.texturecraft_send('EXEC_DEFAULT', mode='UPDATE')
 check(op == {'FINISHED'}, "update ran")
 check(bpy.ops.sub.texturecraft_get('EXEC_DEFAULT') == {'FINISHED'}, "get ran")
 col4 = after(tc.SLOT_COL)
 check(col4[covered][:, 0].min() > 0.98, "paint survived Update Mesh")
+
+print("== a project from before the mask channels")
+steps = []
+for index in range(len(project_sets)):
+    steps.append({"id": "textureSet.select", "params": {"ts": index}})
+    steps += [{"id": "textureSet.channel.remove", "params": {"channel": c}}
+              for c in tc.MASK_CHANNELS]
+tc.run_batch({"open": tc.project_path(), "steps": steps, "save": tc.project_path()})
+check(bpy.ops.sub.texturecraft_get('EXEC_DEFAULT') == {'FINISHED'}, "get ran without them")
+check(not os.path.isfile(os.path.join(tc.project_dir(), "export", entry["name"] + "_gam.png")),
+      "no gam map without the channels")
+check(np.abs(after(tc.SLOT_NOR)[..., 3][covered] - nor3[..., 3][covered]).max() < 2 / 255,
+      "NOR.a kept the texture's cavity")
+op = bpy.ops.sub.texturecraft_send('EXEC_DEFAULT', mode='UPDATE')
+check(op == {'FINISHED'}, "update added them")
+check(bpy.ops.sub.texturecraft_get('EXEC_DEFAULT') == {'FINISHED'}, "get ran")
+check(os.path.isfile(os.path.join(tc.project_dir(), "export", entry["name"] + "_gam.png")),
+      "the masks export again")
+nor5 = after(tc.SLOT_NOR)
+check(np.abs(nor5[..., 3][interior] - nor3[..., 3][interior]).max() < 2 / 255,
+      "the new layer was seeded from the texture")
 
 print("== start over keeps a backup")
 op = bpy.ops.sub.texturecraft_send('EXEC_DEFAULT', mode='NEW')

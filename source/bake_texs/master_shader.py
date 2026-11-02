@@ -37,7 +37,7 @@ from bpy.props import BoolProperty, EnumProperty
 from mathutils import Vector
 
 MASTER_NAME = "HB Master Shader"
-MASTER_VERSION = 2
+MASTER_VERSION = 3
 VERSION_KEY = "hb_master_version"
 
 # Names the baker keys off. BAKE_SHADER is core.OVERRIDE_NODE_SHADER.
@@ -118,7 +118,8 @@ INTERFACE = [
            "so brighter lights widen the lit side"),
         _S("Shadow Softness", F, 0.03, 0.0, 1.0, True, "Width of the shadow edge"),
         _S("Shadow Mask", F, 1.0, 0.0, 1.0, True,
-           "0 forces shadow. Wire a painted mask or vertex color here"),
+           "0 forces shadow. Wire a painted mask or vertex color here. "
+           "TextureCraft: Anisotropy angle"),
         _S("AO Shadowing", F, 0.25, 0.0, 1.0, True, "Lets occlusion push areas into shadow"),
         _S("Scene Lights", B, True,
            desc="On: shade from the scene's lights (EEVEE only - Shader to RGB). "
@@ -147,6 +148,8 @@ INTERFACE = [
         _S("Rim Strength", F, 0.25, 0.0, 1.0, True),
         _S("Rim Lit Side Only", F, 0.7, 0.0, 1.0, True,
            "1 = rim only where the surface is lit"),
+        _S("Rim Mask", F, 1.0, 0.0, 1.0, True,
+           "0 removes the rim here. TextureCraft: Sheen roughness"),
     ]),
     ("Toon Highlight", True, [
         _S("Toon Highlight", B, False, toggle=True,
@@ -156,7 +159,10 @@ INTERFACE = [
         _S("Highlight Softness", F, 0.1, 0.0, 1.0, True),
         _S("Highlight Strength", F, 0.5, 0.0, 2.0),
         _S("Hair Ring", F, 0.0, 0.0, 1.0, True,
-           "0 = round highlight, 1 = anisotropic ring around the head"),
+           "0 = round highlight, 1 = anisotropic ring around the head. "
+           "TextureCraft: Anisotropy level"),
+        _S("Highlight Mask", F, 1.0, 0.0, 1.0, True,
+           "0 removes the highlight here. TextureCraft: Coat roughness"),
     ]),
     ("Emission", True, [
         _S("Emission Color", C, (0.0, 0.0, 0.0, 1.0), desc="Baked into _emi"),
@@ -172,7 +178,17 @@ INTERFACE = [
            "PRM.a. 0.16 is vanilla; 1 = reflectance 0.2"),
         _S("SSS Mask", F, 0.0, 0.0, 1.0, True,
            "PRM.r on a skin (subsurface) Smash shader instead of Metalness. "
-           "Vanilla skin uses 1"),
+           "Vanilla skin uses 1. TextureCraft: Scattering weight"),
+        _S("PRM AO", F, 1.0, 0.0, 1.0, True,
+           "A painted occlusion map for PRM.b alone: unlike AO Map it doesn't tint "
+           "_col, so nothing is darkened twice. TextureCraft: Ambient occlusion"),
+    ]),
+    ("Smash NOR", False, [
+        _S("Cavity", F, 1.0, 0.0, 1.0, True,
+           "NOR.a. Dark crevices lose their specular. TextureCraft: Specular"),
+        _S("Transition Blend", F, 1.0, 0.0, 1.0, True,
+           "NOR.b. Where the material transition (ditto metal, gold) starts first. "
+           "TextureCraft: Sheen color"),
     ]),
 ]
 OUTPUT_NAME = "Shader"
@@ -504,6 +520,7 @@ def _build_nodes(ng):
     spec = g.math('MULTIPLY', 40, -1150, spec, gt("Highlight Strength"), frame=f_toon)
     spec = g.math('MULTIPLY', 200, -1150, spec, gt("Toon Highlight"), frame=f_toon)
     spec = g.math('MULTIPLY', 360, -1150, spec, lit, frame=f_toon, label="Only where lit")
+    spec = g.math('MULTIPLY', 360, -1000, spec, gt("Highlight Mask"), frame=f_toon)
     toon = g.mix('RGBA', 'ADD', 560, -400, spec, toon, gt("Highlight Color"), frame=f_toon,
                  label="+ Highlight")
 
@@ -517,6 +534,7 @@ def _build_nodes(ng):
     rim = g.math('MULTIPLY', 200, -1850, rim, rim_side, frame=f_toon)
     rim = g.math('MULTIPLY', 360, -1850, rim, gt("Rim Strength"), frame=f_toon)
     rim = g.math('MULTIPLY', 520, -1850, rim, gt("Rim Light"), frame=f_toon)
+    rim = g.math('MULTIPLY', 520, -1700, rim, gt("Rim Mask"), frame=f_toon)
     toon = g.mix('RGBA', 'MIX', 760, -450, rim, toon, gt("Rim Color"), frame=f_toon,
                  label="+ Rim")
 
@@ -550,6 +568,7 @@ def _build_nodes(ng):
     prm_r = g.math('MAXIMUM', -350, 650, gb("Metalness"), gb("SSS Mask"), frame=f_bake)
     prm_b = g.mix('FLOAT', 'MIX', -350, 480, gb("AO to PRM"), 1.0, openness, frame=f_bake,
                   label="PRM.b")
+    prm_b = g.math('MULTIPLY', -200, 480, prm_b, gb("PRM AO"), frame=f_bake)
     prm = g.add("ShaderNodeCombineColor", -150, 600, "PRM view", frame=f_bake)
     g.link(prm_r, prm.inputs[0])
     g.link(gb("Roughness"), prm.inputs[1])
@@ -625,7 +644,7 @@ PRESETS = {
         "Rim Light": True, "Rim Color": (1.0, 0.92, 0.86, 1.0), "Rim Strength": 0.2,
         "Rim Width": 0.25, "Rim Lit Side Only": 0.8,
         "Toon Highlight": False,
-        "Metalness": 0.0, "Roughness": 0.7, "Specular": 0.2, "SSS Mask": 1.0,
+        "Metalness": 0.0, "Roughness": 0.7, "Specular": 0.1, "SSS Mask": 1.0,
     },
     'HAIR': {
         "Toon Amount": 1.0, "Shadow Map Amount": 0.0,
@@ -636,7 +655,7 @@ PRESETS = {
         "Rim Width": 0.22, "Rim Lit Side Only": 0.6,
         "Toon Highlight": True, "Highlight Color": (1.0, 1.0, 1.0, 1.0), "Highlight Size": 0.12,
         "Highlight Softness": 0.15, "Highlight Strength": 0.35, "Hair Ring": 1.0,
-        "Metalness": 0.0, "Roughness": 0.45, "Specular": 0.3, "SSS Mask": 0.0,
+        "Metalness": 0.0, "Roughness": 0.45, "Specular": 0.1, "SSS Mask": 0.0,
     },
     'CLOTH': {
         "Toon Amount": 1.0, "Shadow Map Amount": 0.0,

@@ -1398,6 +1398,7 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
     ch['prm_rgb'] = NONE_CHANNEL
     ch['nor_rgb'] = NONE_CHANNEL
     ch['nor_a']   = NONE_CHANNEL
+    ch['nor_b']   = NONE_CHANNEL
     ch['emi']       = NONE_CHANNEL
     ch['emi_scale'] = 0.0
 
@@ -1516,6 +1517,12 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
             if not ctx.prm_alpha_is_rotation:
                 spec = channel_from_instance(hb, outer, "Specular", f"{label} Specular (PRM.a)")
                 ch['spec_scale'] = 1.0
+            # Left alone these stay out of the way of the NOR_BLUE_* / NOR_ALPHA_* settings.
+            for key, name, slot in (('nor_a', "Cavity", "NOR.a"),
+                                    ('nor_b', "Transition Blend", "NOR.b")):
+                value, driven = scalar_from_instance(hb, outer, name, 1.0)
+                if driven or abs(value - 1.0) > 1e-6:
+                    ch[key] = channel_from_instance(hb, outer, name, f"{label} {name} ({slot})")
             emi = channel_from_instance(hb, outer, "Emission Color", f"{label} Emission Color")
             strength, textured = scalar_from_instance(hb, outer, "Emission Strength", 1.0)
             if strength <= 0.0 or emi.mode == 'NONE' or (
@@ -1670,8 +1677,12 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
         # The master shader tints its own AO into COL, so an AO pass here too
         # would darken the same creases twice. Its "AO to PRM" switch decides.
         ao_to_prm, _ = scalar_from_instance(ch['hb_master'], path[:-1], "AO to PRM", 0.0)
+        prm_ao, prm_ao_driven = scalar_from_instance(ch['hb_master'], path[:-1], "PRM AO", 1.0)
         _ao_map, ao_map_driven = scalar_from_instance(ch['hb_master'], path[:-1], "AO Map", 1.0)
-        if ao_to_prm >= 0.5 and ao_map_driven:
+        if prm_ao_driven or abs(prm_ao - 1.0) > 1e-6:
+            ch['ao'] = channel_from_instance(ch['hb_master'], path[:-1], "PRM AO",
+                                             "master shader PRM AO")
+        elif ao_to_prm >= 0.5 and ao_map_driven:
             # The game's own AO texture (e.g. from the PSK importer) beats a ray-traced pass:
             # authored, noise-free, and it already knows where the model occludes itself.
             ch['ao'] = channel_from_instance(ch['hb_master'], path[:-1], "AO Map",
@@ -1862,7 +1873,7 @@ def pack_prm(metal_img, rough_img, ao_img, spec_img, prm_rgb_img, out_name,
     return out
 
 def pack_nor(normal_img, out_name, size, cavity_img=None, passthrough_rgb=None,
-             passthrough_alpha=None):
+             passthrough_alpha=None, blue_img=None):
     out = create_or_get_image(out_name, size)
     set_colorspace(out, "Non-Color")
 
@@ -1873,7 +1884,9 @@ def pack_nor(normal_img, out_name, size, cavity_img=None, passthrough_rgb=None,
     if NOR_FLIP_GREEN:
         y = 1.0 - y
 
-    if passthrough_rgb is not None or NOR_BLUE_MODE == "Z_FROM_BAKE":
+    if blue_img is not None:
+        b = gray_of(img_to_np(blue_img))
+    elif passthrough_rgb is not None or NOR_BLUE_MODE == "Z_FROM_BAKE":
         b = z
     else:
         b = np.full_like(x, clamp01(NOR_BLUE_CONST))
@@ -2256,7 +2269,7 @@ def _bake_all():
                 lines.append(f"! {note}")
             if DEBUG_PRINT_GRAPH:
                 for key in ('col', 'alpha', 'metal', 'rough', 'spec', 'ior', 'ao',
-                            'prm_rgb', 'nor_rgb', 'nor_a', 'emi'):
+                            'prm_rgb', 'nor_rgb', 'nor_a', 'nor_b', 'emi'):
                     c = channels.get(key)
                     if c is None or not isinstance(c, Channel) or c.mode == 'NONE':
                         continue
@@ -2357,12 +2370,6 @@ def _bake_all():
                         scene, objects, members_for('nor_rgb'), f"{mat_key}__norSrc",
                         BAKE_SIZE, "Non-Color", scratch)
                     made.append(passthrough_rgb)
-                    if channels['nor_a'].mode != 'NONE':
-                        passthrough_a = resolve_channel_image(
-                            scene, objects, members_for('nor_a'), f"{mat_key}__norSrcA",
-                            BAKE_SIZE, "Non-Color", scratch,
-                            default_rgba=(1.0, 1.0, 1.0, 1.0))
-                        made.append(passthrough_a)
                 else:
                     img_norm = create_or_get_image(f"{mat_key}__normBake", BAKE_SIZE)
                     set_colorspace(img_norm, "Non-Color")
@@ -2404,10 +2411,24 @@ def _bake_all():
                                 world.light_settings.distance = prev
                         made.append(cavity)
 
+                if channels['nor_a'].mode != 'NONE':
+                    passthrough_a = resolve_channel_image(
+                        scene, objects, members_for('nor_a'), f"{mat_key}__norSrcA",
+                        BAKE_SIZE, "Non-Color", scratch,
+                        default_rgba=(1.0, 1.0, 1.0, 1.0))
+                    made.append(passthrough_a)
+                blue = None
+                if channels['nor_b'].mode != 'NONE':
+                    blue = resolve_channel_image(
+                        scene, objects, members_for('nor_b'), f"{mat_key}__norSrcB",
+                        BAKE_SIZE, "Non-Color", scratch,
+                        default_rgba=(1.0, 1.0, 1.0, 1.0))
+                    made.append(blue)
+
                 img_nor = pack_nor(img_norm, f"{mat_key}__nor", BAKE_SIZE,
                                    cavity_img=cavity,
                                    passthrough_rgb=passthrough_rgb,
-                                   passthrough_alpha=passthrough_a)
+                                   passthrough_alpha=passthrough_a, blue_img=blue)
                 made.append(img_nor)
                 apply_coverage_default(img_nor, mask, NOR_DEFAULT)
                 out_nor = unique_path(os.path.join(BAKE_DIR, f"{stem}_nor.png"))
