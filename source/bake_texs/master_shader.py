@@ -220,12 +220,14 @@ def _ensure_interface(ng):
     A material stores its instance values against socket identifiers, so a
     socket that is removed and re-added comes back at its default in every
     material. Reusing matching sockets is what lets Update rebuild the group
-    without resetting anyone's settings.
+    without resetting anyone's settings. Returns {name: default} for the inputs
+    that are new, which _default_new_sockets() then sets on existing nodes.
     """
     iface = ng.interface
     sockets = {(it.in_out, it.name): it for it in iface.items_tree if it.item_type == 'SOCKET'}
     panels = {it.name: it for it in iface.items_tree if it.item_type == 'PANEL'}
     keep = set()
+    new = {}
 
     def socket(name, in_out, kind, parent=None):
         item = sockets.get((in_out, name))
@@ -248,6 +250,8 @@ def _ensure_interface(ng):
             parent.default_closed = closed
             keep.add(("PANEL", panel_name))
         for spec in specs:
+            if ('INPUT', spec.name) not in sockets and spec.default is not None:
+                new[spec.name] = spec.default
             item = socket(spec.name, 'INPUT', spec.kind, parent if panel_name else None)
             _set_socket_props(item, spec)
             order.append((item, parent))
@@ -270,6 +274,25 @@ def _ensure_interface(ng):
         except Exception:
             pass
         position[key] = index + 1
+    return new
+
+
+def _default_new_sockets(ng, defaults):
+    """Give nodes that already exist the interface default on new sockets.
+
+    Blender starts a new socket at 0 on them, whatever the interface says, and
+    a mask at 0 switches its effect off and bakes black into NOR and PRM.
+    """
+    ng.interface_update(bpy.context)
+    trees = [m.node_tree for m in bpy.data.materials if m.node_tree]
+    for tree in trees + list(bpy.data.node_groups):
+        for node in tree.nodes:
+            if node.type != 'GROUP' or node.node_tree != ng:
+                continue
+            for name, value in defaults.items():
+                socket = node.inputs.get(name)
+                if socket is not None and not socket.is_linked:
+                    socket.default_value = value
 
 
 # =============================================================================
@@ -611,8 +634,9 @@ def build_master_group():
     ng = bpy.data.node_groups.get(MASTER_NAME)
     if ng is None:
         ng = bpy.data.node_groups.new(MASTER_NAME, 'ShaderNodeTree')
-    _ensure_interface(ng)
+    new = _ensure_interface(ng)
     _build_nodes(ng)
+    _default_new_sockets(ng, new)
     ng[VERSION_KEY] = MASTER_VERSION
     ng.description = ("Toon master for skin, hair, cloth and metal. COL/PRM/NOR/EMI "
                       "bake through Bake Textures; toon shading is viewport only")

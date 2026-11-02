@@ -222,6 +222,22 @@ check(hb.inputs["Shadow Mask"].links[0].from_socket.name == "Alpha", "Shadow Mas
 check(hb.inputs["Transition Blend"].links[0].from_socket.name == "Blue", "Transition is NOR.b")
 check(hb.inputs["PRM AO"].links[0].from_socket.name == "Blue", "PRM AO is PRM.b")
 
+print("== a shader update gives existing nodes the new sockets' defaults")
+old = bpy.data.materials.new("old_hb")
+old.use_nodes = True
+old_group = ms.build_master_group()
+old_node = old.node_tree.nodes.new("ShaderNodeGroup")
+old_node.node_tree = old_group
+old_node.inputs["Specular"].default_value = 0.33
+for name in ("Cavity", "PRM AO", "Rim Mask"):
+    old_group.interface.remove(next(i for i in old_group.interface.items_tree
+                                    if i.item_type == 'SOCKET' and i.name == name))
+ms.build_master_group()
+for name in ("Cavity", "PRM AO", "Rim Mask"):
+    check(abs(old_node.inputs[name].default_value - 1.0) < 1e-6, f"{name} comes in at 1, not 0")
+check(abs(old_node.inputs["Specular"].default_value - 0.33) < 1e-6, "Update keeps existing values")
+bpy.data.materials.remove(old)
+
 print("== update mesh keeps the paint")
 op = bpy.ops.sub.texturecraft_send('EXEC_DEFAULT', mode='UPDATE')
 check(op == {'FINISHED'}, "update ran")
