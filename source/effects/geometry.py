@@ -3,14 +3,17 @@ Effects as meshes standing in the shot, for Cycles to treat like anything else: 
 they give off, show in reflections and through glass, and take depth of field.
 
 EffectForge writes, per effect and frame, every triangle the effect's layers drew (`geo/geo_<effect>_<frame>.bin`, in
-Smash space) and an atlas of what each paints (`geo/atlas_<effect>_<frame>.exr`): on the left what it adds to what lies
-behind it, on the right at the same place how much of that shows through. Each effect becomes one mesh holding every
-frame's triangles, each face knowing its frame; geometry nodes keep the scene frame's faces only. Its material gives off
-the left half and lets the right half through, so additive fire glows, smoke covers and tints, and both stack as deep
-as Cycles' transparent bounces let them.
+Smash space, each knowing its layer) and an atlas of what each paints (`geo/atlas_<effect>_<frame>.exr`): on the left
+what it adds to what lies behind it, on the right at the same place how much of that shows through. Each layer of each
+effect becomes one mesh holding every frame's triangles, each face knowing its frame; geometry nodes keep the scene
+frame's faces only. Its material gives off the left half and lets the right half through, so additive fire glows, smoke
+covers and tints, and both stack as deep as Cycles' transparent bounces let them. An effect's layers are grouped in a
+collection of its own, and each has its own material (sharing the effect's atlas), with a tint and a strength to tune
+it by, so an effect of many colours can be shaded and lit a layer at a time.
 """
 
 import glob
+import json
 import os
 import struct
 
@@ -41,7 +44,7 @@ def clear(scene):
     coll = bpy.data.collections.get(COLLECTION)
     if coll is None:
         return
-    for obj in list(coll.objects):
+    for obj in list(coll.all_objects):
         mesh = obj.data
         material = mesh.materials[0] if mesh.materials else None
         bpy.data.objects.remove(obj)
@@ -52,17 +55,25 @@ def clear(scene):
             bpy.data.materials.remove(material)
             if image is not None and image.users == 0:
                 bpy.data.images.remove(image)
+    for group in list(coll.children_recursive):
+        bpy.data.collections.remove(group)
 
 
 def _read(path):
-    """A frame's triangles: positions (n*3, 3) in Smash space and atlas coordinates (n*3, 2)."""
+    """A frame's triangles: positions (n*3, 3) in Smash space, atlas coordinates (n*3, 2) and layers (n)."""
     with open(path, 'rb') as f:
         data = f.read()
     (count,) = struct.unpack_from('<I', data)
     corners = count * 3
     positions = np.frombuffer(data, dtype='<f4', count=corners * 3, offset=4).reshape(-1, 3)
     uvs = np.frombuffer(data, dtype='<f4', count=corners * 2, offset=4 + corners * 12).reshape(-1, 2)
-    return positions, uvs
+    at = 4 + corners * 20
+    # A bake from before layers has none: all one layer.
+    if len(data) >= at + count * 4:
+        layers = np.frombuffer(data, dtype='<u4', count=count, offset=at)
+    else:
+        layers = np.zeros(count, dtype=np.uint32)
+    return positions, uvs, layers
 
 
 def _mesh(name, frames_of):
@@ -137,7 +148,7 @@ def _frame_nodes():
 
 
 def _material(name, image, frames, light_by_emission):
-    """Gives off the atlas' left half and lets its right half through."""
+    """Gives off the atlas' left half, times a tint, and lets its right half through."""
     material = bpy.data.materials.new(name)
     material.use_nodes = True
     tree = material.node_tree
@@ -158,18 +169,28 @@ def _material(name, image, frames, light_by_emission):
         texture.image_user.use_auto_refresh = True
         textures.append(texture)
     gives, through = textures
+    # White and 1 give the game's colours; a layer is retinted or brightened here.
+    tint = nodes.new('ShaderNodeMix')
+    tint.name = tint.label = 'Tint'
+    tint.data_type = 'RGBA'
+    tint.blend_type = 'MULTIPLY'
+    tint.inputs['Factor'].default_value = 1.0
+    tint.inputs['B'].default_value = (1.0, 1.0, 1.0, 1.0)
     emission = nodes.new('ShaderNodeEmission')
+    emission.name = emission.label = 'Strength'
     emission.inputs['Strength'].default_value = 1.0
     clear_bsdf = nodes.new('ShaderNodeBsdfTransparent')
     add = nodes.new('ShaderNodeAddShader')
     output = nodes.new('ShaderNodeOutputMaterial')
     for node, at in ((coords, (-800, 0)), (across, (-600, -250)), (gives, (-400, 100)), (through, (-400, -250)),
-                     (emission, (-100, 100)), (clear_bsdf, (-100, -150)), (add, (100, 0)), (output, (300, 0))):
+                     (tint, (-150, 200)), (emission, (50, 100)), (clear_bsdf, (50, -150)), (add, (250, 0)),
+                     (output, (450, 0))):
         node.location = at
     links.new(coords.outputs['UV'], gives.inputs['Vector'])
     links.new(coords.outputs['UV'], across.inputs[0])
     links.new(across.outputs[0], through.inputs['Vector'])
-    links.new(gives.outputs['Color'], emission.inputs['Color'])
+    links.new(gives.outputs['Color'], tint.inputs['A'])
+    links.new(tint.outputs['Result'], emission.inputs['Color'])
     links.new(through.outputs['Color'], clear_bsdf.inputs['Color'])
     links.new(emission.outputs[0], add.inputs[0])
     links.new(clear_bsdf.outputs[0], add.inputs[1])
@@ -185,9 +206,19 @@ def _material(name, image, frames, light_by_emission):
     return material
 
 
+def _layer_names(folder, e):
+    """Effect `e`'s layer names by index, from `geo/layers.json`."""
+    path = os.path.join(folder, 'layers.json')
+    if not os.path.isfile(path):
+        return []
+    with open(path) as f:
+        effects = json.load(f)['effects']
+    return effects[e]['layers'] if e < len(effects) else []
+
+
 def apply(scene, out, names, light_by_emission=True):
-    """Build a mesh per effect from `out/geo`; `names` are the effect objects in the order the scene file listed
-    them. Returns how many were made."""
+    """Build a mesh per layer of each effect from `out/geo`; `names` are the effect objects in the order the scene file
+    listed them. Returns how many were made."""
     folder = os.path.join(out, 'geo')
     clear(scene)
     if not os.path.isdir(folder):
@@ -196,14 +227,16 @@ def apply(scene, out, names, light_by_emission=True):
     nodes = _frame_nodes()
     made = 0
     for e, name in enumerate(names):
-        files = sorted(glob.glob(os.path.join(folder, f'geo_{e:02}_*.bin')))
-        frames_of = []
-        for path in files:
+        # Per layer, its triangles on each frame.
+        by_layer = {}
+        for path in sorted(glob.glob(os.path.join(folder, f'geo_{e:02}_*.bin'))):
             frame = int(os.path.basename(path)[len(f'geo_{e:02}_'):-len('.bin')])
-            p, uv = _read(path)
-            if len(p):
-                frames_of.append((frame, (p, uv)))
-        if not frames_of:
+            p, uv, tags = _read(path)
+            for layer in np.unique(tags):
+                faces = np.flatnonzero(tags == layer)
+                corners = (faces[:, None] * 3 + np.arange(3)).ravel()
+                by_layer.setdefault(int(layer), []).append((frame, (p[corners], uv[corners])))
+        if not by_layer:
             continue
         atlases = sorted(glob.glob(os.path.join(folder, f'atlas_{e:02}_*.exr')))
         frames = [int(os.path.basename(a)[len(f'atlas_{e:02}_'):-len('.exr')]) for a in atlases]
@@ -211,16 +244,23 @@ def apply(scene, out, names, light_by_emission=True):
         image.name = f'{name} Atlas'
         image.source = 'SEQUENCE'
         image.alpha_mode = 'CHANNEL_PACKED'
-        mesh = _mesh(f'{name} Geometry', frames_of)
-        mesh.materials.append(_material(f'{name} Geometry', image, frames, light_by_emission))
-        obj = bpy.data.objects.new(f'{name} Geometry', mesh)
-        coll.objects.link(obj)
-        obj['smash_fx_effect'] = name
-        modifier = obj.modifiers.new('Frame', 'NODES')
-        modifier.node_group = nodes
-        # Effects give light and tint it; they cast no hard shadow of their own.
-        obj.visible_shadow = False
-        made += 1
+        layer_names = _layer_names(folder, e)
+        group = bpy.data.collections.new(f'{name} Geometry')
+        coll.children.link(group)
+        for layer, frames_of in sorted(by_layer.items()):
+            label = layer_names[layer] if layer < len(layer_names) else f'Layer {layer}'
+            title = f'{name} {label}'
+            mesh = _mesh(title, frames_of)
+            mesh.materials.append(_material(title, image, frames, light_by_emission))
+            obj = bpy.data.objects.new(title, mesh)
+            group.objects.link(obj)
+            obj['smash_fx_effect'] = name
+            obj['smash_fx_layer'] = label
+            modifier = obj.modifiers.new('Frame', 'NODES')
+            modifier.node_group = nodes
+            # Effects give light and tint it; they cast no hard shadow of their own.
+            obj.visible_shadow = False
+            made += 1
     if made and hasattr(scene, 'cycles'):
         scene.cycles.transparent_max_bounces = max(scene.cycles.transparent_max_bounces, TRANSPARENT_BOUNCES)
     return made

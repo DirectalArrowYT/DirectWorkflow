@@ -188,9 +188,9 @@ class SUB_OP_smash_fx_bake(Operator):
         self._frames, self._out, self._cameras = frames, out, cameras
         self._names = [e['object'] for e in data['effects']]
         # Lights and cards from an earlier bake would be stale.
-        stale = os.path.join(out, 'lights.json')
-        if os.path.isfile(stale):
-            os.remove(stale)
+        for stale in (os.path.join(out, 'lights.json'), os.path.join(out, 'geo', 'layers.json')):
+            if os.path.isfile(stale):
+                os.remove(stale)
         for folder, prefixes in (('cards', ('card_',)), ('geo', ('geo_', 'atlas_'))):
             old = os.path.join(out, folder)
             for name in os.listdir(old) if os.path.isdir(old) else ():
@@ -236,7 +236,7 @@ class SUB_OP_smash_fx_bake(Operator):
         settings = context.scene.sub_smash_fx
         made = stood = shaped = 0
         if settings.lights:
-            made = lights.apply(context.scene, self._out, self._names)
+            made = lights.apply(context.scene, self._out, self._names, geometry=settings.geometry)
         else:
             lights.clear(context.scene)
         if settings.geometry:

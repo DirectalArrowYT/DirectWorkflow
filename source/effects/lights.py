@@ -1,12 +1,13 @@
 """
-Lighting the shot with its effects: a light per effect, keyed from what EffectForge read off
-each baked frame (`lights.json`), so effects light what is around them in EEVEE and Cycles,
-with bounce, reflections and soft shadows in Cycles.
+Lighting the shot with its effects: a light per layer of each effect, keyed from what
+EffectForge read off each baked frame (`lights.json`), so effects light what is around them in
+EEVEE and Cycles, with bounce, reflections and soft shadows in Cycles. An effect of many
+colours (a blue core in orange flames) lights the shot in each of them, from where each is.
 
-EffectForge reads each effect's light from what it draws, so everything the effect does
+EffectForge reads each layer's light from what it draws, so everything the layer does
 (colours and alpha over time, textures, size, blend, a script's tint) is in it: dark smoke
-gives off little, bright fire much. Each light sits in the middle of its effect's glow and is
-as big as the glow is spread. Its power and size are keyed as raw values on the light and
+gives off little, bright fire much. Each light sits in the middle of its layer's glow and is
+as big as the glow is spread. An effect's lights are grouped in a collection of its own. Its power and size are keyed as raw values on the light and
 scaled by the scene's Light Strength and Light Size through drivers, so those can be tuned
 without baking again. With cards (cards.py), the lights stay out of Cycles' reflections, where
 the cards show the effects themselves.
@@ -38,21 +39,30 @@ def _collection(scene):
     return coll
 
 
+def _group(coll, name):
+    """A collection of its own inside `coll`, for one effect's objects."""
+    group = bpy.data.collections.new(name)
+    coll.children.link(group)
+    return group
+
+
 def clear(scene):
     """Remove the lights a bake made."""
     coll = bpy.data.collections.get(COLLECTION)
     if coll is None:
         return
-    for obj in list(coll.objects):
+    for obj in list(coll.all_objects):
         data = obj.data
         bpy.data.objects.remove(obj)
         if data is not None and data.users == 0:
             bpy.data.lights.remove(data)
+    for group in list(coll.children_recursive):
+        bpy.data.collections.remove(group)
 
 
 def set_shadows(scene):
     coll = bpy.data.collections.get(COLLECTION)
-    for obj in coll.objects if coll else ():
+    for obj in coll.all_objects if coll else ():
         if obj.type == 'LIGHT':
             obj.data.use_shadow = scene.sub_smash_fx.light_shadows
 
@@ -89,9 +99,17 @@ def _linear(id_data):
             key.interpolation = 'LINEAR'
 
 
-def apply(scene, out, names):
-    """Key a light per effect from `out/lights.json`; `names` are the effect objects in the
-    order the scene file listed them. Returns how many lights were made."""
+def _layers(effect):
+    """An effect's layers in `lights.json` as (name, keys); a bake from before lights per layer
+    has one for the whole effect."""
+    if 'layers' in effect:
+        return [(layer['name'], layer['frames']) for layer in effect['layers']]
+    return [(None, effect['frames'])]
+
+
+def apply(scene, out, names, geometry=False):
+    """Key a light per layer of each effect from `out/lights.json`; `names` are the effect
+    objects in the order the scene file listed them. Returns how many lights were made."""
     path = os.path.join(out, 'lights.json')
     if not os.path.isfile(path):
         return 0
@@ -103,40 +121,50 @@ def apply(scene, out, names):
     coll = _collection(scene)
     made = 0
     for name, effect in zip(names, data['effects']):
-        keys = effect['frames']
-        if not any(keys):
+        layers = [(layer, keys) for layer, keys in _layers(effect) if any(keys)]
+        if not layers:
             continue
-        light = bpy.data.lights.new(f'{name} Light', 'POINT')
-        light.use_shadow = settings.light_shadows
-        obj = bpy.data.objects.new(f'{name} Light', light)
-        # With cards, reflections show the effect itself (Cycles).
-        obj.visible_glossy = not settings.cards
-        coll.objects.link(obj)
-        obj['smash_fx_effect'] = name
-        light[POWER] = 0.0
-        light[RADIUS] = 0.0
-        last = None
-        for frame, key in zip(frames, keys):
-            if key is None:
-                # Dark, where it was last.
-                light[POWER] = 0.0
-                light.keyframe_insert(f'["{POWER}"]', frame=frame)
-                if last is None:
-                    continue
-                key = last
-            else:
-                light[POWER] = key['power']
-                light.keyframe_insert(f'["{POWER}"]', frame=frame)
-                last = key
-            obj.location = FROM_SMASH @ Vector(key['position'])
-            obj.keyframe_insert('location', frame=frame)
-            light.color = key['colour']
-            light.keyframe_insert('color', frame=frame)
-            light[RADIUS] = key['radius']
-            light.keyframe_insert(f'["{RADIUS}"]', frame=frame)
-        _linear(obj)
-        _linear(light)
-        _driver(light, 'energy', POWER, 'light_strength')
-        _driver(light, 'shadow_soft_size', RADIUS, 'light_size')
-        made += 1
+        group = _group(coll, f'{name} Lights')
+        for layer, keys in layers:
+            _light(group, name, layer, frames, keys, settings, geometry)
+            made += 1
     return made
+
+
+def _light(group, name, layer, frames, keys, settings, geometry):
+    """Key one layer's light into `group`."""
+    title = f'{name} {layer} Light' if layer else f'{name} Light'
+    light = bpy.data.lights.new(title, 'POINT')
+    light.use_shadow = settings.light_shadows
+    obj = bpy.data.objects.new(title, light)
+    # With cards or meshes, reflections show the effect itself (Cycles).
+    obj.visible_glossy = not (settings.cards or geometry)
+    group.objects.link(obj)
+    obj['smash_fx_effect'] = name
+    if layer:
+        obj['smash_fx_layer'] = layer
+    light[POWER] = 0.0
+    light[RADIUS] = 0.0
+    last = None
+    for frame, key in zip(frames, keys):
+        if key is None:
+            # Dark, where it was last.
+            light[POWER] = 0.0
+            light.keyframe_insert(f'["{POWER}"]', frame=frame)
+            if last is None:
+                continue
+            key = last
+        else:
+            light[POWER] = key['power']
+            light.keyframe_insert(f'["{POWER}"]', frame=frame)
+            last = key
+        obj.location = FROM_SMASH @ Vector(key['position'])
+        obj.keyframe_insert('location', frame=frame)
+        light.color = key['colour']
+        light.keyframe_insert('color', frame=frame)
+        light[RADIUS] = key['radius']
+        light.keyframe_insert(f'["{RADIUS}"]', frame=frame)
+    _linear(obj)
+    _linear(light)
+    _driver(light, 'energy', POWER, 'light_strength')
+    _driver(light, 'shadow_soft_size', RADIUS, 'light_size')
