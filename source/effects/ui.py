@@ -107,6 +107,7 @@ class SUB_PT_smash_fx_bake(Panel):
         col.prop(settings, 'light_strength')
         col.prop(settings, 'light_size')
         col.prop(settings, 'light_shadows')
+        layout.prop(settings, 'cards')
         box = layout.box()
         box.prop(settings, 'bloom')
         col = box.column(align=True)

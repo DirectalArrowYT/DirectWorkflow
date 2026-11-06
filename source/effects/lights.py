@@ -8,7 +8,8 @@ EffectForge reads each effect's light from what it draws, so everything the effe
 gives off little, bright fire much. Each light sits in the middle of its effect's glow and is
 as big as the glow is spread. Its power and size are keyed as raw values on the light and
 scaled by the scene's Light Strength and Light Size through drivers, so those can be tuned
-without baking again.
+without baking again. With cards (cards.py), the lights stay out of Cycles' reflections, where
+the cards show the effects themselves.
 """
 
 import json
@@ -108,6 +109,8 @@ def apply(scene, out, names):
         light = bpy.data.lights.new(f'{name} Light', 'POINT')
         light.use_shadow = settings.light_shadows
         obj = bpy.data.objects.new(f'{name} Light', light)
+        # With cards, reflections show the effect itself (Cycles).
+        obj.visible_glossy = not settings.cards
         coll.objects.link(obj)
         obj['smash_fx_effect'] = name
         light[POWER] = 0.0

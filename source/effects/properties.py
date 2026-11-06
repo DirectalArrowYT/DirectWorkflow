@@ -130,6 +130,9 @@ class SUB_PG_smash_fx_settings(PropertyGroup):
                               description='How big the effect lights are against how far their glow spreads: '
                                           'bigger is softer light and shadows',
                               update=_lights_changed)
+    cards: BoolProperty(name='In Reflections', default=True,
+                        description="Stand a card per effect in the shot when baking, so effects are seen in "
+                                    "reflections and through glass (Cycles; EEVEE through light probes)")
     light_shadows: BoolProperty(name='Shadows', default=True,
                                 description='Effect lights cast shadows',
                                 update=_lights_changed)
