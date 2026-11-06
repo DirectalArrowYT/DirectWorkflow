@@ -87,12 +87,14 @@ def resolution(scene):
             max(1, r.resolution_y * r.resolution_percentage // 100))
 
 
-def build_scene(context, frames, out, shots=None, preview=True):
+def build_scene(context, frames, out, shots=None, preview=True, lights=False):
     """The scene file for `render-scene`: a camera per frame and each effect's track.
 
     Every effect is sampled once per effect frame from its start, so an effect at 60 a
     second in a 30 fps shot gets a sample between frames; each sample is a frame_set,
-    shared by every effect and the camera wanting that moment."""
+    shared by every effect and the camera wanting that moment. With `lights`, EffectForge
+    also reads the light each effect gives off (see lights.py); each effect names its
+    object for that, which EffectForge passes over."""
     scene = context.scene
     width, height = resolution(scene)
     objects = effect_objects(scene)
@@ -141,6 +143,7 @@ def build_scene(context, frames, out, shots=None, preview=True):
         fx = obj.smash_fx
         stop = (fx.stop - fx.start) * _step(scene, fx) if fx.use_stop else None
         effects.append({
+            'object': obj.name,
             'eff': bpy.path.abspath(fx.eff),
             'effect': fx.effect,
             'seed': fx.seed,
@@ -158,6 +161,7 @@ def build_scene(context, frames, out, shots=None, preview=True):
         'shots': shots,
         'out': out,
         'preview': preview,
+        'lights': lights,
         'effects': effects,
     }
 

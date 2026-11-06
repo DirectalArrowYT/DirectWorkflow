@@ -11,7 +11,7 @@ from bpy.types import Operator
 from bpy.props import BoolProperty, IntProperty
 from mathutils import Euler, Matrix
 
-from . import acmd, forge, layering
+from . import acmd, forge, layering, lights
 from .properties import refresh_list
 
 
@@ -143,6 +143,7 @@ class SUB_OP_smash_fx_bake(Operator):
     _out = None
     _cameras = None
     _log = None
+    _names = None
 
     def _start(self, context):
         out = _out_ok(self, context)
@@ -174,7 +175,7 @@ class SUB_OP_smash_fx_bake(Operator):
                 cameras.add(scene.camera)
         scene.frame_set(keep)
         try:
-            data = forge.build_scene(context, frames, out, shots, preview=settings.show_in_camera)
+            data = forge.build_scene(context, frames, out, shots, preview=settings.show_in_camera, lights=settings.lights)
         except RuntimeError as e:
             self.report({'ERROR'}, str(e))
             return False
@@ -183,6 +184,11 @@ class SUB_OP_smash_fx_bake(Operator):
             json.dump(data, f)
 
         self._frames, self._out, self._cameras = frames, out, cameras
+        self._names = [e['object'] for e in data['effects']]
+        # Lights from an earlier bake would be stale.
+        stale = os.path.join(out, 'lights.json')
+        if os.path.isfile(stale):
+            os.remove(stale)
         self._log = []
         self._process = subprocess.Popen([exe, 'render-scene', scene_file], stdout=subprocess.PIPE,
                                          stderr=subprocess.STDOUT, text=True)
@@ -221,11 +227,17 @@ class SUB_OP_smash_fx_bake(Operator):
             self.report({'ERROR'}, 'EffectForge failed: ' + ' | '.join(tail))
             return {'CANCELLED'}
         settings = context.scene.sub_smash_fx
+        made = 0
+        if settings.lights:
+            made = lights.apply(context.scene, self._out, self._names)
+        else:
+            lights.clear(context.scene)
         if settings.composite:
             layering.composite(context.scene, self._out, self._frames)
         if settings.show_in_camera:
             layering.show_in_cameras(self._cameras, self._out, self._frames)
-        self.report({'INFO'}, self._log[-1] if self._log else 'Baked')
+        done = self._log[-1] if self._log else 'Baked'
+        self.report({'INFO'}, done + (f', {made} effect light{"" if made == 1 else "s"}' if made else ''))
         return {'FINISHED'}
 
     def execute(self, context):

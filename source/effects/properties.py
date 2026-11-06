@@ -63,6 +63,19 @@ class SUB_PG_smash_fx(PropertyGroup):
     seed: IntProperty(name='Seed', min=0, description='Another seed gives the random parts another roll')
 
 
+def _bloom_changed(context):
+    from . import layering
+    layering.tune_bloom(context.scene)
+
+
+def _lights_changed(self, context):
+    """The effect lights' drivers read Light Strength and Size; the scene is tagged so they
+    run again now, not at the next frame change."""
+    from . import lights
+    lights.set_shadows(context.scene)
+    context.scene.update_tag()
+
+
 _SOURCE_ITEMS = []
 
 
@@ -107,6 +120,26 @@ class SUB_PG_smash_fx_settings(PropertyGroup):
                                  description="Lay the baked effects over the camera view in the viewport")
     composite: BoolProperty(name='Composite', default=True,
                             description="Lay the baked effects over the render in the compositor")
+    lights: BoolProperty(name='Light the Shot', default=True,
+                         description="Key a light per effect from what it draws when baking, so effects light "
+                                     "what is around them in EEVEE and Cycles (bounce and reflections in Cycles)")
+    light_strength: FloatProperty(name='Light Strength', default=1.0, min=0.0, soft_max=10.0,
+                                  description='How bright the effect lights are; 1 is what the effects give off',
+                                  update=_lights_changed)
+    light_size: FloatProperty(name='Light Size', default=1.0, min=0.0, soft_max=4.0,
+                              description='How big the effect lights are against how far their glow spreads: '
+                                          'bigger is softer light and shadows',
+                              update=_lights_changed)
+    light_shadows: BoolProperty(name='Shadows', default=True,
+                                description='Effect lights cast shadows',
+                                update=_lights_changed)
+    bloom: BoolProperty(name='Bloom', default=True,
+                        description='Let bright effects glow out into the frame in the compositor',
+                        update=lambda self, context: _bloom_changed(context))
+    bloom_strength: FloatProperty(name='Bloom Strength', default=0.6, min=0.0, soft_max=2.0,
+                                  update=lambda self, context: _bloom_changed(context))
+    bloom_size: FloatProperty(name='Bloom Size', default=0.6, min=0.0, max=1.0,
+                              update=lambda self, context: _bloom_changed(context))
 
     acmd_file: StringProperty(name='Script', subtype='FILE_PATH',
                               description="A move's effect script: smashline Rust or a dumped ACMD script")

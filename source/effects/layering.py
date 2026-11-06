@@ -15,6 +15,8 @@ FX_IMAGE = 'Smash FX'
 PREVIEW_IMAGE = 'Smash FX Preview'
 NODE = 'Smash FX'
 OVER = 'Smash FX Over'
+GLARE = 'Smash FX Bloom'
+ADD = 'Smash FX Bloom Add'
 
 
 def _sequence(name, path, alpha_mode, colourspace=None):
@@ -95,6 +97,69 @@ def composite(scene, out, frames):
     node.image = image
     _place(node, frames)
     tree.links.new(node.outputs['Image'], over.inputs[1])
+    _bloom(scene, tree, node, over)
+
+
+def _add_node(tree):
+    """A node adding two colours: the Mix node in Blender 5, MixRGB before."""
+    try:
+        add = tree.nodes.new('ShaderNodeMix')
+        add.data_type = 'RGBA'
+        add.blend_type = 'ADD'
+        return add, add.inputs[6], add.inputs[7], add.outputs[2]
+    except RuntimeError:
+        add = tree.nodes.new('CompositorNodeMixRGB')
+        add.blend_type = 'ADD'
+        return add, add.inputs[1], add.inputs[2], add.outputs[0]
+
+
+def _bloom(scene, tree, image, over):
+    """Glare off the effects alone, added after they are laid over the render, so only the
+    effects glow out into the frame. Off, the nodes are muted."""
+    settings = scene.sub_smash_fx
+    glare = tree.nodes.get(GLARE)
+    add = tree.nodes.get(ADD)
+    if glare is None or add is None:
+        if not settings.bloom:
+            return
+        glare = tree.nodes.new('CompositorNodeGlare')
+        glare.name = glare.label = GLARE
+        glare.location = (image.location.x + 220, image.location.y - 220)
+        add, a, b, result = _add_node(tree)
+        add.name = add.label = ADD
+        add.location = (over.location.x + 200, over.location.y)
+        if 'Factor' in add.inputs:
+            add.inputs[0].default_value = 1.0
+        # What the Alpha Over fed now goes through the add.
+        for link in list(over.outputs[0].links):
+            tree.links.new(result, link.to_socket)
+        tree.links.new(over.outputs[0], a)
+        tree.links.new(image.outputs['Image'], glare.inputs['Image'])
+        glare_out = glare.outputs['Glare'] if 'Glare' in glare.outputs else glare.outputs[0]
+        tree.links.new(glare_out, b)
+    tune_bloom(scene)
+
+
+def tune_bloom(scene):
+    tree = scene.compositing_node_group if hasattr(scene, 'compositing_node_group') else scene.node_tree
+    glare = tree.nodes.get(GLARE) if tree else None
+    add = tree.nodes.get(ADD) if tree else None
+    if glare is None or add is None:
+        return
+    settings = scene.sub_smash_fx
+    glare.mute = add.mute = not settings.bloom
+    if 'Type' in glare.inputs:
+        glare.inputs['Type'].default_value = 'Bloom'
+        glare.inputs['Quality'].default_value = 'High'
+        glare.inputs['Threshold'].default_value = 0.2
+        glare.inputs['Strength'].default_value = settings.bloom_strength
+        glare.inputs['Size'].default_value = settings.bloom_size
+    else:
+        glare.glare_type = 'FOG_GLOW'
+        glare.quality = 'HIGH'
+        glare.threshold = 0.2
+        glare.size = max(6, min(9, int(6 + settings.bloom_size * 3)))
+        glare.mix = settings.bloom_strength - 1.0
 
 
 def show_in_cameras(cameras, out, frames):

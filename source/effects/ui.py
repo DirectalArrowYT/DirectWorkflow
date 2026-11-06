@@ -101,6 +101,20 @@ class SUB_PT_smash_fx_bake(Panel):
         row.prop(settings, 'composite', toggle=True)
 
         box = layout.box()
+        box.prop(settings, 'lights')
+        col = box.column(align=True)
+        col.active = settings.lights
+        col.prop(settings, 'light_strength')
+        col.prop(settings, 'light_size')
+        col.prop(settings, 'light_shadows')
+        box = layout.box()
+        box.prop(settings, 'bloom')
+        col = box.column(align=True)
+        col.active = settings.bloom and settings.composite
+        col.prop(settings, 'bloom_strength')
+        col.prop(settings, 'bloom_size')
+
+        box = layout.box()
         box.prop(settings, 'use_shot')
         box.operator('sub.smash_fx_render_shot', icon='RENDER_ANIMATION')
 
