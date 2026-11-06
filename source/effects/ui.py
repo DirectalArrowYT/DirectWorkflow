@@ -26,6 +26,17 @@ class SUB_PT_smash_fx(Panel):
         row.operator('sub.smash_fx_add', icon='SHADERFX',
                      text=f'Add Effect on {context.active_pose_bone.name}' if bone else 'Add Effect')
 
+        box = layout.box()
+        box.label(text='From a Move Script', icon='SCRIPT')
+        col = box.column(align=True)
+        col.prop(settings, 'acmd_file', text='')
+        if settings.acmd_file:
+            col.prop(settings, 'acmd_script', text='')
+        row = box.row()
+        row.enabled = bool(settings.acmd_file) and context.object is not None and context.object.type == 'ARMATURE'
+        op = row.operator('sub.smash_fx_import_acmd', icon='IMPORT')
+        op.start = context.scene.frame_current
+
         obj = context.object
         if obj is None or not obj.smash_fx.enabled:
             layout.label(text='Select an effect empty to edit it', icon='INFO')

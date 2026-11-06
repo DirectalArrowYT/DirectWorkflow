@@ -8,10 +8,10 @@ import time
 
 import bpy
 from bpy.types import Operator
-from bpy.props import BoolProperty
-from mathutils import Matrix
+from bpy.props import BoolProperty, IntProperty
+from mathutils import Euler, Matrix
 
-from . import forge, layering
+from . import acmd, forge, layering
 from .properties import refresh_list
 
 
@@ -322,3 +322,136 @@ classes = (
     SUB_OP_smash_fx_bake,
     SUB_OP_smash_fx_render_shot,
 )
+
+
+_LISTS = {}
+
+
+def _effects_in(settings, eff):
+    """The effect names of an .eff, upper case, listed once per session."""
+    if eff not in _LISTS:
+        try:
+            _LISTS[eff] = {e['name'].upper(): e for e in forge.list_effects(forge.forge_path(settings), eff)}
+        except Exception as e:
+            print(f'Smash FX: could not list {eff}: {e}')
+            _LISTS[eff] = {}
+    return _LISTS[eff]
+
+
+def _effect_files(settings):
+    """Where a script's effects are looked for, in order: the fighter's own file, then common and item."""
+    files = []
+    if settings.source == 'CUSTOM':
+        if settings.custom_eff:
+            files.append(bpy.path.abspath(settings.custom_eff))
+    elif settings.source not in ('common', 'item'):
+        files.append(forge.vanilla_eff(settings.game_root, settings.source))
+    files += [forge.vanilla_eff(settings.game_root, 'common'), forge.vanilla_eff(settings.game_root, 'item')]
+    return [f for f in files if os.path.isfile(f)]
+
+
+def _pose_bone(armature, name):
+    want = 'trans' if name.lower() == 'top' else name.lower()
+    return next((b for b in armature.pose.bones if b.name.lower() == want), None)
+
+
+def _local(effect):
+    """Where the script puts the effect, in the bone's Blender axes (the game's turned a quarter about Z)."""
+    rotation = Euler([math.radians(a) for a in effect['rotation']], 'XYZ').to_matrix().to_4x4()
+    return (Matrix.Rotation(math.radians(90), 4, 'Z') @ Matrix.Translation(effect['offset'])
+            @ rotation @ Matrix.Scale(effect['size'], 4))
+
+
+class SUB_OP_smash_fx_import_acmd(Operator):
+    bl_idname = 'sub.smash_fx_import_acmd'
+    bl_label = 'Import Move Effects'
+    bl_description = ("Place the effects of a move's effect script (ACMD) on the active armature: each effect on its "
+                      "bone and frame, following it as the script says, with its rate, colour and stop")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    start: IntProperty(name='Motion Start', default=1, description='The frame the move\'s animation starts on')
+    cut: IntProperty(name='Cut At', default=0, min=0,
+                     description="The motion frame the move is cut at (the next move starts); 0 plays it all. "
+                                 "Effects the script makes after it are left out")
+
+    def execute(self, context):
+        settings = context.scene.sub_smash_fx
+        armature = context.object
+        if armature is None or armature.type != 'ARMATURE':
+            self.report({'ERROR'}, 'Select the armature the move plays on')
+            return {'CANCELLED'}
+        path = bpy.path.abspath(settings.acmd_file)
+        try:
+            text = open(path, encoding='utf-8', errors='replace').read()
+        except OSError as e:
+            self.report({'ERROR'}, f'Cannot read the script: {e}')
+            return {'CANCELLED'}
+        body = acmd.function_body(text, settings.acmd_script)
+        if body is None:
+            self.report({'ERROR'}, f'{settings.acmd_script} is not in {os.path.basename(path)}')
+            return {'CANCELLED'}
+        files = _effect_files(settings)
+        effects = [e for e in acmd.read(body) if not self.cut or e['frame'] < self.cut]
+
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        scene = context.scene
+        keep = scene.frame_current
+        collection = bpy.data.collections.new(f'FX {settings.acmd_script}')
+        scene.collection.children.link(collection)
+        missing, made = [], 0
+        for e in effects:
+            name = e['name'].upper()
+            eff = next((f for f in files if name in _effects_in(settings, f)), None)
+            bone = _pose_bone(armature, e['bone'])
+            if eff is None or bone is None:
+                missing.append(name if eff is None else f'{name} (bone {e["bone"]})')
+                continue
+            frame = self.start + int(round(e['frame']))
+            empty = bpy.data.objects.new(f'{settings.acmd_script} {int(e["frame"])} {name}', None)
+            empty.empty_display_type = 'ARROWS'
+            empty.empty_display_size = 2.0
+            collection.objects.link(empty)
+            local = _local(e)
+            if e['follow']:
+                con = empty.constraints.new('CHILD_OF')
+                con.target = armature
+                con.subtarget = bone.name
+                con.inverse_matrix = Matrix.Identity(4)
+                con.set_inverse_pending = False
+                if e['follow'] == 'pos':
+                    con.use_rotation_x = con.use_rotation_y = con.use_rotation_z = False
+                    scene.frame_set(frame)
+                    turn = (armature.matrix_world @ bone.matrix).to_quaternion().to_matrix().to_4x4()
+                    local = turn @ local
+                empty.matrix_basis = local
+            else:
+                scene.frame_set(frame)
+                world = armature.matrix_world @ bone.matrix @ local
+                if e['grounded']:
+                    ground = _pose_bone(armature, 'top')
+                    world.translation.z = (armature.matrix_world @ ground.matrix).translation.z
+                empty.matrix_world = world
+            fx = empty.smash_fx
+            fx.enabled = True
+            fx.eff = eff
+            fx.effect = name
+            fx.start = frame
+            fx.rate = e['rate']
+            fx.colour = e['colour']
+            if e['stop'] is not None:
+                fx.use_stop = True
+                fx.stop = self.start + int(round(e['stop']))
+            made += 1
+        scene.frame_set(keep)
+        fps = scene.render.fps / scene.render.fps_base
+        if abs(fps - 60) > 0.01:
+            self.report({'WARNING'}, f'The scene runs at {fps:g} fps; Smash animations and effects are 60')
+        if missing:
+            self.report({'WARNING'}, f'{made} effects placed; not found: {", ".join(missing)}')
+        else:
+            self.report({'INFO'}, f'{made} effects placed')
+        return {'FINISHED'}
+
+
+classes += (SUB_OP_smash_fx_import_acmd,)

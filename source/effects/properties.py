@@ -76,6 +76,20 @@ def _sources(self, context):
     return _SOURCE_ITEMS
 
 
+_SCRIPT_ITEMS = []
+
+
+def _acmd_scripts(self, context):
+    from . import acmd
+    try:
+        text = open(bpy.path.abspath(self.acmd_file), encoding='utf-8', errors='replace').read()
+        names = acmd.scripts(text)
+    except OSError:
+        names = []
+    _SCRIPT_ITEMS[:] = [(n, n, '') for n in names] or [('NONE', 'No effect scripts', '')]
+    return _SCRIPT_ITEMS
+
+
 class SUB_PG_smash_fx_settings(PropertyGroup):
     forge: StringProperty(name='EffectForge', subtype='FILE_PATH', default=forge.DEFAULT_FORGE,
                           description='The effect_forge program that draws the effects')
@@ -93,6 +107,10 @@ class SUB_PG_smash_fx_settings(PropertyGroup):
                                  description="Lay the baked effects over the camera view in the viewport")
     composite: BoolProperty(name='Composite', default=True,
                             description="Lay the baked effects over the render in the compositor")
+
+    acmd_file: StringProperty(name='Script', subtype='FILE_PATH',
+                              description="A move's effect script: smashline Rust or a dumped ACMD script")
+    acmd_script: EnumProperty(name='Move', items=_acmd_scripts, description='The effect script to place')
 
     listed: CollectionProperty(type=SUB_PG_smash_fx_listed)
     listed_eff: StringProperty()
