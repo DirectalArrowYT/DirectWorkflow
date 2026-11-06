@@ -1655,6 +1655,17 @@ def _export_model_anim_fast(context, operator: bpy.types.Operator, arma: bpy.typ
     # Done!
     save_ssbh_anim_data(ssbh_anim_data, filepath, operator) 
                 
+def camera_vertical_fov(scene: bpy.types.Scene, camera_data: bpy.types.Camera) -> float:
+    # Smash's FieldOfView is the vertical angle of the picture; Blender's angle_y only is one with a vertical sensor fit
+    r = scene.render
+    width, height = r.resolution_x * r.pixel_aspect_x, r.resolution_y * r.pixel_aspect_y
+    fit = camera_data.sensor_fit
+    if fit == 'AUTO':
+        fit = 'HORIZONTAL' if width >= height else 'VERTICAL'
+    if fit == 'VERTICAL':
+        return camera_data.angle_y
+    return 2.0 * math.atan(math.tan(camera_data.angle_x / 2.0) * height / width)
+
 def export_camera_anim(context, operator, camera: bpy.types.Object, filepath, first_blender_frame, last_blender_frame, transform_compensate_scale: bool = False, transform_override_translation: bool = False, transform_override_rotation: bool = False, transform_override_scale: bool = False, transform_override_compensate_scale: bool = False):
     ssbh_anim_data = ssbh_data_py.anim_data.AnimData()
     ssbh_anim_data.final_frame_index = last_blender_frame - first_blender_frame
@@ -1681,7 +1692,7 @@ def export_camera_anim(context, operator, camera: bpy.types.Object, filepath, fi
     )
     for index, frame in enumerate(range(first_blender_frame, last_blender_frame + 1)):
         context.scene.frame_set(frame)
-        track_name_to_track['FieldOfView'].values.append(camera.data.angle_y)
+        track_name_to_track['FieldOfView'].values.append(camera_vertical_fov(context.scene, camera.data))
         track_name_to_track['FarClip'].values.append(camera.data.clip_end)
         track_name_to_track['NearClip'].values.append(camera.data.clip_start)
         fixed_matrix = camera.matrix_local.copy()

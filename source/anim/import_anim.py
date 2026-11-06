@@ -1629,6 +1629,8 @@ def import_camera_anim(operator, context:bpy.types.Context, filepath, first_blen
     assign_action(camera.animation_data, action)
     camera.matrix_local.identity()
     camera.rotation_mode = 'QUATERNION'
+    # Smash's FieldOfView is the vertical angle; Blender's angle_y only is one with a vertical sensor fit
+    camera.data.sensor_fit = 'VERTICAL'
 
     for index, frame in enumerate(range(scene.frame_start, scene.frame_end+1)):
         scene.frame_set(frame)
@@ -1679,7 +1681,10 @@ def update_camera_properties(operator: bpy.types.Operator, camera:bpy.types.Obje
             operator.report({'WARNING'}, f'Unsupported track {track.name} in camera group, skipping!')
 
 def update_camera_transforms(camera: bpy.types.Object, transform_group, index, frame):
-    value = transform_group.nodes[0].tracks[0].values[index]
+    # The game moves the camera by 'gya_camera'; some files (Simon's visualscene) put a still 'Camera_Root' first
+    node = next((n for n in transform_group.nodes if n.name == 'gya_camera'), transform_group.nodes[0])
+    values = node.tracks[0].values
+    value = values[min(index, len(values) - 1)]   # a still camera stores one value
     translation =  Matrix.Translation(value.translation)
     quaternion = Quaternion([value.rotation[3], value.rotation[0], value.rotation[1], value.rotation[2]])
     rotation = Matrix.Rotation(quaternion.angle, 4, quaternion.axis)
