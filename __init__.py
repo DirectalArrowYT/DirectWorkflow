@@ -54,6 +54,10 @@ def register():
     from .source import bake_texs
     bake_texs.register()
 
+    # Smash effects: empties baked by EffectForge, laid over the camera and the render
+    from .source import effects
+    effects.register()
+
     # User-level ParamLabels.csv (%APPDATA%/Smash Ultimate Labels), so hash
     # names resolve without editing the copy bundled in dependencies/pyprc.
     try:
@@ -130,6 +134,9 @@ def unregister():
     # Unregister the texture baking panel
     from .source import bake_texs
     bake_texs.unregister()
+
+    from .source import effects
+    effects.unregister()
 
     # Unregister updater components
     from .source import updater

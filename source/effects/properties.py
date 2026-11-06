@@ -1,0 +1,120 @@
+import os
+
+import bpy
+from bpy.types import PropertyGroup
+from bpy.props import (
+    BoolProperty, CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty,
+    IntProperty, PointerProperty, StringProperty,
+)
+
+from . import forge
+
+
+class SUB_PG_smash_fx_listed(PropertyGroup):
+    """One effect of the listed .eff file."""
+    layers: IntProperty()
+    length: IntProperty()
+    loops: BoolProperty()
+
+
+def refresh_list(settings, eff):
+    """List the effects of an .eff file into the scene's list, unless it holds them already."""
+    path = os.path.normpath(bpy.path.abspath(eff)) if eff else ''
+    if path == settings.listed_eff:
+        return
+    settings.listed.clear()
+    settings.listed_eff = path
+    settings.list_error = ''
+    if not path:
+        return
+    try:
+        for e in forge.list_effects(forge.forge_path(settings), path):
+            item = settings.listed.add()
+            item.name = e['name']
+            item.layers = e['layers']
+            item.length = int(round(e['length']))
+            item.loops = e['loops']
+    except Exception as e:
+        settings.list_error = str(e)
+
+
+def _eff_changed(self, context):
+    refresh_list(context.scene.sub_smash_fx, self.eff)
+
+
+class SUB_PG_smash_fx(PropertyGroup):
+    """An empty playing a Smash effect: where the empty is, the effect is, its size included."""
+    enabled: BoolProperty(default=False)
+    play: BoolProperty(name='Play', default=True, description='Draw this effect when baking')
+    eff: StringProperty(name='File', subtype='FILE_PATH', update=_eff_changed,
+                        description='The .eff file the effect is in')
+    effect: StringProperty(name='Effect', description="The effect's name in its file")
+    start: IntProperty(name='Start', default=1, description='The frame the effect starts on')
+    use_stop: BoolProperty(name='Stop', default=False,
+                           description="Stop making particles on a frame; the ones already out live on (the game's EFFECT_OFF)")
+    stop: IntProperty(name='Stop Frame', default=30)
+    use_end: BoolProperty(name='End', default=False,
+                          description='Remove the effect, particles and all, on a frame')
+    end: IntProperty(name='End Frame', default=60)
+    rate: FloatProperty(name='Rate', default=1.0, min=0.01, soft_max=4.0,
+                        description="How fast the effect plays: 1 is the game's speed, whatever the scene's frame rate")
+    colour: FloatVectorProperty(name='Colour', subtype='COLOR', size=4, default=(1, 1, 1, 1), min=0.0, soft_max=1.0,
+                                description="Tint and alpha, as a script's LAST_EFFECT_SET_COLOR / _ALPHA")
+    seed: IntProperty(name='Seed', min=0, description='Another seed gives the random parts another roll')
+
+
+_SOURCE_ITEMS = []
+
+
+def _sources(self, context):
+    # Blender needs the list kept alive on the Python side.
+    _SOURCE_ITEMS[:] = [
+        ('common', 'Common', 'effect/system/common: hits, flashes, smoke, fire...'),
+        ('item', 'Item', 'effect/system/item'),
+        ('CUSTOM', 'Custom File', 'Any .eff file, a mod\'s included'),
+    ] + [(name, name, f'effect/fighter/{name}') for name in forge.fighters(self.game_root)]
+    return _SOURCE_ITEMS
+
+
+class SUB_PG_smash_fx_settings(PropertyGroup):
+    forge: StringProperty(name='EffectForge', subtype='FILE_PATH', default=forge.DEFAULT_FORGE,
+                          description='The effect_forge program that draws the effects')
+    game_root: StringProperty(name='Game Files', subtype='DIR_PATH', default=forge.DEFAULT_GAME_ROOT,
+                              description='The extracted data.arc (the folder holding effect/)')
+    source: EnumProperty(name='Source', items=_sources,
+                         description='Where new effects come from')
+    custom_eff: StringProperty(name='File', subtype='FILE_PATH', description='A custom .eff file')
+    out: StringProperty(name='Output', subtype='DIR_PATH', default='//smash_fx/',
+                        description='Where the baked effect frames go')
+    use_shot: BoolProperty(name='Against the Shot', default=False,
+                           description="Draw the effects against a render of the shot (Render Shot Depth): hidden "
+                                       "behind what is in front of them, soft where they meet it, heat haze bending it")
+    show_in_camera: BoolProperty(name='Show in Camera', default=True,
+                                 description="Lay the baked effects over the camera view in the viewport")
+    composite: BoolProperty(name='Composite', default=True,
+                            description="Lay the baked effects over the render in the compositor")
+
+    listed: CollectionProperty(type=SUB_PG_smash_fx_listed)
+    listed_eff: StringProperty()
+    list_error: StringProperty()
+
+
+classes = (
+    SUB_PG_smash_fx_listed,
+    SUB_PG_smash_fx,
+    SUB_PG_smash_fx_settings,
+)
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Object.smash_fx = PointerProperty(type=SUB_PG_smash_fx)
+    bpy.types.Scene.sub_smash_fx = PointerProperty(type=SUB_PG_smash_fx_settings)
+
+
+def unregister():
+    del bpy.types.Scene.sub_smash_fx
+    del bpy.types.Object.smash_fx
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)

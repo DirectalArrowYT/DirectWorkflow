@@ -15,8 +15,9 @@ TAB_ANIM = "Smash Anim"
 TAB_MODEL = "Smash Model"
 TAB_SWING = "Smash Swing"
 TAB_STAGE = "Smash Stage"
+TAB_FX = "Smash FX"
 
-TABS = (TAB_IO, TAB_ANIM, TAB_MODEL, TAB_SWING, TAB_STAGE)
+TABS = (TAB_IO, TAB_ANIM, TAB_MODEL, TAB_SWING, TAB_STAGE, TAB_FX)
 
 # Top-level panels, in order, per tab. Sub-panels follow their parent.
 LAYOUT = {
@@ -61,6 +62,10 @@ LAYOUT = {
     ),
     TAB_STAGE: (
         "SUB_PT_stage_tools",
+    ),
+    TAB_FX: (
+        "SUB_PT_smash_fx",
+        "SUB_PT_smash_fx_bake",
     ),
 }
 
