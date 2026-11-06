@@ -96,7 +96,9 @@ class SUB_PT_smash_fx_bake(Panel):
         count = len(forge.effect_objects(scene))
         layout.label(text=f'{count} effect{"" if count == 1 else "s"}, frames {scene.frame_start}-{scene.frame_end}')
         layout.prop(settings, 'out')
+        layout.prop(settings, 'geometry')
         row = layout.row(align=True)
+        row.active = not settings.geometry
         row.prop(settings, 'show_in_camera', toggle=True)
         row.prop(settings, 'composite', toggle=True)
 
@@ -107,8 +109,11 @@ class SUB_PT_smash_fx_bake(Panel):
         col.prop(settings, 'light_strength')
         col.prop(settings, 'light_size')
         col.prop(settings, 'light_shadows')
-        layout.prop(settings, 'cards')
+        row = layout.row()
+        row.active = not settings.geometry
+        row.prop(settings, 'cards')
         box = layout.box()
+        box.active = not settings.geometry
         box.prop(settings, 'bloom')
         col = box.column(align=True)
         col.active = settings.bloom and settings.composite

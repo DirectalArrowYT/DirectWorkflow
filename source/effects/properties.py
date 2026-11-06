@@ -133,6 +133,12 @@ class SUB_PG_smash_fx_settings(PropertyGroup):
     cards: BoolProperty(name='In Reflections', default=True,
                         description="Stand a card per effect in the shot when baking, so effects are seen in "
                                     "reflections and through glass (Cycles; EEVEE through light probes)")
+    geometry: BoolProperty(name='As Geometry', default=False,
+                           description="Bake the effects as meshes standing in the shot instead of laying them over "
+                                       "the render: Cycles lights the shot by them, shows them in reflections and "
+                                       "through glass, and blurs them with depth of field. Takes the place of "
+                                       "Composite, Show in Camera and In Reflections. With Light the Shot on too, "
+                                       "the meshes still glow but leave lighting the shot directly to the lights")
     light_shadows: BoolProperty(name='Shadows', default=True,
                                 description='Effect lights cast shadows',
                                 update=_lights_changed)

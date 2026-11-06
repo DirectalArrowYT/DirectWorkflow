@@ -84,6 +84,7 @@ def composite(scene, out, frames):
         over.location = (final.node.location.x - 220, final.node.location.y)
         tree.links.new(before, over.inputs[0])
         tree.links.new(over.outputs[0], final)
+    over.mute = False
     if 'Straight Alpha' in over.inputs:
         over.inputs['Straight Alpha'].default_value = False
     elif hasattr(over, 'use_premultiply'):
@@ -147,7 +148,7 @@ def tune_bloom(scene):
     if glare is None or add is None:
         return
     settings = scene.sub_smash_fx
-    glare.mute = add.mute = not settings.bloom
+    glare.mute = add.mute = not settings.bloom or settings.geometry
     if 'Type' in glare.inputs:
         glare.inputs['Type'].default_value = 'Bloom'
         glare.inputs['Quality'].default_value = 'High'
@@ -176,3 +177,17 @@ def show_in_cameras(cameras, out, frames):
         bg.alpha = 1.0
         bg.image_user.use_auto_refresh = True
         _place(bg.image_user, frames)
+
+
+def remove(scene, cameras):
+    """Stop laying the baked frames over the render and the camera view: the compositor nodes are muted (passing the
+    render through) and the camera backgrounds taken off. Compositing again unmutes them."""
+    tree = scene.compositing_node_group if hasattr(scene, 'compositing_node_group') else scene.node_tree
+    for name in (OVER, GLARE, ADD):
+        node = tree.nodes.get(name) if tree else None
+        if node is not None:
+            node.mute = True
+    for cam in cameras:
+        backgrounds = cam.data.background_images
+        for bg in [b for b in backgrounds if b.image and b.image.name == PREVIEW_IMAGE]:
+            backgrounds.remove(bg)

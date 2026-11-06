@@ -11,7 +11,7 @@ from bpy.types import Operator
 from bpy.props import BoolProperty, IntProperty
 from mathutils import Euler, Matrix
 
-from . import acmd, cards, forge, layering, lights
+from . import acmd, cards, forge, geometry, layering, lights
 from .properties import refresh_list
 
 
@@ -176,7 +176,8 @@ class SUB_OP_smash_fx_bake(Operator):
         scene.frame_set(keep)
         try:
             data = forge.build_scene(context, frames, out, shots, preview=settings.show_in_camera,
-                                     lights=settings.lights, cards=settings.cards)
+                                     lights=settings.lights, cards=settings.cards and not settings.geometry,
+                                     geometry=settings.geometry)
         except RuntimeError as e:
             self.report({'ERROR'}, str(e))
             return False
@@ -190,10 +191,11 @@ class SUB_OP_smash_fx_bake(Operator):
         stale = os.path.join(out, 'lights.json')
         if os.path.isfile(stale):
             os.remove(stale)
-        old_cards = os.path.join(out, 'cards')
-        for name in os.listdir(old_cards) if os.path.isdir(old_cards) else ():
-            if name.startswith('card_') and name.endswith('.exr'):
-                os.remove(os.path.join(old_cards, name))
+        for folder, prefixes in (('cards', ('card_',)), ('geo', ('geo_', 'atlas_'))):
+            old = os.path.join(out, folder)
+            for name in os.listdir(old) if os.path.isdir(old) else ():
+                if name.startswith(prefixes) and name.endswith(('.exr', '.bin')):
+                    os.remove(os.path.join(old, name))
         self._log = []
         self._process = subprocess.Popen([exe, 'render-scene', scene_file], stdout=subprocess.PIPE,
                                          stderr=subprocess.STDOUT, text=True)
@@ -232,24 +234,33 @@ class SUB_OP_smash_fx_bake(Operator):
             self.report({'ERROR'}, 'EffectForge failed: ' + ' | '.join(tail))
             return {'CANCELLED'}
         settings = context.scene.sub_smash_fx
-        made = stood = 0
+        made = stood = shaped = 0
         if settings.lights:
             made = lights.apply(context.scene, self._out, self._names)
         else:
             lights.clear(context.scene)
-        if settings.cards:
-            stood = cards.apply(context.scene, self._out, self._names)
-        else:
+        if settings.geometry:
+            # The meshes are the effects in the shot: nothing laid over it, no cards beside them.
+            shaped = geometry.apply(context.scene, self._out, self._names, light_by_emission=not settings.lights)
             cards.clear(context.scene)
-        if settings.composite:
-            layering.composite(context.scene, self._out, self._frames)
-        if settings.show_in_camera:
-            layering.show_in_cameras(self._cameras, self._out, self._frames)
+            layering.remove(context.scene, self._cameras)
+        else:
+            geometry.clear(context.scene)
+            if settings.cards:
+                stood = cards.apply(context.scene, self._out, self._names)
+            else:
+                cards.clear(context.scene)
+            if settings.composite:
+                layering.composite(context.scene, self._out, self._frames)
+            if settings.show_in_camera:
+                layering.show_in_cameras(self._cameras, self._out, self._frames)
         done = self._log[-1] if self._log else 'Baked'
         if made:
             done += f', {made} effect light{"" if made == 1 else "s"}'
         if stood:
             done += f', {stood} card{"" if stood == 1 else "s"}'
+        if shaped:
+            done += f', {shaped} effect mesh{"" if shaped == 1 else "es"}'
         self.report({'INFO'}, done)
         return {'FINISHED'}
 
