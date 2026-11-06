@@ -329,6 +329,7 @@ _LISTS = {}
 
 def _effects_in(settings, eff):
     """The effect names of an .eff, upper case, listed once per session."""
+    eff = bpy.path.abspath(eff)
     if eff not in _LISTS:
         try:
             _LISTS[eff] = {e['name'].upper(): e for e in forge.list_effects(forge.forge_path(settings), eff)}
@@ -343,11 +344,12 @@ def _effect_files(settings):
     files = []
     if settings.source == 'CUSTOM':
         if settings.custom_eff:
-            files.append(bpy.path.abspath(settings.custom_eff))
+            files.append(settings.custom_eff)
     elif settings.source not in ('common', 'item'):
         files.append(forge.vanilla_eff(settings.game_root, settings.source))
     files += [forge.vanilla_eff(settings.game_root, 'common'), forge.vanilla_eff(settings.game_root, 'item')]
-    return [f for f in files if os.path.isfile(f)]
+    # Stored as given (// paths stay relative to the blend), so the shot can move with its files.
+    return [f for f in files if os.path.isfile(bpy.path.abspath(f))]
 
 
 def _pose_bone(armature, name):

@@ -33,7 +33,8 @@ def out_dir(settings):
 
 def vanilla_eff(game_root, source):
     """The .eff of a vanilla source: 'common', 'item' or a fighter's folder name."""
-    root = bpy.path.abspath(game_root)
+    # Kept as given, so a blend-relative root (//game) stays relative in what is stored.
+    root = game_root
     if source == 'common':
         return os.path.join(root, 'effect', 'system', 'common', 'ef_common.eff')
     if source == 'item':
