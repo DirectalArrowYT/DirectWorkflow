@@ -251,7 +251,13 @@ def check_material(material):
 
     nor, _nor_src = map_pixels(material, 'Texture4', '_nor')
     if nor is not None and uv is not None:
-        cav = stats(sample(nor, uv)[:, 3])
+        nor_s = sample(nor, uv)
+        cav, trans = stats(nor_s[:, 3]), stats(nor_s[:, 2])
+        if kind not in ('EYE', 'UNLIT') and trans[2] - trans[0] < 0.05:
+            flag('transition_flat', 'INFO',
+                 f"NOR.b (transition) is one flat value ({trans[1]:.2f}) - vanilla spreads it "
+                 f"0.15-0.98, so a Metal Box or metal ditto sweeps across in patches instead of "
+                 f"switching all at once. Add Transition Map makes one")
         if kind == 'SKIN' and cav[0] > 0.995:
             flag('cavity_flat', 'INFO',
                  "NOR.a (cavity) is 1.0 everywhere - Mario's and Sephiroth's skin darken "

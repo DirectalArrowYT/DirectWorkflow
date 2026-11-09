@@ -37,7 +37,7 @@ from bpy.props import BoolProperty, EnumProperty
 from mathutils import Vector
 
 MASTER_NAME = "HB Master Shader"
-MASTER_VERSION = 5
+MASTER_VERSION = 6
 VERSION_KEY = "hb_master_version"
 
 # Names the baker keys off. BAKE_SHADER is core.OVERRIDE_NODE_SHADER.
@@ -48,11 +48,16 @@ BAKE_COLOR_NAME = "HB_BakeColor"
 ROUGH_FINAL_NAME = "HB_Roughness_Final"
 SPEC_FINAL_NAME = "HB_Specular_Final"
 CAVITY_FINAL_NAME = "HB_Cavity_Final"
+TRANSITION_FINAL_NAME = "HB_Transition_Final"
 DETAIL_AMOUNTS = ("Roughness Variation", "Specular Variation", "Edge Wear", "Mesh Cavity")
 
 # Cycles drops closures below 1e-5, and a near-black albedo times this is still
 # well clear of that. Visually it is invisible next to the toon emission.
 PBR_CARRIER_WEIGHT = 0.02
+
+# Transition noise Fac (Detail 2) sits mostly in this range; stretched to
+# 0.1-1.0 it lands near vanilla NOR.b's spread (5%-95% about 0.2-0.95).
+TRANSITION_NOISE_RANGE = (0.3, 0.7)
 
 
 # =============================================================================
@@ -196,6 +201,15 @@ INTERFACE = [
         _S("Transition Blend", F, 1.0, 0.0, 1.0, True,
            "NOR.b. Where the material transition (ditto metal, gold) starts first. "
            "TextureCraft: Sheen color"),
+        _S("Transition Noise", F, 0.0, 0.0, 1.0, True,
+           "Blends Transition Blend toward vanilla-style large 3D noise, so the transition "
+           "spreads across the model in patches the way it does on vanilla fighters. "
+           "Baked into NOR.b. Add Transition Map turns it on"),
+        _S("Transition Size", F, 3.0, 0.0, 1000.0,
+           desc="Size of the transition patches in scene units. Add Transition Map sets it "
+                "from the mesh size"),
+        _S("Transition Seed", F, 0.0, -1000.0, 1000.0,
+           desc="Picks a different transition pattern"),
     ]),
     ("Surface Detail", True, [
         _S("Roughness Variation", F, 0.0, 0.0, 1.0, True,
@@ -230,6 +244,9 @@ INTERFACE = [
                 "View 4 only"),
         _S("Game Ambient", C, (0.4, 0.4, 0.45, 1.0),
            desc="Ambient (diffuse and reflection) light. View 4 only"),
+        _S("Transition Preview", F, 0.0, 0.0, 1.0, True,
+           "The in-game transition factor: texels whose NOR.b is above 1 - this turn to "
+           "metal, as they would under a Metal Box or a metal ditto. View 4 only"),
     ]),
 ]
 OUTPUT_NAME = "Shader"
@@ -678,6 +695,30 @@ def _build_nodes(ng):
                     label="Cavity (final)")
     cavity.node.name = CAVITY_FINAL_NAME
 
+    # Transition: vanilla NOR.b is large soft 3D noise in model space spread over
+    # roughly 0.15-0.98 (median ~0.55), so the switch sweeps across in patches.
+    t_inv = g.math('DIVIDE', -2100, 900, 1.0, gdet("Transition Size"), frame=f_det,
+                   label="1 / transition size")
+    t_coord = g.vmath('SCALE', -1900, 900, pos.outputs["Position"], frame=f_det)
+    g.link(t_inv, t_coord.node.inputs["Scale"])
+    t_noise = g.add("ShaderNodeTexNoise", -1700, 900, "Transition noise", frame=f_det,
+                    noise_dimensions='4D')
+    g.link(t_coord, t_noise.inputs["Vector"])
+    g.link(gdet("Transition Seed"), _inp(t_noise, "W"))
+    _inp(t_noise, "Scale").default_value = 1.0
+    _inp(t_noise, "Detail").default_value = 2.0
+    _inp(t_noise, "Roughness").default_value = 0.5
+    t_spread = g.add("ShaderNodeMapRange", -1500, 900, "Noise -> vanilla spread", frame=f_det,
+                     data_type='FLOAT', clamp=True)
+    g.link(t_noise.outputs["Fac"], _inp(t_spread, "Value"))
+    _inp(t_spread, "From Min").default_value = TRANSITION_NOISE_RANGE[0]
+    _inp(t_spread, "From Max").default_value = TRANSITION_NOISE_RANGE[1]
+    _inp(t_spread, "To Min").default_value = 0.1
+    _inp(t_spread, "To Max").default_value = 1.0
+    trans = g.mix('FLOAT', 'MIX', -1300, 900, gdet("Transition Noise"), gb("Transition Blend"),
+                  _out(t_spread, "Result"), frame=f_det, label="Transition (final)")
+    trans.node.name = TRANSITION_FINAL_NAME
+
     bsdf = g.add("ShaderNodeBsdfPrincipled", -150, 1300, "Smash bake data (PBR)",
                  name=BAKE_SHADER_NAME, frame=f_bake)
     g.link(col, bsdf.inputs["Base Color"])
@@ -772,6 +813,28 @@ def _build_nodes(ng):
     game_emit = g.vmath('SCALE', 2900, 1500, gg("Emission Color"), frame=f_game)
     g.link(gg("Emission Strength"), game_emit.node.inputs["Scale"])
     game = g.vmath('ADD', 3050, 1650, game, game_emit, frame=f_game, label="Game")
+
+    # Transition preview: NOR.b above 1 - factor switches to the transition
+    # material. Shown as a plain polished metal, which is what most look like.
+    t_amt = gg("Transition Preview")
+    t_thresh = g.math('SUBTRACT', 2600, 2300, 1.0, t_amt, frame=f_game)
+    t_on = g.math('GREATER_THAN', 2750, 2300, trans, t_thresh, frame=f_game)
+    t_any = g.math('GREATER_THAN', 2750, 2450, t_amt, 0.001, frame=f_game)
+    t_on = g.math('MULTIPLY', 2900, 2300, t_on, t_any, frame=f_game, label="Transitioned")
+    m_light = g.math('MULTIPLY_ADD', 2600, 2150, lambert, 0.5, 0.25, frame=f_game)
+    m_key = g.vmath('SCALE', 2750, 2150, gg("Game Light"), frame=f_game)
+    g.link(m_light, m_key.node.inputs["Scale"])
+    m_amb = g.vmath('SCALE', 2750, 2000, gg("Game Ambient"), frame=f_game)
+    _inp(m_amb.node, "Scale").default_value = 0.8
+    m_irr = g.vmath('ADD', 2900, 2100, m_key, m_amb, frame=f_game)
+    m_col = g.vmath('MULTIPLY', 3050, 2100, m_irr, (0.42, 0.44, 0.48), frame=f_game)
+    m_hi = g.math('POWER', 3050, 1950, ndh_g, 40.0, frame=f_game, label="Metal highlight")
+    m_hi_c = g.vmath('SCALE', 3200, 1950, gg("Game Light"), frame=f_game)
+    g.link(m_hi, m_hi_c.node.inputs["Scale"])
+    metal_look = g.vmath('ADD', 3200, 2100, m_col, m_hi_c, frame=f_game,
+                         label="Transition metal (approx.)")
+    game = g.mix('RGBA', 'MIX', 3350, 1800, t_on, game, metal_look, frame=f_game,
+                 label="Game + transition")
 
     # --- OUTPUT ----------------------------------------------------------------------
     view = gi_out.outputs["View"]
@@ -950,6 +1013,7 @@ DETAIL_PRESETS = {
     'UNLIT': {"Roughness Variation": 0.0,  "Specular Variation": 0.0,  "Edge Wear": 0.0,  "Mesh Cavity": 0.0},
 }
 # Fractions of the character's height.
+TRANSITION_SIZE_OF_HEIGHT = 0.15
 DETAIL_SIZE_OF_HEIGHT = 0.01
 CAVITY_DISTANCE_OF_HEIGHT = 0.012
 
@@ -986,6 +1050,21 @@ def apply_surface_detail(material, node, amount=1.0, height=None):
             sock = node.inputs.get(name)
             if sock is not None and not sock.is_linked:
                 sock.default_value = round(height * fraction, 5)
+    return kind
+
+
+def apply_transition_map(material, node, amount=1.0, height=None, seed=0.0):
+    """Turn the transition noise on for one instance. Eyes get vanilla's flat 0."""
+    kind = surface_kind(material, node)
+    values = {"Transition Noise": min(1.0, amount), "Transition Seed": seed}
+    if kind == 'EYE':
+        values = {"Transition Noise": 0.0, "Transition Blend": 0.0}
+    elif height:
+        values["Transition Size"] = round(height * TRANSITION_SIZE_OF_HEIGHT, 4)
+    for name, value in values.items():
+        sock = node.inputs.get(name)
+        if sock is not None and not sock.is_linked:
+            sock.default_value = value
     return kind
 
 
@@ -1353,6 +1432,9 @@ class SUB_OP_hb_game_preview(Operator):
                ('0', "Toon", "Back to the toon look"),
                ('3', "PBR", "Blender PBR preview of the bake data")),
         default='4')
+    transition: bpy.props.FloatProperty(
+        name='Transition', default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        description='Preview the in-game transition (Metal Box, metal ditto) at this factor')
 
     def execute(self, context):
         if MASTER_NAME in bpy.data.node_groups:
@@ -1370,12 +1452,61 @@ class SUB_OP_hb_game_preview(Operator):
                 sock = node.inputs.get("View")
                 if sock is not None and not sock.is_linked:
                     sock.default_value = int(self.view)
+                sock = node.inputs.get("Transition Preview")
+                if sock is not None and not sock.is_linked:
+                    sock.default_value = self.transition if self.view == '4' else 0.0
             count += 1
         if not count:
             self.report({'WARNING'}, "No HB Master materials in this file")
             return {'CANCELLED'}
         extra = f", SSS from material data on {skin}" if self.view == '4' else ""
         self.report({'INFO'}, f"View {self.view} on {count} material(s){extra}")
+        return {'FINISHED'}
+
+
+class SUB_OP_hb_transition_map(Operator):
+    """Give the selected meshes' HB Master materials a vanilla-style transition map (NOR.b)"""
+    bl_idname = 'sub.hb_transition_map'
+    bl_label = 'Add Transition Map'
+    bl_description = (
+        'Fill NOR.b of the selected meshes\' HB Master materials with large 3D noise like '
+        'vanilla fighters, so Metal Box, gold and metal-ditto transitions sweep across in '
+        'patches instead of all at once. Eyes get 0 as in vanilla. Preview it with '
+        'Game Preview and the node\'s Transition Preview input'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    amount: bpy.props.FloatProperty(
+        name='Amount', default=1.0, min=0.0, max=1.0,
+        description='How far NOR.b goes from Transition Blend to the noise; 0 turns it off')
+    seed: bpy.props.FloatProperty(
+        name='Seed', default=0.0, description='Picks a different pattern')
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects)
+
+    def execute(self, context):
+        ng = bpy.data.node_groups.get(MASTER_NAME)
+        if ng is None or ng.get(VERSION_KEY, 0) < MASTER_VERSION:
+            build_master_group()
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        height = character_height(meshes)
+        done, eyes, seen = [], [], set()
+        for obj in meshes:
+            for slot in obj.material_slots:
+                mat = slot.material
+                if mat is None or mat.name in seen:
+                    continue
+                seen.add(mat.name)
+                for node in master_nodes(mat):
+                    kind = apply_transition_map(mat, node, self.amount, height, self.seed)
+                    (eyes if kind == 'EYE' else done).append(mat.name)
+        if not done and not eyes:
+            self.report({'WARNING'}, "No HB Master materials on the selected meshes")
+            return {'CANCELLED'}
+        extra = f", eyes set to 0: {', '.join(eyes)}" if eyes else ""
+        self.report({'INFO'}, f"Transition map on {len(done)} material(s){extra}")
         return {'FINISHED'}
 
 
@@ -1405,6 +1536,7 @@ class SUB_PT_hb_master_shader(Panel):
         layout.operator_menu_enum('sub.hb_master_shader_preset', 'preset',
                                   text='Apply Preset to Active Material', icon='PRESET')
         layout.operator('sub.hb_surface_detail', icon='TEXTURE')
+        layout.operator('sub.hb_transition_map', icon='MOD_WAVE')
         row = layout.row(align=True)
         row.operator('sub.hb_game_preview', text='Game Preview', icon='SHADING_RENDERED').view = '4'
         row.operator('sub.hb_game_preview', text='Toon', icon='SHADING_SOLID').view = '0'

@@ -1296,7 +1296,7 @@ def scalar_from_instance(group_node, outer_path, socket_name, default):
     return (float(const[0]) if const is not None else default), False
 
 def hb_detail_channels(hb, path, outer):
-    """Surface Detail on an HB Master instance: {'rough'|'spec'|'nor_a': Channel}.
+    """Surface Detail on an HB Master instance: {'rough'|'spec'|'nor_a'|'nor_b': Channel}.
 
     Each entry is the group's own final value, baked through a tap, and only
     appears when a detail amount that feeds it is on - otherwise the plain
@@ -1311,6 +1311,7 @@ def hb_detail_channels(hb, path, outer):
         'rough': (ms.ROUGH_FINAL_NAME, amounts["Roughness Variation"] or amounts["Edge Wear"]),
         'spec': (ms.SPEC_FINAL_NAME, amounts["Specular Variation"] or amounts["Edge Wear"]),
         'nor_a': (ms.CAVITY_FINAL_NAME, amounts["Mesh Cavity"]),
+        'nor_b': (ms.TRANSITION_FINAL_NAME, on("Transition Noise")),
     }
     found = {}
     for key, (node_name, active) in wanted.items():
@@ -1550,8 +1551,9 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
                 rough = detail['rough']
             if 'spec' in detail and not ctx.prm_alpha_is_rotation:
                 spec = detail['spec']
-            if 'nor_a' in detail:
-                ch['nor_a'] = detail['nor_a']
+            for key in ('nor_a', 'nor_b'):
+                if key in detail:
+                    ch[key] = detail[key]
             emi = channel_from_instance(hb, outer, "Emission Color", f"{label} Emission Color")
             strength, textured = scalar_from_instance(hb, outer, "Emission Strength", 1.0)
             if strength <= 0.0 or emi.mode == 'NONE' or (

@@ -104,6 +104,10 @@ def _load_or_refresh_image(filepath, name, colorspace):
     the file and reloading), rather than piling up Body_col.001, .002, ... on
     every re-bake.
     """
+    # A packed image keeps its packed pixels whatever the filepath says, so a
+    # re-apply would silently show the old bake. Same rule as TextureCraft.
+    from .texturecraft import free_image_name
+    free_image_name(name, filepath)
     existing = bpy.data.images.get(name)
     if existing is not None:
         existing.filepath = filepath
