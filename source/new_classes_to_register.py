@@ -394,7 +394,11 @@ classes = [
     source.bake_texs.master_shader.SUB_OP_hb_master_shader_update,
     source.bake_texs.master_shader.SUB_OP_hb_master_shader_convert,
     source.bake_texs.master_shader.SUB_OP_hb_master_shader_preset,
+    source.bake_texs.master_shader.SUB_OP_hb_surface_detail,
     source.bake_texs.master_shader.SUB_PT_hb_master_shader,
+    source.bake_texs.vanilla_check.SUB_OP_hb_vanilla_check,
+    source.bake_texs.vanilla_check.SUB_OP_hb_vanilla_intended,
+    source.bake_texs.vanilla_check.SUB_PT_hb_vanilla_check,
     source.bake_texs.hair_strands.SUB_OP_hb_hair_strands_add,
 ]
 

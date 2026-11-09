@@ -27,6 +27,7 @@ from . import ui
 from . import master_shader
 from . import hair_strands
 from . import texturecraft
+from . import vanilla_check
 
 CLASSES = (
     properties.SUB_PG_bake_texs_settings,
@@ -45,7 +46,11 @@ CLASSES = (
     master_shader.SUB_OP_hb_master_shader_update,
     master_shader.SUB_OP_hb_master_shader_convert,
     master_shader.SUB_OP_hb_master_shader_preset,
+    master_shader.SUB_OP_hb_surface_detail,
     master_shader.SUB_PT_hb_master_shader,
+    vanilla_check.SUB_OP_hb_vanilla_check,
+    vanilla_check.SUB_OP_hb_vanilla_intended,
+    vanilla_check.SUB_PT_hb_vanilla_check,
     hair_strands.SUB_OP_hb_hair_strands_add,
 )
 

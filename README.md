@@ -67,6 +67,11 @@ Install `dist/hb_smash_pbr.zip` from Edit > Preferences > Add-ons > Install from
 - With both add-ons enabled, whichever loads first provides the panels and the other stays off.
 - The code lives in `source/bake_texs`; the build copies it, so edit it there and rebuild.
 
+Two tools on top of the bake:
+
+- **Add Surface Detail** (Master Shader panel) varies roughness and specular, wears edges and darkens creases on the selected meshes' HB Master materials. Amounts are picked per surface (skin, hair, cloth, shiny, metal) and sized from the mesh; tweak them under the node's *Surface Detail* inputs. It all bakes into PRM.g, PRM.a and NOR.a, and with every amount at 0 the bake is unchanged.
+- **Check Against Vanilla** (Vanilla Check panel) compares each material's PRM, NOR and subsurface values with the same kind of surface on Sephiroth, Pyra, Mythra and Mario, and lists what falls outside, also in the *HB Vanilla Check* text. Mark a warning intended (for example an anime hard shadow from a high CustomVector30.y) and it stays listed but greyed out.
+
 ## Installation
 Check the [wiki](https://github.com/ssbucarlos/smash-ultimate-blender/wiki) for tutorials and usage instructions. 
 1. Select a version

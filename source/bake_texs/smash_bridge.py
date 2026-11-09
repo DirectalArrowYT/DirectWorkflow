@@ -102,6 +102,8 @@ class _RawCollection:
 
 
 def _wrap(value):
+    if isinstance(value, bpy.types.ID):
+        return value  # e.g. a texture slot's image: an ID, not a nested group
     if hasattr(value, 'keys'):
         return _RawGroup(value)
     if isinstance(value, (list, tuple)) and value and hasattr(value[0], 'keys'):

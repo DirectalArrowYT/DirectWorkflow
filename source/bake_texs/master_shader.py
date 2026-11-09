@@ -37,12 +37,18 @@ from bpy.props import BoolProperty, EnumProperty
 from mathutils import Vector
 
 MASTER_NAME = "HB Master Shader"
-MASTER_VERSION = 3
+MASTER_VERSION = 4
 VERSION_KEY = "hb_master_version"
 
 # Names the baker keys off. BAKE_SHADER is core.OVERRIDE_NODE_SHADER.
 BAKE_SHADER_NAME = "BAKE_SHADER"
 BAKE_COLOR_NAME = "HB_BakeColor"
+# The PRM/NOR values after Surface Detail. The baker reads these instead of the
+# instance sockets once any detail is on (core.hb_detail_active).
+ROUGH_FINAL_NAME = "HB_Roughness_Final"
+SPEC_FINAL_NAME = "HB_Specular_Final"
+CAVITY_FINAL_NAME = "HB_Cavity_Final"
+DETAIL_AMOUNTS = ("Roughness Variation", "Specular Variation", "Edge Wear", "Mesh Cavity")
 
 # Cycles drops closures below 1e-5, and a near-black albedo times this is still
 # well clear of that. Visually it is invisible next to the toon emission.
@@ -189,6 +195,25 @@ INTERFACE = [
         _S("Transition Blend", F, 1.0, 0.0, 1.0, True,
            "NOR.b. Where the material transition (ditto metal, gold) starts first. "
            "TextureCraft: Sheen color"),
+    ]),
+    ("Surface Detail", True, [
+        _S("Roughness Variation", F, 0.0, 0.0, 1.0, True,
+           "Noise added to Roughness, so the surface breaks up the way vanilla PRM.g does. "
+           "Baked into PRM.g"),
+        _S("Specular Variation", F, 0.0, 0.0, 1.0, True,
+           "Noise on Specular. Baked into PRM.a"),
+        _S("Edge Wear", F, 0.0, 0.0, 1.0, True,
+           "Sharp outer edges come out smoother and shinier, like worn leather or metal. "
+           "From the mesh shape (Cycles only, so it shows in the bake and PBR view)"),
+        _S("Mesh Cavity", F, 0.0, 0.0, 1.0, True,
+           "Darkens Cavity (NOR.a) in creases found from the mesh, so seams and folds "
+           "lose their specular in game. Baked into NOR.a"),
+        _S("Detail Size", F, 0.05, 0.0, 1000.0,
+           desc="Size of the variation in scene units. Add Surface Detail sets it from "
+                "the mesh size"),
+        _S("Cavity Distance", F, 0.05, 0.0, 1000.0,
+           desc="How far Mesh Cavity looks for nearby surfaces, in scene units. "
+                "Add Surface Detail sets it from the mesh size"),
     ]),
 ]
 OUTPUT_NAME = "Shader"
@@ -573,14 +598,80 @@ def _build_nodes(ng):
     def gb(name):
         return gi_bake.outputs[name]
 
+    # --- SURFACE DETAIL: per-pixel variation, all of it baked -----------------------
+    f_det = g.frame("SURFACE DETAIL  -  baked into PRM.g / PRM.a / NOR.a", (0.30, 0.22, 0.12))
+    gd = g.add("NodeGroupInput", -2300, 2100, frame=f_det)
+
+    def gdet(name):
+        return group_socket(gd, name)
+
+    pos = g.add("ShaderNodeNewGeometry", -2300, 1700, frame=f_det)
+    inv = g.math('DIVIDE', -2100, 1900, 1.0, gdet("Detail Size"), frame=f_det, label="1 / size")
+    coord = g.vmath('SCALE', -1900, 1800, pos.outputs["Position"], frame=f_det)
+    g.link(inv, coord.node.inputs["Scale"])
+    noise = g.add("ShaderNodeTexNoise", -1700, 1800, "Variation noise", frame=f_det,
+                  noise_dimensions='3D')
+    g.link(coord, noise.inputs["Vector"])
+    _inp(noise, "Scale").default_value = 1.0
+    _inp(noise, "Detail").default_value = 6.0
+    _inp(noise, "Roughness").default_value = 0.6
+    split = g.add("ShaderNodeSeparateColor", -1500, 1800, frame=f_det)
+    g.link(noise.outputs["Color"], split.inputs[0])
+
+    def centred(channel, x, y):
+        # Noise sits around 0.5 with a spread of about +-0.25; this makes it about +-0.5.
+        return g.math('MULTIPLY_ADD', x, y, split.outputs[channel], 2.0, -1.0, frame=f_det,
+                      label=f"{channel} -> -1..1")
+
+    # Sharp convex edges: pointiness above the flat 0.5.
+    edge = g.add("ShaderNodeMapRange", -1700, 1500, "Edge (pointiness)", frame=f_det,
+                 data_type='FLOAT', interpolation_type='SMOOTHSTEP', clamp=True)
+    g.link(pos.outputs["Pointiness"], _inp(edge, "Value"))
+    _inp(edge, "From Min").default_value = 0.52
+    _inp(edge, "From Max").default_value = 0.62
+    wear = g.math('MULTIPLY', -1500, 1500, _out(edge, "Result"), gdet("Edge Wear"),
+                  frame=f_det, label="Edge Wear")
+
+    rough = g.math('MULTIPLY_ADD', -1300, 1900, centred("Red", -1300, 2000),
+                   gdet("Roughness Variation"), gb("Roughness"), frame=f_det)
+    rough = g.math('MULTIPLY', -1100, 1900, rough,
+                   g.math('MULTIPLY_ADD', -1300, 1400, wear, -0.6, 1.0, frame=f_det),
+                   frame=f_det, clamp=True, label="Roughness (final)")
+    rough.node.name = ROUGH_FINAL_NAME
+
+    spec_var = g.math('MULTIPLY_ADD', -1300, 1700, centred("Green", -1300, 1800),
+                      gdet("Specular Variation"), 1.0, frame=f_det)
+    spec = g.math('MULTIPLY', -1100, 1700, gb("Specular"), spec_var, frame=f_det)
+    spec = g.math('MULTIPLY', -950, 1700, spec,
+                  g.math('MULTIPLY_ADD', -1100, 1400, wear, 0.8, 1.0, frame=f_det),
+                  frame=f_det, clamp=True, label="Specular (final)")
+    spec.node.name = SPEC_FINAL_NAME
+
+    crease = g.add("ShaderNodeAmbientOcclusion", -1700, 1200, "Creases", frame=f_det,
+                   samples=8, only_local=True, inside=False)
+    g.link(gdet("Cavity Distance"), crease.inputs["Distance"])
+    g.link(gb("Normal"), crease.inputs["Normal"])
+    crease_open = g.add("ShaderNodeMapRange", -1500, 1200, "Crease -> cavity", frame=f_det,
+                        data_type='FLOAT', interpolation_type='SMOOTHSTEP', clamp=True)
+    g.link(crease.outputs["AO"], _inp(crease_open, "Value"))
+    _inp(crease_open, "From Min").default_value = 0.35
+    _inp(crease_open, "From Max").default_value = 0.95
+    mesh_cav = g.mix('FLOAT', 'MIX', -1300, 1200, gdet("Mesh Cavity"), 1.0,
+                     _out(crease_open, "Result"), frame=f_det)
+    cavity = g.math('MULTIPLY', -1100, 1200, gb("Cavity"), mesh_cav, frame=f_det, clamp=True,
+                    label="Cavity (final)")
+    cavity.node.name = CAVITY_FINAL_NAME
+
     bsdf = g.add("ShaderNodeBsdfPrincipled", -150, 1300, "Smash bake data (PBR)",
                  name=BAKE_SHADER_NAME, frame=f_bake)
     g.link(col, bsdf.inputs["Base Color"])
     g.link(gb("Metalness"), bsdf.inputs["Metallic"])
-    g.link(gb("Roughness"), bsdf.inputs["Roughness"])
+    g.link(rough, bsdf.inputs["Roughness"])
     # PRM.a = 0.4 x Blender's Specular IOR Level (see core.PRM_SPECULAR_SCALE),
     # so this keeps the PBR preview reflecting what the game will.
-    spec_level = g.math('MULTIPLY', -350, 900, gb("Specular"), 2.5, frame=f_bake,
+    # Cavity takes the specular away in game, so the PBR view does the same.
+    spec_level = g.math('MULTIPLY', -500, 900, spec, cavity, frame=f_bake, label="x Cavity")
+    spec_level = g.math('MULTIPLY', -350, 900, spec_level, 2.5, frame=f_bake,
                         label="PRM.a -> Specular IOR Level")
     g.link(spec_level, bsdf.inputs["Specular IOR Level"])
     g.link(gb("Alpha"), bsdf.inputs["Alpha"])
@@ -594,7 +685,7 @@ def _build_nodes(ng):
     prm_b = g.math('MULTIPLY', -200, 480, prm_b, gb("PRM AO"), frame=f_bake)
     prm = g.add("ShaderNodeCombineColor", -150, 600, "PRM view", frame=f_bake)
     g.link(prm_r, prm.inputs[0])
-    g.link(gb("Roughness"), prm.inputs[1])
+    g.link(rough, prm.inputs[1])
     g.link(prm_b, prm.inputs[2])
 
     # --- OUTPUT ----------------------------------------------------------------------
@@ -756,6 +847,59 @@ def guess_preset(*names):
         if any(k in text for k in keys):
             return preset
     return 'CLOTH'
+
+
+# Surface Detail amounts per surface. Vanilla fighters vary PRM.g/PRM.a and
+# darken NOR.a in seams; these start each kind somewhere believable.
+DETAIL_PRESETS = {
+    # Noise sits mostly in 0.35-0.65, so a variation of 0.25 moves roughness
+    # about +-0.06; vanilla sets spread 0.1-0.6 across a set.
+    'SKIN':  {"Roughness Variation": 0.25, "Specular Variation": 0.5,  "Edge Wear": 0.0,  "Mesh Cavity": 0.5},
+    'HAIR':  {"Roughness Variation": 0.3,  "Specular Variation": 0.6,  "Edge Wear": 0.0,  "Mesh Cavity": 0.6},
+    'CLOTH': {"Roughness Variation": 0.4,  "Specular Variation": 0.5,  "Edge Wear": 0.15, "Mesh Cavity": 0.8},
+    'SHINY': {"Roughness Variation": 0.35, "Specular Variation": 0.4,  "Edge Wear": 0.4,  "Mesh Cavity": 0.7},
+    'METAL': {"Roughness Variation": 0.4,  "Specular Variation": 0.3,  "Edge Wear": 0.5,  "Mesh Cavity": 0.7},
+    'EYE':   {"Roughness Variation": 0.0,  "Specular Variation": 0.0,  "Edge Wear": 0.0,  "Mesh Cavity": 0.0},
+    'UNLIT': {"Roughness Variation": 0.0,  "Specular Variation": 0.0,  "Edge Wear": 0.0,  "Mesh Cavity": 0.0},
+}
+# Fractions of the character's height.
+DETAIL_SIZE_OF_HEIGHT = 0.01
+CAVITY_DISTANCE_OF_HEIGHT = 0.012
+
+
+def surface_kind(material, node):
+    """Which DETAIL_PRESETS entry fits a material.
+
+    Hair, eyes and glow go by name (Smash hair often runs on the skin shader);
+    otherwise the instance's values decide, then the name.
+    """
+    def value(name):
+        sock = node.inputs.get(name)
+        return sock.default_value if sock is not None and not sock.is_linked else 0.0
+    named = guess_preset(material.name)
+    if named in ('HAIR', 'EYE', 'UNLIT'):
+        return named
+    if value("SSS Mask") > 0.5:
+        return 'SKIN'
+    if value("Metalness") >= 0.5:
+        return 'METAL'
+    return named
+
+
+def apply_surface_detail(material, node, amount=1.0, height=None):
+    """Turn Surface Detail on for one instance. Returns the kind used."""
+    kind = surface_kind(material, node)
+    for name, value in DETAIL_PRESETS[kind].items():
+        sock = node.inputs.get(name)
+        if sock is not None and not sock.is_linked:
+            sock.default_value = min(1.0, value * amount)
+    if height:
+        for name, fraction in (("Detail Size", DETAIL_SIZE_OF_HEIGHT),
+                               ("Cavity Distance", CAVITY_DISTANCE_OF_HEIGHT)):
+            sock = node.inputs.get(name)
+            if sock is not None and not sock.is_linked:
+                sock.default_value = round(height * fraction, 5)
+    return kind
 
 
 def apply_preset(node, preset):
@@ -1035,6 +1179,54 @@ class SUB_OP_hb_master_shader_preset(Operator):
         return {'FINISHED'}
 
 
+class SUB_OP_hb_surface_detail(Operator):
+    """Turn on Surface Detail for the selected meshes' HB Master materials"""
+    bl_idname = 'sub.hb_surface_detail'
+    bl_label = 'Add Surface Detail'
+    bl_description = (
+        'Give the selected meshes\' HB Master materials roughness and specular variation, '
+        'edge wear and mesh cavity suited to each surface (skin, hair, cloth, shiny, metal), '
+        'sized from the meshes. Baked into PRM and NOR'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    amount: bpy.props.FloatProperty(
+        name='Amount', default=1.0, min=0.0, max=2.0,
+        description='Scales every amount; 0 turns Surface Detail off')
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects)
+
+    def execute(self, context):
+        if MASTER_NAME not in bpy.data.node_groups:
+            build_master_group()
+        ng = bpy.data.node_groups[MASTER_NAME]
+        if ng.get(VERSION_KEY, 0) < MASTER_VERSION:
+            build_master_group()
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        height = character_height(meshes)
+        kinds, seen = {}, set()
+        for obj in meshes:
+            for slot in obj.material_slots:
+                mat = slot.material
+                if mat is None or mat.name in seen:
+                    continue
+                seen.add(mat.name)
+                for node in master_nodes(mat):
+                    kind = apply_surface_detail(mat, node, self.amount, height)
+                    kinds.setdefault(kind, []).append(mat.name)
+        if not kinds:
+            self.report({'WARNING'}, "No HB Master materials on the selected meshes")
+            return {'CANCELLED'}
+        for kind, names in sorted(kinds.items()):
+            print(f"  Surface Detail {kind.title()}: {', '.join(names)}")
+        summary = ", ".join(f"{len(n)} {k.lower()}" for k, n in sorted(kinds.items()))
+        self.report({'INFO'}, f"Surface Detail on {sum(map(len, kinds.values()))} "
+                              f"material(s): {summary}")
+        return {'FINISHED'}
+
+
 class SUB_PT_hb_master_shader(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -1060,4 +1252,5 @@ class SUB_PT_hb_master_shader(Panel):
         row.operator('sub.hb_master_shader_convert', icon='MATERIAL')
         layout.operator_menu_enum('sub.hb_master_shader_preset', 'preset',
                                   text='Apply Preset to Active Material', icon='PRESET')
+        layout.operator('sub.hb_surface_detail', icon='TEXTURE')
         layout.operator('sub.hb_hair_strands_add', icon='STRANDS')

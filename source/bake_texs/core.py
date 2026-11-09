@@ -1295,6 +1295,31 @@ def scalar_from_instance(group_node, outer_path, socket_name, default):
     const = constant_of(terminal if terminal is not None else socket)
     return (float(const[0]) if const is not None else default), False
 
+def hb_detail_channels(hb, path, outer):
+    """Surface Detail on an HB Master instance: {'rough'|'spec'|'nor_a': Channel}.
+
+    Each entry is the group's own final value, baked through a tap, and only
+    appears when a detail amount that feeds it is on - otherwise the plain
+    instance socket is still the cheaper, exact source.
+    """
+    from . import master_shader as ms
+    def on(name):
+        value, driven = scalar_from_instance(hb, outer, name, 0.0)
+        return driven or abs(value) > 1e-6
+    amounts = {name: on(name) for name in ms.DETAIL_AMOUNTS}
+    wanted = {
+        'rough': (ms.ROUGH_FINAL_NAME, amounts["Roughness Variation"] or amounts["Edge Wear"]),
+        'spec': (ms.SPEC_FINAL_NAME, amounts["Specular Variation"] or amounts["Edge Wear"]),
+        'nor_a': (ms.CAVITY_FINAL_NAME, amounts["Mesh Cavity"]),
+    }
+    found = {}
+    for key, (node_name, active) in wanted.items():
+        node = hb.node_tree.nodes.get(node_name) if active else None
+        if node is not None:
+            found[key] = Channel('SOCKET', socket=node.outputs[0], path=path,
+                                 origin=f"'{hb.name}' Surface Detail ({node_name[3:]})")
+    return found
+
 def master_instance(material):
     """The HB Master Shader node in a material's own tree, or None."""
     if material is None or not material.use_nodes or material.node_tree is None:
@@ -1520,6 +1545,13 @@ def resolve_channels(mat, kind, payload, path, ctx=None):
                 value, driven = scalar_from_instance(hb, outer, name, 1.0)
                 if driven or abs(value - 1.0) > 1e-6:
                     ch[key] = channel_from_instance(hb, outer, name, f"{label} {name} ({slot})")
+            detail = hb_detail_channels(hb, path, outer)
+            if 'rough' in detail:
+                rough = detail['rough']
+            if 'spec' in detail and not ctx.prm_alpha_is_rotation:
+                spec = detail['spec']
+            if 'nor_a' in detail:
+                ch['nor_a'] = detail['nor_a']
             emi = channel_from_instance(hb, outer, "Emission Color", f"{label} Emission Color")
             strength, textured = scalar_from_instance(hb, outer, "Emission Strength", 1.0)
             if strength <= 0.0 or emi.mode == 'NONE' or (
