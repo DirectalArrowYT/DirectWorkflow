@@ -37,7 +37,7 @@ from bpy.props import BoolProperty, EnumProperty
 from mathutils import Vector
 
 MASTER_NAME = "HB Master Shader"
-MASTER_VERSION = 7
+MASTER_VERSION = 8
 VERSION_KEY = "hb_master_version"
 
 # Names the baker keys off. BAKE_SHADER is core.OVERRIDE_NODE_SHADER.
@@ -54,6 +54,16 @@ DETAIL_AMOUNTS = ("Roughness Variation", "Specular Variation", "Edge Wear", "Mes
 # Cycles drops closures below 1e-5, and a near-black albedo times this is still
 # well clear of that. Visually it is invisible next to the toon emission.
 PBR_CARRIER_WEIGHT = 0.02
+
+# Battlefield's chr light and scene rim (stage/battlefield/normal/render/light/
+# light00.nuanmb, constant over the animation). Direction is toward the light,
+# game Y-up (-0.5567, 0.766, -0.3214) as Blender Z-up (x, -z, y).
+BATTLEFIELD = {
+    'light': (0.91, 0.79, 0.74, 1.0),
+    'intensity': 5.5,
+    'direction': (-0.5567, 0.3214, 0.766),
+    'rim': (1.5, 2.5, 2.33333, 1.0),
+}
 
 # Transition noise Fac (Detail 2) sits mostly in this range; stretched to
 # 0.1-1.0 it lands near vanilla NOR.b's spread (5%-95% about 0.2-0.95).
@@ -239,14 +249,20 @@ INTERFACE = [
                 "View 4 only"),
         _S("SSS Color", C, (0.25, 0.03, 0.0, 1.0),
            desc="CustomVector11: the colour skin blends to. View 4 only"),
-        _S("Game Light", C, (1.0, 1.0, 1.0, 1.0),
-           desc="The stage's chr light colour, from Light Direction. View 4 only"),
+        _S("Game Light", C, BATTLEFIELD['light'],
+           desc="The stage's LightChr colour (CustomVector0); Battlefield's by default. "
+                "View 4 only"),
+        _S("Game Light Intensity", F, BATTLEFIELD['intensity'], 0.0, 100.0,
+           desc="The stage's LightChr CustomFloat0; Battlefield is 5.5. View 4 only"),
+        _S("Game Light Direction", V, BATTLEFIELD['direction'], -1.0, 1.0,
+           desc="Toward the stage's chr light, Blender Z-up; Battlefield's by default. "
+                "View 4 only (the toon look keeps Light Direction)"),
         _S("Game Ambient", C, (0.4, 0.4, 0.45, 1.0),
            desc="Ambient light, standing in for the stage's SH lighting and reflection cube. "
                 "View 4 only"),
-        _S("Game Exposure", F, 3.0, 0.0, 100.0,
-           desc="The game writes linear HDR and tonemaps after; this brings View 4 into a "
-                "readable range in place of the stage light's real intensity"),
+        _S("Game Exposure", F, 1.0, 0.0, 100.0,
+           desc="Scales View 4's output. 1 = the game's linear HDR as the shader writes it "
+                "(the game tonemaps after)"),
         _S("Game Diffuse Tint", C, (1.0, 1.0, 1.0, 1.0),
            desc="CustomVector13: multiplies the albedo. Game Preview copies it. View 4 only"),
         _S("Game Final Tint", C, (1.0, 1.0, 1.0, 1.0),
@@ -255,6 +271,15 @@ INTERFACE = [
         _S("Game Emission", C, (1.0, 1.0, 1.0, 1.0),
            desc="CustomVector3: emission multiplier (the game also halves emission). "
                 "Game Preview copies it. View 4 only"),
+        _S("Game Rim Color", C, (0.0, 0.0, 0.0, 1.0),
+           desc="CustomVector14.rgb: rim light colour. Game Preview copies it. View 4 only"),
+        _S("Game Rim Strength", F, 0.0, 0.0, 10.0,
+           desc="CustomVector14.w: rim light strength. Game Preview copies it. View 4 only"),
+        _S("Game Rim Albedo", F, 0.0, 0.0, 1.0, True,
+           "CustomFloat8: how much the rim takes the surface colour. Game Preview copies it. "
+           "View 4 only"),
+        _S("Stage Rim Tint", C, BATTLEFIELD['rim'],
+           desc="The stage's scene CustomVector8.rgb (Battlefield 1.5, 2.5, 2.33). View 4 only"),
         _S("Transition Preview", F, 0.0, 0.0, 1.0, True,
            "The in-game transition factor: texels whose NOR.b is above 1 - this turn to "
            "metal, as they would under a Metal Box or a metal ditto. View 4 only"),
@@ -807,6 +832,14 @@ def _build_nodes(ng):
     spec_g = g.mix('FLOAT', 'MIX', 1300, 1800, t_on, spec, 0.0, frame=f_game)
     ao_g = g.mix('FLOAT', 'MIX', 1300, 1700, t_on, prm_b, 1.0, frame=f_game, label="AO")
 
+    # The stage light: its own direction, colour x intensity.
+    L_g = g.vmath('NORMALIZE', 1100, 1300, gg("Game Light Direction"), frame=f_game,
+                  label="L (stage)")
+    ndl = g.vmath('DOT_PRODUCT', 1250, 1300, N, L_g, frame=f_game, out="Value")
+    H = g.vmath('NORMALIZE', 1400, 1150, g.vmath('ADD', 1250, 1150, L_g, Vv, frame=f_game),
+                frame=f_game, label="H (stage)")
+    light_c = vscale(1400, 1350, gg("Game Light"), gg("Game Light Intensity"), "lightColor")
+
     # Diffuse: mix(albedo N.L / pi, CV11 x sssBlend x skinN, sssBlend).
     lambert = g.math('MAXIMUM', 1700, 2200, ndl, 0.0, frame=f_game, label="N.L")
     direct_c = vscale(1850, 2300, albedo, g.math('DIVIDE', 1700, 2350, lambert, PI,
@@ -818,7 +851,7 @@ def _build_nodes(ng):
                     g.math('MULTIPLY', 2000, 2000, skin_n, sss_blend, frame=f_game),
                     "CV11 x sssBlend x skinN")
     direct = g.mix('RGBA', 'MIX', 2150, 2250, sss_blend, direct_c, skin_c, frame=f_game)
-    direct = g.vmath('MULTIPLY', 2300, 2250, direct, gg("Game Light"), frame=f_game,
+    direct = g.vmath('MULTIPLY', 2300, 2250, direct, light_c, frame=f_game,
                      label="x chr light")
     amb_alb = g.mix('RGBA', 'MIX', 2150, 2050, sss_blend, albedo, gg("SSS Color"), frame=f_game)
     ambient = vscale(2300, 2050, gg("Game Ambient"), ao_g, "SH x AO")
@@ -857,7 +890,7 @@ def _build_nodes(ng):
                    label="kSpecular (metal -> albedo)")
     k_direct = vscale(2600, 1000, k_spec, cavity, "x nor.a")
     spec_direct = g.vmath('MULTIPLY', 3050, 1300, vscale(2900, 1150, k_direct, brdf),
-                          gg("Game Light"), frame=f_game, label="Direct specular")
+                          light_c, frame=f_game, label="Direct specular")
     fres = g.math('SUBTRACT', 1850, 800, 1.0, ndv_g, frame=f_game)
     fres = g.math('POWER', 2000, 800, fres, 5.0, frame=f_game, label="(1 - N.V)^5")
     k_ind = g.mix('RGBA', 'MIX', 2150, 850, fres, k_spec, (1.0, 1.0, 1.0, 1.0), frame=f_game,
@@ -874,6 +907,21 @@ def _build_nodes(ng):
     game_emit = g.vmath('MULTIPLY', 3350, 1600, game_emit, gg("Game Emission"), frame=f_game)
     game_emit = vscale(3500, 1600, game_emit, 0.5, "emi x CV3 x 0.5")
     game = g.vmath('ADD', 3650, 1750, game, game_emit, frame=f_game)
+
+    # Rim: CV14 x scene CV8 x SH, edge-tinted by CustomFloat8, (1 - N.V)^5 blend.
+    rim_c = g.vmath('MULTIPLY', 3350, 2400, gg("Game Rim Color"), gg("Stage Rim Tint"),
+                    frame=f_game)
+    rim_c = g.vmath('MULTIPLY', 3500, 2400, rim_c, gg("Game Ambient"), frame=f_game)
+    rim_tint = g.mix('RGBA', 'MIX', 3350, 2550, gg("Game Rim Albedo"), (1.0, 1.0, 1.0, 1.0),
+                     albedo, frame=f_game)
+    rim_tint = g.vmath('MINIMUM', 3500, 2550, rim_tint, (1.0, 1.0, 1.0), frame=f_game)
+    rim_c = g.vmath('MULTIPLY', 3650, 2450, rim_c, rim_tint, frame=f_game, label="Rim colour")
+    rim_b = g.math('MULTIPLY', 3350, 2250, fres, gg("Game Rim Strength"), frame=f_game)
+    rim_b = g.math('MULTIPLY', 3500, 2250, rim_b, 0.6, frame=f_game)
+    rim_b = g.math('MULTIPLY', 3650, 2250, rim_b, cavity, frame=f_game)
+    rim_b = g.math('MULTIPLY', 3800, 2250, rim_b, lambert, frame=f_game, clamp=True,
+                   label="Rim blend")
+    game = g.mix('RGBA', 'MIX', 3850, 1900, rim_b, game, rim_c, frame=f_game, label="+ Rim")
     game = g.vmath('MULTIPLY', 3800, 1750, game, gg("Game Final Tint"), frame=f_game,
                    label="x CV8")
     game = vscale(3950, 1750, game, gg("Game Exposure"), "Game")
@@ -1460,15 +1508,28 @@ def sync_game_preview(material):
             if sock is not None and not sock.is_linked:
                 sock.default_value = 0.0
     data = smash_bridge.matl_data(ctx.data_source)
-    for vec, socket_name in (("CustomVector13", "Game Diffuse Tint"),
-                             ("CustomVector8", "Game Final Tint"),
-                             ("CustomVector3", "Game Emission")):
-        v = data.vectors.get(vec) if data is not None else None
-        value = tuple(float(c) for c in v.value[:3]) + (1.0,) if v is not None else (1.0,) * 4
+    def put(socket_name, value):
         for node in master_nodes(material):
             sock = node.inputs.get(socket_name)
             if sock is not None and not sock.is_linked:
                 sock.default_value = value
+
+    def vec(name):
+        return data.vectors.get(name) if data is not None else None
+
+    for name, socket_name in (("CustomVector13", "Game Diffuse Tint"),
+                              ("CustomVector8", "Game Final Tint"),
+                              ("CustomVector3", "Game Emission")):
+        v = vec(name)
+        put(socket_name, tuple(float(c) for c in v.value[:3]) + (1.0,) if v is not None
+            else (1.0,) * 4)
+    # No CustomVector14 = no rim in game.
+    v14 = vec("CustomVector14")
+    put("Game Rim Color", tuple(float(c) for c in v14.value[:3]) + (1.0,) if v14 is not None
+        else (0.0, 0.0, 0.0, 1.0))
+    put("Game Rim Strength", float(v14.value[3]) if v14 is not None else 0.0)
+    f8 = data.floats.get("CustomFloat8") if data is not None else None
+    put("Game Rim Albedo", float(f8.value) if f8 is not None else 0.0)
     return v30 is not None
 
 
@@ -1487,6 +1548,11 @@ class SUB_OP_hb_game_preview(Operator):
     transition: bpy.props.FloatProperty(
         name='Transition', default=0.0, min=0.0, max=1.0, subtype='FACTOR',
         description='Preview the in-game transition (Metal Box, metal ditto) at this factor')
+    stage: bpy.props.EnumProperty(
+        name='Stage Light',
+        items=(('BATTLEFIELD', "Battlefield", "Battlefield's chr light and rim values"),
+               ('KEEP', "Keep", "Leave each node's Game Light inputs as they are")),
+        default='BATTLEFIELD')
     transition_material: bpy.props.EnumProperty(
         name='Material',
         items=(('METAL', "Metal Box", "0.257 grey metal"),
@@ -1512,6 +1578,15 @@ class SUB_OP_hb_game_preview(Operator):
                 sock = node.inputs.get("Transition Preview")
                 if sock is not None and not sock.is_linked:
                     sock.default_value = self.transition if self.view == '4' else 0.0
+                if self.view == '4' and self.stage == 'BATTLEFIELD':
+                    for name, value in (("Game Light", BATTLEFIELD['light']),
+                                        ("Game Light Intensity", BATTLEFIELD['intensity']),
+                                        ("Game Light Direction", BATTLEFIELD['direction']),
+                                        ("Stage Rim Tint", BATTLEFIELD['rim']),
+                                        ("Game Exposure", 1.0)):
+                        sock = node.inputs.get(name)
+                        if sock is not None and not sock.is_linked:
+                            sock.default_value = value
                 sock = node.inputs.get("Transition Color")
                 if sock is not None and not sock.is_linked:
                     sock.default_value = ((0.382, 0.304, 0.023, 1.0)
