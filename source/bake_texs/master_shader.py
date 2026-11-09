@@ -37,7 +37,7 @@ from bpy.props import BoolProperty, EnumProperty
 from mathutils import Vector
 
 MASTER_NAME = "HB Master Shader"
-MASTER_VERSION = 6
+MASTER_VERSION = 7
 VERSION_KEY = "hb_master_version"
 
 # Names the baker keys off. BAKE_SHADER is core.OVERRIDE_NODE_SHADER.
@@ -240,13 +240,27 @@ INTERFACE = [
         _S("SSS Color", C, (0.25, 0.03, 0.0, 1.0),
            desc="CustomVector11: the colour skin blends to. View 4 only"),
         _S("Game Light", C, (1.0, 1.0, 1.0, 1.0),
-           desc="Colour and strength of the fighter key light, from Light Direction. "
-                "View 4 only"),
+           desc="The stage's chr light colour, from Light Direction. View 4 only"),
         _S("Game Ambient", C, (0.4, 0.4, 0.45, 1.0),
-           desc="Ambient (diffuse and reflection) light. View 4 only"),
+           desc="Ambient light, standing in for the stage's SH lighting and reflection cube. "
+                "View 4 only"),
+        _S("Game Exposure", F, 3.0, 0.0, 100.0,
+           desc="The game writes linear HDR and tonemaps after; this brings View 4 into a "
+                "readable range in place of the stage light's real intensity"),
+        _S("Game Diffuse Tint", C, (1.0, 1.0, 1.0, 1.0),
+           desc="CustomVector13: multiplies the albedo. Game Preview copies it. View 4 only"),
+        _S("Game Final Tint", C, (1.0, 1.0, 1.0, 1.0),
+           desc="CustomVector8: multiplies the final colour. Game Preview copies it. "
+                "View 4 only"),
+        _S("Game Emission", C, (1.0, 1.0, 1.0, 1.0),
+           desc="CustomVector3: emission multiplier (the game also halves emission). "
+                "Game Preview copies it. View 4 only"),
         _S("Transition Preview", F, 0.0, 0.0, 1.0, True,
            "The in-game transition factor: texels whose NOR.b is above 1 - this turn to "
            "metal, as they would under a Metal Box or a metal ditto. View 4 only"),
+        _S("Transition Color", C, (0.257, 0.257, 0.257, 1.0),
+           desc="Albedo of the transition material: 0.257 grey is the Metal Box, "
+                "(0.382, 0.304, 0.023) is gold. Metal 1, roughness 0.3 as in game. View 4 only"),
     ]),
 ]
 OUTPUT_NAME = "Shader"
@@ -746,95 +760,123 @@ def _build_nodes(ng):
     g.link(prm_b, prm.inputs[2])
 
     # --- GAME -------------------------------------------------------------------------
-    # Smash's SFX_PBS fighter shading of the same data that bakes: one key light
-    # from Light Direction plus ambient, fake SSS from CustomVector30/11, GGX
-    # specular with F0 = PRM.a x 0.2, cavity and AO taking specular away.
-    # Unlit (Emission) so it reads the same in EEVEE and Cycles.
+    # Smash's SFX_PBS fighter shading of the same data that bakes, after ssbh_wgpu's
+    # model.wgsl, with F0 and the 1/pi terms checked against the game's own dumped
+    # pixel shader. One chr light (Light Direction, Game Light) plus ambient (Game
+    # Ambient stands in for the SH and the reflection cube). The game writes linear
+    # HDR and tonemaps after, so Game Exposure brings it into view. Unlit (Emission)
+    # so it reads the same in EEVEE and Cycles.
     f_game = g.frame("GAME  -  View 4, viewport only", (0.15, 0.25, 0.35))
     gg_in = g.add("NodeGroupInput", 900, 2000, frame=f_game)
+    PI = 3.14159265
 
     def gg(name):
         return group_socket(gg_in, name)
 
-    sss_blend = g.math('MULTIPLY', 1100, 2100, gg("SSS Mask"), gg("SSS Blend"), frame=f_game,
-                       label="sssBlend = PRM.r x CV30.x")
-    albedo = g.mix('RGBA', 'MIX', 1300, 2100, sss_blend, col, gg("SSS Color"), frame=f_game,
-                   label="Albedo -> CV11")
-    lambert = g.math('MAXIMUM', 1100, 1900, ndl, 0.0, frame=f_game, label="N.L")
-    skin = g.math('MULTIPLY', 1100, 1750, ndl, gg("SSS Falloff"), frame=f_game)
-    skin = g.math('MULTIPLY_ADD', 1250, 1750, skin, 0.5, 0.5, frame=f_game, clamp=True,
-                  label="Skin wrap (CV30.y)")
-    direct = g.mix('FLOAT', 'MIX', 1400, 1850, sss_blend, lambert, skin, frame=f_game,
-                   label="Direct shading")
-    metal = gg("Metalness")
-    dielectric = g.math('SUBTRACT', 1100, 1600, 1.0, metal, frame=f_game)
-    light = g.vmath('SCALE', 1550, 1850, gg("Game Light"), frame=f_game, label="Key light")
-    g.link(direct, light.node.inputs["Scale"])
-    ambient = g.vmath('SCALE', 1550, 1700, gg("Game Ambient"), frame=f_game, label="Ambient x AO")
-    g.link(prm_b, ambient.node.inputs["Scale"])
-    irradiance = g.vmath('ADD', 1700, 1800, light, ambient, frame=f_game)
-    diffuse_c = g.vmath('SCALE', 1550, 2100, albedo, frame=f_game, label="Diffuse albedo")
-    g.link(dielectric, diffuse_c.node.inputs["Scale"])
-    game_diffuse = g.vmath('MULTIPLY', 1850, 2000, diffuse_c, irradiance, frame=f_game,
-                           label="Diffuse")
+    def vscale(x, y, vec, factor, label=""):
+        out = g.vmath('SCALE', x, y, vec, frame=f_game, label=label)
+        if isinstance(factor, bpy.types.NodeSocket):
+            g.link(factor, out.node.inputs["Scale"])
+        else:
+            _inp(out.node, "Scale").default_value = factor
+        return out
 
-    # GGX: alpha = roughness^2.
-    a = g.math('MULTIPLY', 1100, 1400, rough, rough, frame=f_game, label="alpha")
-    a2 = g.math('MULTIPLY', 1250, 1400, a, a, frame=f_game)
-    a2 = g.math('MAXIMUM', 1400, 1400, a2, 0.0004, frame=f_game)
-    ndh_g = g.vmath('DOT_PRODUCT', 1100, 1250, N, H, frame=f_game, out="Value")
-    ndh_g = g.math('MAXIMUM', 1250, 1250, ndh_g, 0.0, frame=f_game, label="N.H")
-    d = g.math('MULTIPLY', 1400, 1250, ndh_g, ndh_g, frame=f_game)
-    a2m1 = g.math('SUBTRACT', 1400, 1100, a2, 1.0, frame=f_game)
-    d = g.math('MULTIPLY_ADD', 1550, 1250, d, a2m1, 1.0, frame=f_game)
-    d = g.math('MULTIPLY', 1700, 1250, d, d, frame=f_game)
-    d = g.math('MULTIPLY', 1850, 1250, d, 3.14159265, frame=f_game)
-    ggx = g.math('DIVIDE', 2000, 1300, a2, d, frame=f_game, label="GGX D")
-    ndv_g = g.math('MAXIMUM', 1700, 1100, ndv, 0.1, frame=f_game)
-    vis = g.math('DIVIDE', 1850, 1100, lambert, ndv_g, frame=f_game)
-    vis = g.math('MULTIPLY', 2000, 1100, vis, 0.25, frame=f_game, label="N.L / 4 N.V")
-    spec_d = g.math('MULTIPLY', 2150, 1250, ggx, vis, frame=f_game)
-    spec_d = g.math('MULTIPLY', 2300, 1250, spec_d, cavity, frame=f_game, label="x Cavity")
-    f0_d = g.math('MULTIPLY', 1100, 1000, spec, 0.2, frame=f_game, label="F0 = PRM.a x 0.2")
-    f0 = g.mix('RGBA', 'MIX', 1300, 1000, metal, f0_d, albedo, frame=f_game,
-               label="F0 (metal -> albedo)")
-    spec_light = g.vmath('SCALE', 2450, 1250, gg("Game Light"), frame=f_game)
-    g.link(spec_d, spec_light.node.inputs["Scale"])
-    # Ambient reflection: the cube map, dimmer and blurrier as roughness rises.
-    glossy = g.math('MULTIPLY_ADD', 1700, 950, rough, -0.7, 1.0, frame=f_game,
-                    label="Env sharpness")
-    env_amt = g.math('MULTIPLY', 1850, 950, glossy, prm_b, frame=f_game)
-    env_amt = g.math('MULTIPLY', 2000, 950, env_amt, cavity, frame=f_game, label="x AO x Cavity")
-    env = g.vmath('SCALE', 2150, 950, gg("Game Ambient"), frame=f_game)
-    g.link(env_amt, env.node.inputs["Scale"])
-    spec_in = g.vmath('ADD', 2600, 1150, spec_light, env, frame=f_game)
-    game_spec = g.vmath('MULTIPLY', 2750, 1100, spec_in, f0, frame=f_game, label="Specular")
-    game = g.vmath('ADD', 2900, 1700, game_diffuse, game_spec, frame=f_game)
-    game_emit = g.vmath('SCALE', 2900, 1500, gg("Emission Color"), frame=f_game)
-    g.link(gg("Emission Strength"), game_emit.node.inputs["Scale"])
-    game = g.vmath('ADD', 3050, 1650, game, game_emit, frame=f_game, label="Game")
-
-    # Transition preview: NOR.b above 1 - factor switches to the transition
-    # material. Shown as a plain polished metal, which is what most look like.
+    # Transition (Metal Box / gold): NOR.b >= 1 - factor takes the transition material.
     t_amt = gg("Transition Preview")
-    t_thresh = g.math('SUBTRACT', 2600, 2300, 1.0, t_amt, frame=f_game)
-    t_on = g.math('GREATER_THAN', 2750, 2300, trans, t_thresh, frame=f_game)
-    t_any = g.math('GREATER_THAN', 2750, 2450, t_amt, 0.001, frame=f_game)
-    t_on = g.math('MULTIPLY', 2900, 2300, t_on, t_any, frame=f_game, label="Transitioned")
-    m_light = g.math('MULTIPLY_ADD', 2600, 2150, lambert, 0.5, 0.25, frame=f_game)
-    m_key = g.vmath('SCALE', 2750, 2150, gg("Game Light"), frame=f_game)
-    g.link(m_light, m_key.node.inputs["Scale"])
-    m_amb = g.vmath('SCALE', 2750, 2000, gg("Game Ambient"), frame=f_game)
-    _inp(m_amb.node, "Scale").default_value = 0.8
-    m_irr = g.vmath('ADD', 2900, 2100, m_key, m_amb, frame=f_game)
-    m_col = g.vmath('MULTIPLY', 3050, 2100, m_irr, (0.42, 0.44, 0.48), frame=f_game)
-    m_hi = g.math('POWER', 3050, 1950, ndh_g, 40.0, frame=f_game, label="Metal highlight")
-    m_hi_c = g.vmath('SCALE', 3200, 1950, gg("Game Light"), frame=f_game)
-    g.link(m_hi, m_hi_c.node.inputs["Scale"])
-    metal_look = g.vmath('ADD', 3200, 2100, m_col, m_hi_c, frame=f_game,
-                         label="Transition metal (approx.)")
-    game = g.mix('RGBA', 'MIX', 3350, 1800, t_on, game, metal_look, frame=f_game,
-                 label="Game + transition")
+    t_thresh = g.math('SUBTRACT', 1100, 2700, 1.0, t_amt, frame=f_game)
+    t_on = g.math('GREATER_THAN', 1250, 2700, trans, t_thresh, frame=f_game)
+    t_on = g.math('MAXIMUM', 1400, 2700, t_on,
+                  g.math('COMPARE', 1250, 2850, trans, t_thresh, 0.0005, frame=f_game),
+                  frame=f_game)
+    t_on = g.math('MULTIPLY', 1550, 2700, t_on,
+                  g.math('GREATER_THAN', 1400, 2850, t_amt, 0.0, frame=f_game),
+                  frame=f_game, label="Transitioned")
+
+    base = g.vmath('MULTIPLY', 1100, 2300, col, gg("Game Diffuse Tint"), frame=f_game,
+                   label="Albedo x CV13")
+    sss_blend = g.math('MULTIPLY', 1100, 2150, gg("SSS Mask"), gg("SSS Blend"), frame=f_game,
+                       label="sssBlend = PRM.r x CV30.x")
+    albedo = g.mix('RGBA', 'MIX', 1300, 2300, sss_blend, base, gg("SSS Color"), frame=f_game,
+                   label="Albedo -> CV11")
+    albedo = g.mix('RGBA', 'MIX', 1500, 2300, t_on, albedo, gg("Transition Color"),
+                   frame=f_game, label="Albedo (transition)")
+    sss_blend = g.math('MULTIPLY', 1300, 2150, sss_blend,
+                       g.math('SUBTRACT', 1150, 2050, 1.0, t_on, frame=f_game), frame=f_game)
+    metal = g.mix('FLOAT', 'MIX', 1300, 2000, t_on, gg("Metalness"), 1.0, frame=f_game)
+    rough_g = g.mix('FLOAT', 'MIX', 1300, 1900, t_on, rough, 0.3, frame=f_game)
+    spec_g = g.mix('FLOAT', 'MIX', 1300, 1800, t_on, spec, 0.0, frame=f_game)
+    ao_g = g.mix('FLOAT', 'MIX', 1300, 1700, t_on, prm_b, 1.0, frame=f_game, label="AO")
+
+    # Diffuse: mix(albedo N.L / pi, CV11 x sssBlend x skinN, sssBlend).
+    lambert = g.math('MAXIMUM', 1700, 2200, ndl, 0.0, frame=f_game, label="N.L")
+    direct_c = vscale(1850, 2300, albedo, g.math('DIVIDE', 1700, 2350, lambert, PI,
+                                                    frame=f_game), "albedo N.L / pi")
+    skin_n = g.math('MULTIPLY', 1700, 2050, ndl, gg("SSS Falloff"), frame=f_game)
+    skin_n = g.math('MULTIPLY_ADD', 1850, 2050, skin_n, 0.5, 0.5, frame=f_game, clamp=True,
+                    label="skinN (CV30.y)")
+    skin_c = vscale(2000, 2100, gg("SSS Color"),
+                    g.math('MULTIPLY', 2000, 2000, skin_n, sss_blend, frame=f_game),
+                    "CV11 x sssBlend x skinN")
+    direct = g.mix('RGBA', 'MIX', 2150, 2250, sss_blend, direct_c, skin_c, frame=f_game)
+    direct = g.vmath('MULTIPLY', 2300, 2250, direct, gg("Game Light"), frame=f_game,
+                     label="x chr light")
+    amb_alb = g.mix('RGBA', 'MIX', 2150, 2050, sss_blend, albedo, gg("SSS Color"), frame=f_game)
+    ambient = vscale(2300, 2050, gg("Game Ambient"), ao_g, "SH x AO")
+    ambient = g.vmath('MULTIPLY', 2450, 2050, ambient, amb_alb, frame=f_game)
+    k_diff = g.math('SUBTRACT', 2450, 2350, 1.0, metal, frame=f_game)
+    k_diff = g.math('DIVIDE', 2600, 2350, k_diff, PI, frame=f_game, label="(1 - metal) / pi")
+    game_diffuse = vscale(2750, 2200, g.vmath('ADD', 2600, 2200, direct, ambient,
+                                                frame=f_game), k_diff, "Diffuse")
+
+    # Specular: GGX with a = max(r, 0.01)^2, Schlick masking, 4 x N.L/pi D G / pi^2.
+    r = g.math('MAXIMUM', 1700, 1600, rough_g, 0.01, frame=f_game)
+    a = g.math('MULTIPLY', 1850, 1600, r, r, frame=f_game, label="a")
+    a2 = g.math('MULTIPLY', 2000, 1600, a, a, frame=f_game, label="a2")
+    ndh_g = g.vmath('DOT_PRODUCT', 1700, 1450, N, H, frame=f_game, out="Value")
+    ndh_g = g.math('MAXIMUM', 1850, 1450, ndh_g, 0.0, frame=f_game, label="N.H")
+    d = g.math('MULTIPLY', 2000, 1450, ndh_g, ndh_g, frame=f_game)
+    d = g.math('MULTIPLY_ADD', 2150, 1450, d,
+               g.math('SUBTRACT', 2150, 1600, a2, 1.0, frame=f_game), 1.0, frame=f_game)
+    d = g.math('MULTIPLY', 2300, 1450, d, d, frame=f_game)
+    ggx = g.math('DIVIDE', 2450, 1500, a2, d, frame=f_game, label="GGX D")
+    k = g.math('MULTIPLY', 1850, 1300, a2, 0.5, frame=f_game, label="k")
+    one_k = g.math('SUBTRACT', 2000, 1300, 1.0, k, frame=f_game)
+    ndv_g = g.math('MAXIMUM', 1700, 1150, ndv, 0.0, frame=f_game, label="N.V")
+    g_v = g.math('MULTIPLY_ADD', 2150, 1250, ndv_g, one_k, k, frame=f_game)
+    g_v = g.math('DIVIDE', 2300, 1250, 1.0, g_v, frame=f_game, label="gV")
+    ndl_pi = g.math('DIVIDE', 2000, 1150, lambert, PI, frame=f_game, label="N.L / pi")
+    g_l = g.math('MULTIPLY_ADD', 2150, 1100, ndl_pi, one_k, k, frame=f_game)
+    g_l = g.math('DIVIDE', 2300, 1100, 1.0, g_l, frame=f_game, label="gL")
+    brdf = g.math('MULTIPLY', 2600, 1400, ndl_pi, ggx, frame=f_game)
+    brdf = g.math('MULTIPLY', 2750, 1400, brdf,
+                  g.math('MULTIPLY', 2450, 1200, g_v, g_l, frame=f_game), frame=f_game)
+    brdf = g.math('MULTIPLY', 2900, 1400, brdf, 4.0 / (PI * PI), frame=f_game,
+                  label="4 x brdf / pi^2")
+    f0 = g.math('MULTIPLY', 1700, 950, spec_g, 0.2, frame=f_game, label="F0 = PRM.a x 0.2")
+    k_spec = g.mix('RGBA', 'MIX', 1850, 950, metal, f0, albedo, frame=f_game,
+                   label="kSpecular (metal -> albedo)")
+    k_direct = vscale(2600, 1000, k_spec, cavity, "x nor.a")
+    spec_direct = g.vmath('MULTIPLY', 3050, 1300, vscale(2900, 1150, k_direct, brdf),
+                          gg("Game Light"), frame=f_game, label="Direct specular")
+    fres = g.math('SUBTRACT', 1850, 800, 1.0, ndv_g, frame=f_game)
+    fres = g.math('POWER', 2000, 800, fres, 5.0, frame=f_game, label="(1 - N.V)^5")
+    k_ind = g.mix('RGBA', 'MIX', 2150, 850, fres, k_spec, (1.0, 1.0, 1.0, 1.0), frame=f_game,
+                  label="Schlick")
+    k_ind = vscale(2300, 850, k_ind, g.math('MULTIPLY', 2150, 700, cavity, 0.5, frame=f_game),
+                   "x nor.a x 0.5")
+    spec_ibl = g.vmath('MULTIPLY', 2450, 850, k_ind, gg("Game Ambient"), frame=f_game,
+                       label="IBL (ambient as the cube)")
+    game_spec = vscale(3200, 1200, g.vmath('ADD', 3050, 1100, spec_direct, spec_ibl,
+                                             frame=f_game), ao_g, "Specular x AO")
+
+    game = g.vmath('ADD', 3350, 1800, game_diffuse, game_spec, frame=f_game)
+    game_emit = vscale(3200, 1600, gg("Emission Color"), gg("Emission Strength"))
+    game_emit = g.vmath('MULTIPLY', 3350, 1600, game_emit, gg("Game Emission"), frame=f_game)
+    game_emit = vscale(3500, 1600, game_emit, 0.5, "emi x CV3 x 0.5")
+    game = g.vmath('ADD', 3650, 1750, game, game_emit, frame=f_game)
+    game = g.vmath('MULTIPLY', 3800, 1750, game, gg("Game Final Tint"), frame=f_game,
+                   label="x CV8")
+    game = vscale(3950, 1750, game, gg("Game Exposure"), "Game")
 
     # --- OUTPUT ----------------------------------------------------------------------
     view = gi_out.outputs["View"]
@@ -1417,6 +1459,16 @@ def sync_game_preview(material):
             sock = node.inputs.get("SSS Blend")
             if sock is not None and not sock.is_linked:
                 sock.default_value = 0.0
+    data = smash_bridge.matl_data(ctx.data_source)
+    for vec, socket_name in (("CustomVector13", "Game Diffuse Tint"),
+                             ("CustomVector8", "Game Final Tint"),
+                             ("CustomVector3", "Game Emission")):
+        v = data.vectors.get(vec) if data is not None else None
+        value = tuple(float(c) for c in v.value[:3]) + (1.0,) if v is not None else (1.0,) * 4
+        for node in master_nodes(material):
+            sock = node.inputs.get(socket_name)
+            if sock is not None and not sock.is_linked:
+                sock.default_value = value
     return v30 is not None
 
 
@@ -1435,6 +1487,11 @@ class SUB_OP_hb_game_preview(Operator):
     transition: bpy.props.FloatProperty(
         name='Transition', default=0.0, min=0.0, max=1.0, subtype='FACTOR',
         description='Preview the in-game transition (Metal Box, metal ditto) at this factor')
+    transition_material: bpy.props.EnumProperty(
+        name='Material',
+        items=(('METAL', "Metal Box", "0.257 grey metal"),
+               ('GOLD', "Gold", "Gold metal (Xerneas)")),
+        default='METAL')
 
     def execute(self, context):
         if MASTER_NAME in bpy.data.node_groups:
@@ -1455,6 +1512,11 @@ class SUB_OP_hb_game_preview(Operator):
                 sock = node.inputs.get("Transition Preview")
                 if sock is not None and not sock.is_linked:
                     sock.default_value = self.transition if self.view == '4' else 0.0
+                sock = node.inputs.get("Transition Color")
+                if sock is not None and not sock.is_linked:
+                    sock.default_value = ((0.382, 0.304, 0.023, 1.0)
+                                          if self.transition_material == 'GOLD'
+                                          else (0.257, 0.257, 0.257, 1.0))
             count += 1
         if not count:
             self.report({'WARNING'}, "No HB Master materials in this file")
