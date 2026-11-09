@@ -47,6 +47,7 @@ CLASSES = (
     master_shader.SUB_OP_hb_master_shader_convert,
     master_shader.SUB_OP_hb_master_shader_preset,
     master_shader.SUB_OP_hb_surface_detail,
+    master_shader.SUB_OP_hb_game_preview,
     master_shader.SUB_PT_hb_master_shader,
     vanilla_check.SUB_OP_hb_vanilla_check,
     vanilla_check.SUB_OP_hb_vanilla_intended,

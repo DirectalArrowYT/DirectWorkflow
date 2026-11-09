@@ -37,7 +37,7 @@ from bpy.props import BoolProperty, EnumProperty
 from mathutils import Vector
 
 MASTER_NAME = "HB Master Shader"
-MASTER_VERSION = 4
+MASTER_VERSION = 5
 VERSION_KEY = "hb_master_version"
 
 # Names the baker keys off. BAKE_SHADER is core.OVERRIDE_NODE_SHADER.
@@ -79,9 +79,10 @@ INTERFACE = [
         _S("Normal", V, (0.0, 0.0, 0.0), hide=True,
            desc="From a Normal Map or Bump node. Empty = smooth mesh normals. "
                 "Baked into _nor"),
-        _S("View", I, 0, 0, 3,
+        _S("View", I, 0, 0, 4,
            desc="0 Toon (final look)   1 COL: exactly what bakes into _col   "
-                "2 PRM: R metal/SSS, G rough, B AO   3 PBR preview of the bake data"),
+                "2 PRM: R metal/SSS, G rough, B AO   3 PBR preview of the bake data   "
+                "4 Game: Smash's fighter shading of the bake data"),
     ]),
     ("Color", False, [
         _S("Tint", C, (1.0, 1.0, 1.0, 1.0), desc="Multiplies Base Color. Baked"),
@@ -214,6 +215,21 @@ INTERFACE = [
         _S("Cavity Distance", F, 0.05, 0.0, 1000.0,
            desc="How far Mesh Cavity looks for nearby surfaces, in scene units. "
                 "Add Surface Detail sets it from the mesh size"),
+    ]),
+    ("Game Preview", True, [
+        _S("SSS Blend", F, 0.5, 0.0, 1.0, True,
+           "CustomVector30.x: how far SSS-masked texels blend to SSS Color. "
+           "Sync Game Preview copies it from the material data. View 4 only"),
+        _S("SSS Falloff", F, 1.5, 0.0, 100.0,
+           desc="CustomVector30.y: how hard the skin light/shadow edge is (vanilla 1.5-4). "
+                "View 4 only"),
+        _S("SSS Color", C, (0.25, 0.03, 0.0, 1.0),
+           desc="CustomVector11: the colour skin blends to. View 4 only"),
+        _S("Game Light", C, (1.0, 1.0, 1.0, 1.0),
+           desc="Colour and strength of the fighter key light, from Light Direction. "
+                "View 4 only"),
+        _S("Game Ambient", C, (0.4, 0.4, 0.45, 1.0),
+           desc="Ambient (diffuse and reflection) light. View 4 only"),
     ]),
 ]
 OUTPUT_NAME = "Shader"
@@ -688,6 +704,75 @@ def _build_nodes(ng):
     g.link(rough, prm.inputs[1])
     g.link(prm_b, prm.inputs[2])
 
+    # --- GAME -------------------------------------------------------------------------
+    # Smash's SFX_PBS fighter shading of the same data that bakes: one key light
+    # from Light Direction plus ambient, fake SSS from CustomVector30/11, GGX
+    # specular with F0 = PRM.a x 0.2, cavity and AO taking specular away.
+    # Unlit (Emission) so it reads the same in EEVEE and Cycles.
+    f_game = g.frame("GAME  -  View 4, viewport only", (0.15, 0.25, 0.35))
+    gg_in = g.add("NodeGroupInput", 900, 2000, frame=f_game)
+
+    def gg(name):
+        return group_socket(gg_in, name)
+
+    sss_blend = g.math('MULTIPLY', 1100, 2100, gg("SSS Mask"), gg("SSS Blend"), frame=f_game,
+                       label="sssBlend = PRM.r x CV30.x")
+    albedo = g.mix('RGBA', 'MIX', 1300, 2100, sss_blend, col, gg("SSS Color"), frame=f_game,
+                   label="Albedo -> CV11")
+    lambert = g.math('MAXIMUM', 1100, 1900, ndl, 0.0, frame=f_game, label="N.L")
+    skin = g.math('MULTIPLY', 1100, 1750, ndl, gg("SSS Falloff"), frame=f_game)
+    skin = g.math('MULTIPLY_ADD', 1250, 1750, skin, 0.5, 0.5, frame=f_game, clamp=True,
+                  label="Skin wrap (CV30.y)")
+    direct = g.mix('FLOAT', 'MIX', 1400, 1850, sss_blend, lambert, skin, frame=f_game,
+                   label="Direct shading")
+    metal = gg("Metalness")
+    dielectric = g.math('SUBTRACT', 1100, 1600, 1.0, metal, frame=f_game)
+    light = g.vmath('SCALE', 1550, 1850, gg("Game Light"), frame=f_game, label="Key light")
+    g.link(direct, light.node.inputs["Scale"])
+    ambient = g.vmath('SCALE', 1550, 1700, gg("Game Ambient"), frame=f_game, label="Ambient x AO")
+    g.link(prm_b, ambient.node.inputs["Scale"])
+    irradiance = g.vmath('ADD', 1700, 1800, light, ambient, frame=f_game)
+    diffuse_c = g.vmath('SCALE', 1550, 2100, albedo, frame=f_game, label="Diffuse albedo")
+    g.link(dielectric, diffuse_c.node.inputs["Scale"])
+    game_diffuse = g.vmath('MULTIPLY', 1850, 2000, diffuse_c, irradiance, frame=f_game,
+                           label="Diffuse")
+
+    # GGX: alpha = roughness^2.
+    a = g.math('MULTIPLY', 1100, 1400, rough, rough, frame=f_game, label="alpha")
+    a2 = g.math('MULTIPLY', 1250, 1400, a, a, frame=f_game)
+    a2 = g.math('MAXIMUM', 1400, 1400, a2, 0.0004, frame=f_game)
+    ndh_g = g.vmath('DOT_PRODUCT', 1100, 1250, N, H, frame=f_game, out="Value")
+    ndh_g = g.math('MAXIMUM', 1250, 1250, ndh_g, 0.0, frame=f_game, label="N.H")
+    d = g.math('MULTIPLY', 1400, 1250, ndh_g, ndh_g, frame=f_game)
+    a2m1 = g.math('SUBTRACT', 1400, 1100, a2, 1.0, frame=f_game)
+    d = g.math('MULTIPLY_ADD', 1550, 1250, d, a2m1, 1.0, frame=f_game)
+    d = g.math('MULTIPLY', 1700, 1250, d, d, frame=f_game)
+    d = g.math('MULTIPLY', 1850, 1250, d, 3.14159265, frame=f_game)
+    ggx = g.math('DIVIDE', 2000, 1300, a2, d, frame=f_game, label="GGX D")
+    ndv_g = g.math('MAXIMUM', 1700, 1100, ndv, 0.1, frame=f_game)
+    vis = g.math('DIVIDE', 1850, 1100, lambert, ndv_g, frame=f_game)
+    vis = g.math('MULTIPLY', 2000, 1100, vis, 0.25, frame=f_game, label="N.L / 4 N.V")
+    spec_d = g.math('MULTIPLY', 2150, 1250, ggx, vis, frame=f_game)
+    spec_d = g.math('MULTIPLY', 2300, 1250, spec_d, cavity, frame=f_game, label="x Cavity")
+    f0_d = g.math('MULTIPLY', 1100, 1000, spec, 0.2, frame=f_game, label="F0 = PRM.a x 0.2")
+    f0 = g.mix('RGBA', 'MIX', 1300, 1000, metal, f0_d, albedo, frame=f_game,
+               label="F0 (metal -> albedo)")
+    spec_light = g.vmath('SCALE', 2450, 1250, gg("Game Light"), frame=f_game)
+    g.link(spec_d, spec_light.node.inputs["Scale"])
+    # Ambient reflection: the cube map, dimmer and blurrier as roughness rises.
+    glossy = g.math('MULTIPLY_ADD', 1700, 950, rough, -0.7, 1.0, frame=f_game,
+                    label="Env sharpness")
+    env_amt = g.math('MULTIPLY', 1850, 950, glossy, prm_b, frame=f_game)
+    env_amt = g.math('MULTIPLY', 2000, 950, env_amt, cavity, frame=f_game, label="x AO x Cavity")
+    env = g.vmath('SCALE', 2150, 950, gg("Game Ambient"), frame=f_game)
+    g.link(env_amt, env.node.inputs["Scale"])
+    spec_in = g.vmath('ADD', 2600, 1150, spec_light, env, frame=f_game)
+    game_spec = g.vmath('MULTIPLY', 2750, 1100, spec_in, f0, frame=f_game, label="Specular")
+    game = g.vmath('ADD', 2900, 1700, game_diffuse, game_spec, frame=f_game)
+    game_emit = g.vmath('SCALE', 2900, 1500, gg("Emission Color"), frame=f_game)
+    g.link(gg("Emission Strength"), game_emit.node.inputs["Scale"])
+    game = g.vmath('ADD', 3050, 1650, game, game_emit, frame=f_game, label="Game")
+
     # --- OUTPUT ----------------------------------------------------------------------
     view = gi_out.outputs["View"]
     is_col = g.math('COMPARE', 1700, -200, view, 1.0, 0.5, frame=f_out, label="View = COL")
@@ -695,6 +780,8 @@ def _build_nodes(ng):
     is_pbr = g.math('COMPARE', 1700, -520, view, 3.0, 0.5, frame=f_out, label="View = PBR")
     shown = g.mix('RGBA', 'MIX', 1900, 100, is_col, toon, col, frame=f_out)
     shown = g.mix('RGBA', 'MIX', 2050, 100, is_prm, shown, prm.outputs["Color"], frame=f_out)
+    is_game = g.math('COMPARE', 1700, -680, view, 4.0, 0.5, frame=f_out, label="View = Game")
+    shown = g.mix('RGBA', 'MIX', 2100, 0, is_game, shown, game, frame=f_out)
 
     emit = g.add("ShaderNodeEmission", 2200, 150, frame=f_out)
     g.link(shown, emit.inputs["Color"])
@@ -1227,6 +1314,71 @@ class SUB_OP_hb_surface_detail(Operator):
         return {'FINISHED'}
 
 
+def sync_game_preview(material):
+    """Copy the material's CustomVector30.x/.y and CustomVector11 into its Game Preview
+    inputs. Returns True when the material had SSS data to copy."""
+    from . import core, smash_bridge
+    ctx = core.MatlContext(material)
+    data = smash_bridge.matl_data(ctx.data_source) if ctx.is_subsurface else None
+    v30 = data.vectors.get('CustomVector30') if data is not None else None
+    v11 = data.vectors.get('CustomVector11') if data is not None else None
+    for node in master_nodes(material):
+        if v30 is not None:
+            for name, value in (("SSS Blend", float(v30.value[0])),
+                                ("SSS Falloff", float(v30.value[1]))):
+                sock = node.inputs.get(name)
+                if sock is not None and not sock.is_linked:
+                    sock.default_value = value
+        if v11 is not None:
+            sock = node.inputs.get("SSS Color")
+            if sock is not None and not sock.is_linked:
+                sock.default_value = tuple(float(c) for c in v11.value[:3]) + (1.0,)
+        if v30 is None:
+            # Not a skin shader in game: no subsurface at all.
+            sock = node.inputs.get("SSS Blend")
+            if sock is not None and not sock.is_linked:
+                sock.default_value = 0.0
+    return v30 is not None
+
+
+class SUB_OP_hb_game_preview(Operator):
+    """Show every HB Master material as Smash shades it (View 4), with its SSS values from the material data"""
+    bl_idname = 'sub.hb_game_preview'
+    bl_label = 'Game Preview'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    view: bpy.props.EnumProperty(
+        name='View',
+        items=(('4', "Game", "Smash's fighter shading of the bake data"),
+               ('0', "Toon", "Back to the toon look"),
+               ('3', "PBR", "Blender PBR preview of the bake data")),
+        default='4')
+
+    def execute(self, context):
+        if MASTER_NAME in bpy.data.node_groups:
+            ng = bpy.data.node_groups[MASTER_NAME]
+            if ng.get(VERSION_KEY, 0) < MASTER_VERSION:
+                build_master_group()
+        count = skin = 0
+        for mat in bpy.data.materials:
+            nodes = master_nodes(mat)
+            if not nodes:
+                continue
+            if self.view == '4' and sync_game_preview(mat):
+                skin += 1
+            for node in nodes:
+                sock = node.inputs.get("View")
+                if sock is not None and not sock.is_linked:
+                    sock.default_value = int(self.view)
+            count += 1
+        if not count:
+            self.report({'WARNING'}, "No HB Master materials in this file")
+            return {'CANCELLED'}
+        extra = f", SSS from material data on {skin}" if self.view == '4' else ""
+        self.report({'INFO'}, f"View {self.view} on {count} material(s){extra}")
+        return {'FINISHED'}
+
+
 class SUB_PT_hb_master_shader(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -1253,4 +1405,8 @@ class SUB_PT_hb_master_shader(Panel):
         layout.operator_menu_enum('sub.hb_master_shader_preset', 'preset',
                                   text='Apply Preset to Active Material', icon='PRESET')
         layout.operator('sub.hb_surface_detail', icon='TEXTURE')
+        row = layout.row(align=True)
+        row.operator('sub.hb_game_preview', text='Game Preview', icon='SHADING_RENDERED').view = '4'
+        row.operator('sub.hb_game_preview', text='Toon', icon='SHADING_SOLID').view = '0'
+
         layout.operator('sub.hb_hair_strands_add', icon='STRANDS')
