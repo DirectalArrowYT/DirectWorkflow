@@ -50,6 +50,8 @@ CLASSES = (
     master_shader.SUB_PT_hb_master_shader,
     vanilla_check.SUB_OP_hb_vanilla_check,
     vanilla_check.SUB_OP_hb_vanilla_intended,
+    vanilla_check.SUB_OP_hb_vanilla_preset,
+    vanilla_check.SUB_OP_hb_vanilla_match,
     vanilla_check.SUB_PT_hb_vanilla_check,
     hair_strands.SUB_OP_hb_hair_strands_add,
 )

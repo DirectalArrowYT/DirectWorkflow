@@ -373,6 +373,11 @@ class SUB_PT_hb_vanilla_check(Panel):
     def draw(self, context):
         layout = self.layout
         layout.operator('sub.hb_vanilla_check', icon='VIEWZOOM')
+        row = layout.row(align=True)
+        row.operator_menu_enum('sub.hb_vanilla_match', 'character',
+                               text='Match Fighter', icon='COMMUNITY')
+        row.operator_menu_enum('sub.hb_vanilla_preset', 'preset',
+                               text='Active Material', icon='PRESET')
         results = load_results(context.scene)
         if not results:
             layout.label(text='Not run yet', icon='INFO')
@@ -400,3 +405,194 @@ class SUB_PT_hb_vanilla_check(Panel):
                                       emboss=False)
                     op.material = mat.name
                     op.flag = f['id']
+
+
+# =============================================================================
+# VANILLA PRESETS
+# =============================================================================
+# PRM values copied from one vanilla texture set each (median per channel).
+# Variation and Mesh Cavity come from that set's p5-p95 spread, capped so
+# noise does not stand in for painted detail. CustomVector30/11 are the
+# material's SSS blend/falloff and colour, copied only when asked.
+VANILLA_PRESETS = {
+    'SEPH_SKIN':  dict(label="Sephiroth skin", kind='SKIN', src="edge skin_edge_001",
+                       rough=0.867, spec=0.098, metal=0.0, sss=0.89, rough_var=0.5, spec_var=0.07,
+                       cavity=0.21, cv30=(0.4, 1.5, 1.0, 1.0), cv11=(0.133, 0.067, 0.05, 1.0)),
+    'PYRA_SKIN':  dict(label="Pyra / Mythra skin", kind='SKIN', src="eflame skin_flame_001",
+                       rough=0.78, spec=0.098, metal=0.0, sss=1.0, rough_var=0.05, spec_var=0.0,
+                       cavity=0.0, cv30=(0.5, 4.0, 1.0, 1.0), cv11=(0.37, 0.174, 0.112, 1.0)),
+    'MARIO_SKIN': dict(label="Mario skin", kind='SKIN', src="mario skin_mario_001",
+                       rough=0.718, spec=0.086, metal=0.0, sss=1.0, rough_var=0.12, spec_var=0.0,
+                       cavity=0.64, cv30=(0.5, 1.5, 1.0, 1.0), cv11=(0.25, 0.033, 0.0, 1.0)),
+    'SEPH_COAT':  dict(label="Sephiroth coat", kind='CLOTH', src="edge def_edge_001",
+                       rough=0.663, spec=0.047, metal=0.0, sss=0.0, rough_var=0.5, spec_var=0.6,
+                       cavity=0.16),
+    'SEPH_METAL': dict(label="Sephiroth metal trim", kind='METAL', src="edge def_edge_002 (metal texels)",
+                       rough=0.6, spec=0.16, metal=0.718, sss=0.0, rough_var=0.5, spec_var=0.0,
+                       cavity=0.0),
+    'PYRA_OUTFIT': dict(label="Pyra outfit", kind='CLOTH', src="eflame def_flame_001",
+                        rough=0.435, spec=0.161, metal=0.0, sss=0.0, rough_var=0.5, spec_var=0.17,
+                        cavity=0.0),
+    'MYTHRA_OUTFIT': dict(label="Mythra outfit", kind='CLOTH', src="elight def_light_003",
+                          rough=0.643, spec=0.157, metal=0.0, sss=0.0, rough_var=0.46, spec_var=0.08,
+                          cavity=0.0),
+    'MARIO_CLOTH': dict(label="Mario overalls & cap", kind='CLOTH', src="mario body",
+                        rough=0.835, spec=0.161, metal=0.0, sss=0.0, rough_var=0.5, spec_var=0.6,
+                        cavity=0.06),
+    'SEPH_HAIR':  dict(label="Sephiroth hair", kind='HAIR', src="edge alp_edge_000",
+                       rough=0.878, spec=0.059, metal=0.0, sss=0.0, rough_var=0.27, spec_var=0.11,
+                       cavity=0.0),
+    'PYRA_HAIR':  dict(label="Pyra / Mythra hair", kind='HAIR', src="eflame alp_flame_001",
+                       rough=0.643, spec=0.161, metal=0.0, sss=0.0, rough_var=0.5, spec_var=0.12,
+                       cavity=0.0),
+    'MARIO_HAIR': dict(label="Mario hair & mustache", kind='HAIR', src="mario alp_mario_001",
+                       rough=0.698, spec=0.063, metal=0.0, sss=0.0, rough_var=0.05, spec_var=0.11,
+                       cavity=0.0),
+    'SEPH_EYE':   dict(label="Sephiroth eye", kind='EYE', src="edge EyeL",
+                       rough=0.337, spec=0.153, metal=0.0, sss=0.0, rough_var=0.0, spec_var=0.0,
+                       cavity=0.0),
+    'MARIO_EYE':  dict(label="Mario eye", kind='EYE', src="mario EyeL",
+                       rough=0.165, spec=0.129, metal=0.0, sss=0.0, rough_var=0.0, spec_var=0.0,
+                       cavity=0.0),
+}
+
+VANILLA_PRESET_ITEMS = tuple(
+    (key, p['label'], f"PRM values from {p['src']}") for key, p in VANILLA_PRESETS.items())
+
+# Which preset each surface takes when matching a whole character.
+CHARACTERS = {
+    'SEPHIROTH': {'SKIN': 'SEPH_SKIN', 'HAIR': 'SEPH_HAIR', 'CLOTH': 'SEPH_COAT',
+                  'SHINY': 'SEPH_COAT', 'METAL': 'SEPH_METAL', 'EYE': 'SEPH_EYE'},
+    'PYRA':      {'SKIN': 'PYRA_SKIN', 'HAIR': 'PYRA_HAIR', 'CLOTH': 'PYRA_OUTFIT',
+                  'SHINY': 'PYRA_OUTFIT', 'METAL': 'SEPH_METAL', 'EYE': 'SEPH_EYE'},
+    'MYTHRA':    {'SKIN': 'PYRA_SKIN', 'HAIR': 'PYRA_HAIR', 'CLOTH': 'MYTHRA_OUTFIT',
+                  'SHINY': 'MYTHRA_OUTFIT', 'METAL': 'SEPH_METAL', 'EYE': 'SEPH_EYE'},
+    'MARIO':     {'SKIN': 'MARIO_SKIN', 'HAIR': 'MARIO_HAIR', 'CLOTH': 'MARIO_CLOTH',
+                  'SHINY': 'MARIO_CLOTH', 'METAL': 'SEPH_METAL', 'EYE': 'MARIO_EYE'},
+}
+CHARACTER_ITEMS = (
+    ('SEPHIROTH', "Sephiroth", "Matte skin, low-spec coat and hair"),
+    ('PYRA', "Pyra", "Softer skin falloff, glossier outfit and hair"),
+    ('MYTHRA', "Mythra", "Pyra's skin and hair with Mythra's outfit"),
+    ('MARIO', "Mario", "Rough cloth, crease cavity on the skin"),
+)
+
+
+def _set(node, name, value):
+    sock = node.inputs.get(name)
+    if sock is None or sock.is_linked:
+        return False
+    sock.default_value = value
+    return True
+
+
+def apply_vanilla_preset(material, key, detail=True, copy_sss=False):
+    """Copy one vanilla set's PRM values onto a material's HB Master nodes.
+
+    Only the physical values change; the toon look (shadow tint, rim, ...)
+    stays as tuned. Returns a list of what changed, for the report.
+    """
+    from .master_shader import master_nodes
+    preset = VANILLA_PRESETS[key]
+    done = []
+    for node in master_nodes(material):
+        for name, value in (("Roughness", preset['rough']), ("Specular", preset['spec']),
+                            ("Metalness", preset['metal']), ("SSS Mask", preset['sss'])):
+            if _set(node, name, value):
+                done.append(name)
+        if detail:
+            for name, value in (("Roughness Variation", preset['rough_var']),
+                                ("Specular Variation", preset['spec_var']),
+                                ("Mesh Cavity", preset['cavity'])):
+                if _set(node, name, value):
+                    done.append(name)
+    if copy_sss and preset['kind'] == 'SKIN':
+        ctx = core.MatlContext(material)
+        data = smash_bridge.matl_data(ctx.data_source) if ctx.is_subsurface else None
+        if data is not None:
+            keep_y = 'cv30_y' in intended(material)
+            for param in ('CustomVector30', 'CustomVector11'):
+                entry = data.vectors.get(param)
+                if entry is None:
+                    continue
+                value = list(preset['cv30' if param == 'CustomVector30' else 'cv11'])
+                if param == 'CustomVector30' and keep_y:
+                    value[1] = float(entry.value[1])
+                entry.value = value
+                done.append(param + (" (kept .y, marked intended)" if param == 'CustomVector30'
+                                     and keep_y else ""))
+    return sorted(set(done))
+
+
+class SUB_OP_hb_vanilla_preset(Operator):
+    """Copy a vanilla material's PRM values onto the active material's HB Master Shader"""
+    bl_idname = 'sub.hb_vanilla_preset'
+    bl_label = 'Apply Vanilla Material'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preset: bpy.props.EnumProperty(name='Vanilla Material', items=VANILLA_PRESET_ITEMS)
+    detail: bpy.props.BoolProperty(
+        name='Surface Detail', default=True,
+        description='Also set roughness/specular variation and mesh cavity from the set\'s spread')
+    copy_sss: bpy.props.BoolProperty(
+        name='Copy SSS (CustomVector30/11)', default=False,
+        description='Skin presets: also copy the subsurface blend, falloff and colour into the '
+                    'material data. A CustomVector30.y marked intended is kept')
+
+    @classmethod
+    def poll(cls, context):
+        from .master_shader import master_nodes
+        obj = context.active_object
+        return obj is not None and bool(master_nodes(obj.active_material))
+
+    def execute(self, context):
+        mat = context.active_object.active_material
+        done = apply_vanilla_preset(mat, self.preset, self.detail, self.copy_sss)
+        label = VANILLA_PRESETS[self.preset]['label']
+        self.report({'INFO'}, f"{mat.name}: {label} ({', '.join(done) or 'nothing to set'})")
+        return {'FINISHED'}
+
+
+class SUB_OP_hb_vanilla_match(Operator):
+    """Give every HB Master material on the selected meshes the PRM values of one vanilla fighter, surface by surface"""
+    bl_idname = 'sub.hb_vanilla_match'
+    bl_label = 'Match Vanilla Fighter'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    character: bpy.props.EnumProperty(name='Fighter', items=CHARACTER_ITEMS)
+    detail: bpy.props.BoolProperty(name='Surface Detail', default=True)
+    copy_sss: bpy.props.BoolProperty(
+        name='Copy SSS (CustomVector30/11)', default=False,
+        description='Also copy skin subsurface values into the material data. A '
+                    'CustomVector30.y marked intended is kept')
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects)
+
+    def execute(self, context):
+        from .master_shader import master_nodes
+        table = CHARACTERS[self.character]
+        lines, seen = [], set()
+        for obj in context.selected_objects:
+            if obj.type != 'MESH':
+                continue
+            for slot in obj.material_slots:
+                mat = slot.material
+                if mat is None or mat.name in seen or not master_nodes(mat):
+                    continue
+                seen.add(mat.name)
+                kind, _ctx = surface_of(mat)
+                key = table.get(kind)
+                if key is None:
+                    lines.append(f"{mat.name}: {kind.title()} - left alone")
+                    continue
+                apply_vanilla_preset(mat, key, self.detail, self.copy_sss)
+                lines.append(f"{mat.name}: {VANILLA_PRESETS[key]['label']}")
+        for line in lines:
+            print("  " + line)
+        if not lines:
+            self.report({'WARNING'}, "No HB Master materials on the selected meshes")
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"Matched {len(lines)} material(s) to {self.character.title()}")
+        return {'FINISHED'}

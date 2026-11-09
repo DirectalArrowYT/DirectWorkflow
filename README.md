@@ -71,6 +71,7 @@ Two tools on top of the bake:
 
 - **Add Surface Detail** (Master Shader panel) varies roughness and specular, wears edges and darkens creases on the selected meshes' HB Master materials. Amounts are picked per surface (skin, hair, cloth, shiny, metal) and sized from the mesh; tweak them under the node's *Surface Detail* inputs. It all bakes into PRM.g, PRM.a and NOR.a, and with every amount at 0 the bake is unchanged.
 - **Check Against Vanilla** (Vanilla Check panel) compares each material's PRM, NOR and subsurface values with the same kind of surface on Sephiroth, Pyra, Mythra and Mario, and lists what falls outside, also in the *HB Vanilla Check* text. Mark a warning intended (for example an anime hard shadow from a high CustomVector30.y) and it stays listed but greyed out.
+- **Match Fighter / Active Material** (Vanilla Check panel) copy a vanilla fighter's PRM values (roughness, specular, metalness, SSS mask, and Surface Detail amounts from the set's spread) onto HB Master materials: one material at a time, or every material on the selected meshes by surface. The toon look stays as tuned; skin SSS values (CustomVector30/11) are copied only when asked, and a CustomVector30.y marked intended is kept.
 
 ## Installation
 Check the [wiki](https://github.com/ssbucarlos/smash-ultimate-blender/wiki) for tutorials and usage instructions. 
