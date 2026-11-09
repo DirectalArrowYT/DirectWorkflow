@@ -37,8 +37,7 @@ from bpy.types import Operator, Panel
 
 from . import core, master_shader
 from .operators import _find_texture_slot, _load_or_refresh_image, apply_target_materials
-from ..model.material.create_matl_from_blender_materials import (
-    get_side_loaded_twin, resolve_material_data_source)
+from .smash_bridge import get_side_loaded_twin, prefer_side_loaded, resolve_material_data_source
 
 PROJECT_FOLDER = "texturecraft"
 PROJECT_NAME = "project.tcraft"
@@ -212,9 +211,7 @@ def launch(port):
 
 def data_slot(material, param):
     """The texture slot export reads: the side-loaded twin's when that is where the data is."""
-    scene_props = getattr(bpy.context.scene, 'sub_scene_properties', None)
-    prefer_side_loaded = bool(scene_props and scene_props.export_prefer_sideloaded_materials)
-    slot = _find_texture_slot(resolve_material_data_source(material, prefer_side_loaded), param)
+    slot = _find_texture_slot(resolve_material_data_source(material, prefer_side_loaded()), param)
     if slot is None:
         twin = get_side_loaded_twin(material)
         if twin is not None:
@@ -375,8 +372,8 @@ def read_image(image):
         return None
     px = px.reshape(height, width, 4)[::-1].copy()
     if image.is_float and image.colorspace_settings.name != "Non-Color":
-        from ..extras.smash_vp_hb import _linear_to_srgb
-        px[..., :3] = _linear_to_srgb(np.clip(px[..., :3], 0.0, 1.0))
+        from .smash_bridge import linear_to_srgb
+        px[..., :3] = linear_to_srgb(np.clip(px[..., :3], 0.0, 1.0))
     return px
 
 
@@ -390,13 +387,13 @@ def read_png(path):
 
 
 def write_png(path, px):
-    from ..extras.smash_vp_hb import _encode_png
-    _encode_png(path, (np.clip(px, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8))
+    from .smash_bridge import encode_png
+    encode_png(path, (np.clip(px, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8))
 
 
 def resized(px, width, height):
-    from ..extras.smash_vp_hb import _resize
-    return _resize(px, width, height)
+    from .smash_bridge import resize
+    return resize(px, width, height)
 
 
 def gray(values):
@@ -710,7 +707,7 @@ def upstream_image_nodes(socket_, depth=0, found=None):
 
 def main_shader(material):
     """The HB Master or Principled node this material renders through, or None."""
-    from ..extras.smash_vp_hb import master_node
+    from .smash_bridge import master_node
     node = master_node(material)
     if node is not None or not material.use_nodes:
         return node

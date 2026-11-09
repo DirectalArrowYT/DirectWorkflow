@@ -37,6 +37,8 @@
 # =============================================================================
 
 import bpy
+
+from . import smash_bridge
 import os
 import re
 import random
@@ -83,7 +85,7 @@ SKIP_MATERIALS = set()
 # This grouping is shared with model export (create_matl_from_blender_materials.py,
 # export_nutexb.py) so a bundled bake's file names always match what export
 # looks for - see source/material_grouping.py.
-from ..material_grouping import MATERIAL_MERGE_SUFFIXES, MATERIAL_GROUPS, group_key_for
+from .smash_bridge import MATERIAL_MERGE_SUFFIXES, MATERIAL_GROUPS, group_key_for
 
 USE_SELECTION_ONLY = True
 DRY_RUN = False
@@ -322,7 +324,7 @@ HB_MASTER_PREFIX     = "HB Master Shader"
 #
 # See Smush-Material-Research/Textures.md and Material Parameters.md.
 # =============================================================================
-from ..model.material import shader_info
+from .smash_bridge import shader_info
 
 
 class MatlContext:
@@ -356,18 +358,13 @@ class MatlContext:
         # yet depending on when this runs, and losing the side-load resolution
         # is far better than the whole bake dying over a missing preference.
         try:
-            from ..model.material.create_matl_from_blender_materials import (
-                resolve_material_data_source,
-            )
-            scene_props = getattr(bpy.context.scene, 'sub_scene_properties', None)
-            prefer_side_loaded = bool(
-                scene_props and scene_props.export_prefer_sideloaded_materials)
-            self.data_source = resolve_material_data_source(material, prefer_side_loaded)
+            from .smash_bridge import prefer_side_loaded, resolve_material_data_source
+            self.data_source = resolve_material_data_source(material, prefer_side_loaded())
         except Exception as e:
             self.notes.append(f'could not resolve side-loaded data ({e}) - using this material')
             self.data_source = material
 
-        sub_matl_data = getattr(self.data_source, 'sub_matl_data', None)
+        sub_matl_data = smash_bridge.matl_data(self.data_source)
         if sub_matl_data is None or not sub_matl_data.shader_label:
             # No Smash shader chosen yet. The HB Master Shader already says
             # what the surface is, so bake for the shader it will need rather
@@ -1920,7 +1917,7 @@ def sss_params(materials):
         ctx = MatlContext(material)
         if not ctx.is_subsurface:
             continue
-        data = getattr(ctx.data_source, 'sub_matl_data', None)
+        data = smash_bridge.matl_data(ctx.data_source)
         if data is None:
             continue
         v11 = data.vectors.get('CustomVector11')
@@ -2606,7 +2603,7 @@ import subprocess
 import struct
 import glob
 
-from ..model.material.texture.convert_nutexb_to_png import get_ultimate_tex_path
+from .smash_bridge import get_ultimate_tex_path
 
 
 def settings_file():

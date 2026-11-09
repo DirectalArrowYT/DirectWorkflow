@@ -1,4 +1,6 @@
 import bpy
+
+from . import smash_bridge
 import os
 from bpy.types import Operator
 from bpy.props import StringProperty, BoolProperty, EnumProperty
@@ -86,7 +88,7 @@ class SUB_OP_bake_texs_compile_only(Operator):
 
 def _find_texture_slot(material, param_id_name):
     """The existing sub_matl_data.textures entry for a param, or None."""
-    sub_matl_data = getattr(material, 'sub_matl_data', None)
+    sub_matl_data = smash_bridge.matl_data(material)
     if sub_matl_data is None:
         return None
     for texture in sub_matl_data.textures:
@@ -126,8 +128,7 @@ def apply_target_materials(base_material, target):
     leave the twin pointing at stale textures while export, reading from
     the twin, quietly ignored everything that was just baked.
     """
-    from ..model.material.create_matl_from_blender_materials import get_side_loaded_twin
-    from ..material_grouping import SIDE_LOAD_SUFFIX
+    from .smash_bridge import SIDE_LOAD_SUFFIX, get_side_loaded_twin
 
     # Already a twin: write to it and stop, rather than hunting for a twin
     # of a twin.
@@ -182,9 +183,8 @@ class SUB_OP_bake_texs_apply_to_materials(Operator):
         layout = self.layout
         layout.prop(self, 'target')
 
-        scene_props = context.scene.sub_scene_properties
-        if (self.target != 'LIVE'
-                and scene_props.export_prefer_sideloaded_materials):
+        from .smash_bridge import prefer_side_loaded
+        if self.target != 'LIVE' and prefer_side_loaded(context):
             box = layout.box()
             box.label(text='Export is reading from side-loaded copies,', icon='INFO')
             box.label(text='so those are the ones that need the bakes.')
@@ -245,7 +245,7 @@ class SUB_OP_bake_texs_apply_to_materials(Operator):
                 bake_info = core.LAST_BAKE_INFO.get(stem)
                 if bake_info and 'custom_vector_3' in bake_info:
                     cv3_value = bake_info['custom_vector_3']
-                    sub_matl_data = getattr(material, 'sub_matl_data', None)
+                    sub_matl_data = smash_bridge.matl_data(material)
                     cv3 = sub_matl_data.vectors.get('CustomVector3') if sub_matl_data else None
                     if cv3 is not None:
                         cv3.value = cv3_value
@@ -644,7 +644,7 @@ class SUB_OP_bake_texs_remap_uvs(Operator):
                     material = slot.material
                     if material is None or material.name in materials_touched:
                         continue
-                    sub_matl_data = getattr(material, 'sub_matl_data', None)
+                    sub_matl_data = smash_bridge.matl_data(material)
                     if sub_matl_data is None:
                         continue
                     uv_transform = sub_matl_data.vectors.get('CustomVector6')

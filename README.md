@@ -52,6 +52,21 @@ Blender Plugin that contains utilities for Smash Ultimate models and animations.
    - Improved bone hierarchy management for complex character setups
    - Full support for both creating and removing exo skeletons as needed
 
+## HB Smash PBR (standalone add-on)
+Bake Textures, the HB Master Shader and the TextureCraft round trip also ship as their own add-on, for Blender installs or files that don't use the rest of this tool.
+
+```
+python3 tools/build_hb_smash_pbr.py              # dist/hb_smash_pbr.zip, texture tool for every OS
+python3 tools/build_hb_smash_pbr.py --platform linux
+```
+
+Install `dist/hb_smash_pbr.zip` from Edit > Preferences > Add-ons > Install from Disk. The panels are in the 3D Viewport sidebar under **Smash**.
+
+- Fighters imported with this tool keep their Smash material data in the .blend, so the standalone add-on still bakes skin, SSS and emissive by the material's real shader even when this tool isn't enabled.
+- Any other material bakes as plain PBR, or by what its HB Master Shader preset says.
+- With both add-ons enabled, whichever loads first provides the panels and the other stays off.
+- The code lives in `source/bake_texs`; the build copies it, so edit it there and rebuild.
+
 ## Installation
 Check the [wiki](https://github.com/ssbucarlos/smash-ultimate-blender/wiki) for tutorials and usage instructions. 
 1. Select a version

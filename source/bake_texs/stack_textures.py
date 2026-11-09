@@ -41,6 +41,8 @@ import os
 
 import bpy
 
+from . import smash_bridge
+
 from . import core
 
 # The maps a stacked material needs, and the colour space each is read in.
@@ -292,7 +294,7 @@ def apply_stacked_textures(material, out_stem, bake_dir, uv_mode='REMAP'):
         slot.image = _load_or_refresh_image(path, f'{out_stem}{suffix}', colorspace)
         applied += 1
 
-    sub_matl_data = getattr(material, 'sub_matl_data', None)
+    sub_matl_data = smash_bridge.matl_data(material)
     uv_transform = sub_matl_data.vectors.get('CustomVector6') if sub_matl_data else None
     if uv_transform is not None:
         uv_transform.value = (REMAP_UV_TRANSFORM if uv_mode == 'REMAP'

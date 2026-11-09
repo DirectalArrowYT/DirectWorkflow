@@ -406,9 +406,16 @@ _registered_here = []
 
 def register():
     _registered_here.clear()
+    # The standalone HB Smash PBR add-on is this same bake_texs package; when it
+    # is enabled first it owns those panels and operators, so leave them be.
+    skip_bake_texs = source.bake_texs.owned_elsewhere()
+    if skip_bake_texs:
+        print("HB Smash PBR add-on is enabled; using its Bake Textures panels")
     for cls in classes:
         # Some modules (extras, bake_texs) register their own classes first.
         if getattr(cls, 'is_registered', False) or cls in _registered_here:
+            continue
+        if skip_bake_texs and cls in source.bake_texs.CLASSES:
             continue
         try:
             bpy.utils.register_class(cls)
