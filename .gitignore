@@ -6,4 +6,5 @@ test/*.zip
 __pycache__
 .vscode/*
 .DS_Store
-.current_commitdist/
+.current_commit
+dist/
