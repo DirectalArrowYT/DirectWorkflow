@@ -44,7 +44,7 @@ VERSION_KEY = "hb_master_version"
 BAKE_SHADER_NAME = "BAKE_SHADER"
 BAKE_COLOR_NAME = "HB_BakeColor"
 # The PRM/NOR values after Surface Detail. The baker reads these instead of the
-# instance sockets once any detail is on (core.hb_detail_active).
+# instance sockets once any detail is on (core.hb_detail_channels).
 ROUGH_FINAL_NAME = "HB_Roughness_Final"
 SPEC_FINAL_NAME = "HB_Specular_Final"
 CAVITY_FINAL_NAME = "HB_Cavity_Final"

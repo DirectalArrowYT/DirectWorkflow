@@ -10,7 +10,7 @@ side-loaded twin's when that is the one exported), else the newest bake of the
 material, and samples them only where the material's mesh has UVs, so unused
 texture space filled with defaults does not count.
 
-A flag the user means (Dabi's CustomVector30.y 40-44 is a hard anime shadow, on
+A flag the user means (a CustomVector30.y of 40-44 for a hard anime shadow, on
 purpose) can be marked intended per material; it is then listed but greyed out.
 """
 import json
@@ -158,7 +158,7 @@ def surface_of(material):
     else:
         kind = guess_preset(material.name)
     # A subsurface shader makes an unnamed surface skin; hair and eyes on one
-    # (Dabi's hair, every vanilla eye) keep their own ranges.
+    # (hair run on the skin shader, every vanilla eye) keep their own ranges.
     if ctx.is_subsurface and kind in ('CLOTH', 'SHINY', 'METAL'):
         kind = 'SKIN'
     return kind, ctx
