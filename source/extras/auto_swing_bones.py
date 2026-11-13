@@ -24,6 +24,7 @@ from bpy.types import Operator, Panel, PropertyGroup, UIList
 from mathutils import Vector
 
 from .swing_profiles import GENERIC_PROFILES, SWING_PROFILES
+from ..blender_compat import is_armature_bone_selected
 
 # ---------------------------------------------------------------------------
 # Naming
@@ -310,7 +311,8 @@ def linear_run(bone):
     return run
 
 
-def detect_chains(armature_data, only_selected=False, min_length=2, info=None):
+def detect_chains(armature_data, only_selected=False, min_length=2, info=None,
+                  armature_obj=None):
     """Find swing candidates on `armature_data`.
 
     A candidate is the root of a linear run whose name identifies a swing part
@@ -319,7 +321,17 @@ def detect_chains(armature_data, only_selected=False, min_length=2, info=None):
     considered separately.
     """
     bones = list(armature_data.bones)
-    selected = {b.name for b in bones if b.select} if only_selected else None
+    # Blender 5 removed Bone.select and keeps selection on the pose bone, so
+    # reading it off the armature data raises and "Only Selected Bones" takes
+    # the whole operator down with it. The object is what knows, so find it
+    # when the caller did not say which one.
+    selected = None
+    if only_selected:
+        if armature_obj is None:
+            armature_obj = next((o for o in bpy.data.objects
+                                 if o.type == 'ARMATURE' and o.data is armature_data), None)
+        selected = {b.name for b in bones
+                    if is_armature_bone_selected(armature_obj, b)}
     classified = {b.name: classify_bone(b.name) for b in bones}
 
     found = []
@@ -533,7 +545,8 @@ class SUB_OP_auto_swing_detect(Operator):
         chains = detect_chains(ob.data,
                                only_selected=settings.only_selected,
                                min_length=settings.min_length,
-                               info=info)
+                               info=info,
+                               armature_obj=ob)
         _store(settings.proposals, chains)
         hint = detection_hint(info, settings.min_length)
         if not chains:
@@ -683,7 +696,7 @@ class SUB_OP_auto_swing_build(Operator):
         existing = {c.name for c in ssd.swing_bone_chains}
 
         chains = detect_chains(arma, only_selected=settings.only_selected,
-                               min_length=settings.min_length)
+                               min_length=settings.min_length, armature_obj=ob)
         centers = collision_centers(arma) if settings.assign_collisions else []
 
         built = skipped = 0
